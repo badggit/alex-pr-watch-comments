@@ -48,14 +48,14 @@ await describe('createFakeRunner', async () => {
     await test('resolves 143 early when the request signal aborts during a delay', async () => {
         const fake = createFakeRunner();
         fake.respond('tmux', 'split-window', { stdout: 'late', delayMs: 5000 });
-        const started = Date.now();
+        const started = performance.now();
         const result = await fake.runner.run({
             file: 'tmux',
             args: ['split-window'],
             signal: AbortSignal.timeout(100),
         });
         assert.equal(result.code, 143);
-        assert.ok(Date.now() - started < 2000);
+        assert.ok(performance.now() - started < 2000);
     });
 
     await test('answers code 0 with empty output for a key with no queue', async () => {

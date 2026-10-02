@@ -44,13 +44,13 @@ function errorCode(error: unknown): string | undefined {
 function withQueueLock<T>(dir: string, action: () => T): T {
     fs.mkdirSync(dir, { recursive: true });
     const lock = path.join(dir, 'lock');
-    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    const deadline = performance.now() + LOCK_TIMEOUT_MS;
     for (;;) {
         try {
             fs.mkdirSync(lock);
             break;
         } catch (error) {
-            if (errorCode(error) !== 'EEXIST' || Date.now() > deadline) {
+            if (errorCode(error) !== 'EEXIST' || performance.now() > deadline) {
                 throw error;
             }
             sleepSync(LOCK_RETRY_MS);

@@ -63,6 +63,8 @@ export interface TestEnv {
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
 const FAKE_TOOL = path.join(REPO_ROOT, 'tests', 'stubs', 'fakeTool.ts');
 const TEST_TMUX = '/tmp/prwc-test-socket,1,0';
+// The starttime field of /proc/PID/stat, counted after the closing parenthesis of the command name.
+const PROC_STAT_START_INDEX = 19;
 // Starts the command in the background with all stdio on /dev/null and prints its pid; the shell then exits, so
 // the command is reparented to init and reaped there when it dies.
 const ORPHAN_SCRIPT = '"$@" </dev/null >/dev/null 2>&1 & echo $!';
@@ -133,8 +135,25 @@ function killQuietly(pid: number): void {
     }
 }
 
-// The same ps command as processStart, run synchronously so spawnOrphan and cleanup stay synchronous.
+// The boot-relative start tick (field 22) of /proc/PID/stat. Linux ps derives lstart from the current wall clock
+// minus the uptime, so lstart shifts whenever the wall clock steps; this tick never changes for a live process.
+function procStartTicks(pid: number): string | undefined {
+    let stat: string;
+    try {
+        stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    } catch {
+        return;
+    }
+    const ticks = stat.slice(stat.lastIndexOf(')') + 2).split(' ', PROC_STAT_START_INDEX + 1)[PROC_STAT_START_INDEX];
+    return ticks === undefined || ticks.length === 0 ? undefined : ticks;
+}
+
+// An identity token that stays equal for the whole life of a process, read synchronously so spawnOrphan and cleanup
+// stay synchronous. Elsewhere than Linux (macOS) ps lstart is recorded at process start and is stable.
 function startTimeSync(pid: number): string | undefined {
+    if (process.platform === 'linux') {
+        return procStartTicks(pid);
+    }
     const ps = spawnSync(PS_PATH, ['-o', 'lstart=', '-p', String(pid)], {
         env: { LC_ALL: 'C', TZ: 'UTC', PATH: '/usr/bin:/bin' },
         encoding: 'utf8',
@@ -331,12 +350,12 @@ export async function waitUntil(
     predicate: () => boolean | Promise<boolean>,
     intervalMs = 100
 ): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = performance.now() + timeoutMs;
     for (;;) {
         if (await predicate()) {
             return true;
         }
-        const remaining = deadline - Date.now();
+        const remaining = deadline - performance.now();
         if (remaining <= 0) {
             return false;
         }

@@ -13,9 +13,9 @@ const BARRIER_TIMEOUT_MS = 60_000;
 function waitAtBarrier(barrierDir: string): void {
     fs.writeFileSync(path.join(barrierDir, `ready.${process.pid}`), '');
     const go = path.join(barrierDir, 'go');
-    const deadline = Date.now() + BARRIER_TIMEOUT_MS;
+    const deadline = performance.now() + BARRIER_TIMEOUT_MS;
     while (!fs.existsSync(go)) {
-        if (Date.now() > deadline) {
+        if (performance.now() > deadline) {
             throw new Error('lockRacer: barrier timed out');
         }
     }

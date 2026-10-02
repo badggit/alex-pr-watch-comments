@@ -158,54 +158,54 @@ await describe('createProcessRunner', async () => {
     });
 
     await test('ends the child when the request signal aborts', async () => {
-        const started = Date.now();
+        const started = performance.now();
         const result = await runner.run({ file: '/bin/sleep', args: ['30'], signal: AbortSignal.timeout(200) });
         assert.equal(result.code, 143);
-        assert.ok(Date.now() - started < 3000);
+        assert.ok(performance.now() - started < 3000);
     });
 
     await test('applies the default signal to a request without its own signal', async () => {
-        const started = Date.now();
+        const started = performance.now();
         const defaultRunner = createProcessRunner(BASE_ENV, { signal: AbortSignal.timeout(200) });
         const result = await defaultRunner.run({ file: '/bin/sleep', args: ['30'] });
         assert.equal(result.code, 143);
-        assert.ok(Date.now() - started < 3000);
+        assert.ok(performance.now() - started < 3000);
     });
 
     await test('kills a TERM-ignoring child after the grace', async () => {
-        const started = Date.now();
+        const started = performance.now();
         const result = await runner.run({
             file: '/bin/sh',
             args: ['-c', 'trap "" TERM; sleep 30'],
             timeoutMs: 500,
         });
         assert.equal(result.code, 137);
-        assert.ok(Date.now() - started < 7000);
+        assert.ok(performance.now() - started < 7000);
     });
 
     await test('kills a TERM-ignoring descendant that holds the pipes', async () => {
-        const started = Date.now();
+        const started = performance.now();
         const result = await runner.run({
             file: '/bin/sh',
             args: ['-c', 'trap "" TERM; sleep 30 & echo $!; wait'],
             timeoutMs: 500,
         });
         assert.equal(result.code, 137);
-        assert.ok(Date.now() - started < 7000);
+        assert.ok(performance.now() - started < 7000);
         const pid = firstPid(result);
         assert.ok(pid > 1);
         assert.ok(await waitUntil(3000, () => !pidAlive(pid)));
     });
 
     await test('kills the group when the leader accepts TERM and a descendant holding the pipes ignores it', async () => {
-        const started = Date.now();
+        const started = performance.now();
         const result = await runner.run({
             file: '/bin/sh',
             args: ['-c', `/bin/sh -c 'trap "" TERM; exec sleep 30' & echo $!; wait`],
             timeoutMs: 500,
         });
         assert.equal(result.code, 143);
-        assert.ok(Date.now() - started < 7000);
+        assert.ok(performance.now() - started < 7000);
         const pid = firstPid(result);
         assert.ok(pid > 1);
         assert.ok(await waitUntil(3000, () => !pidAlive(pid)));
@@ -222,7 +222,7 @@ await describe('createProcessRunner', async () => {
             `printf '%s %s' $$ $! > "${pidsFile}.tmp" && mv "${pidsFile}.tmp" "${pidsFile}";`,
             'echo $!; wait',
         ].join(' ');
-        const started = Date.now();
+        const started = performance.now();
         const pending = runner.run({ file: '/bin/sh', args: ['-c', script], timeoutMs: 500 });
         const [leader, descendant] = await readPidPair(pidsFile);
         t.after(() => {
@@ -232,9 +232,9 @@ await describe('createProcessRunner', async () => {
         // no pipe); the TERM-ignoring descendant must still be alive then, before the grace expires.
         assert.ok(await waitUntil(KILL_GRACE_MS, () => !pidAlive(leader)));
         assert.equal(pidAlive(descendant), true);
-        assert.ok(Date.now() - started < 500 + KILL_GRACE_MS);
+        assert.ok(performance.now() - started < 500 + KILL_GRACE_MS);
         const result = await pending;
-        const elapsed = Date.now() - started;
+        const elapsed = performance.now() - started;
         assert.equal(result.code, 143);
         assert.equal(firstPid(result), descendant);
         assert.ok(elapsed < 500 + 2 * KILL_GRACE_MS + 1500, `took ${elapsed} ms`);
@@ -251,9 +251,9 @@ await describe('createProcessRunner', async () => {
             'child.unref();',
             'setInterval(() => {}, 1000);',
         ].join(' ');
-        const started = Date.now();
+        const started = performance.now();
         const result = await runner.run({ file: process.execPath, args: ['-e', script], timeoutMs: 300 });
-        const elapsed = Date.now() - started;
+        const elapsed = performance.now() - started;
         const descendant = firstPid(result);
         assert.ok(descendant > 1);
         t.after(() => {
@@ -276,10 +276,10 @@ await describe('createProcessRunner', async () => {
     });
 
     await test('ends the child at the request timeout', async () => {
-        const started = Date.now();
+        const started = performance.now();
         const result = await runner.run({ file: '/bin/sleep', args: ['30'], timeoutMs: 500 });
         assert.equal(result.code, 143);
-        assert.ok(Date.now() - started < 3000);
+        assert.ok(performance.now() - started < 3000);
     });
 
     await test('spawns nothing for an already aborted signal', async (t) => {
@@ -410,9 +410,9 @@ await describe('processStart and signalIfSame', async () => {
         const fake = createFakeRunner();
         fake.respond('ps', 'ps', { stdout: `${start}\n`, delayMs: 300 });
         const guardRuns: { at: number; psCalls: number }[] = [];
-        const started = Date.now();
+        const started = performance.now();
         const outcome = await signalIfSame(fake.runner, pid, start, 'SIGTERM', () => {
-            guardRuns.push({ at: Date.now(), psCalls: fake.calls('ps').length });
+            guardRuns.push({ at: performance.now(), psCalls: fake.calls('ps').length });
             return false;
         });
         assert.equal(outcome, 'vetoed');

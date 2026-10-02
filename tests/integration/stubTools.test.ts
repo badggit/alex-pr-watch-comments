@@ -188,7 +188,7 @@ await describe('stub executables', async () => {
         const runner = createProcessRunner(env.env);
         const delayMs = 4000;
         stubRespond(env.stubDir, 'gh', 'auth_status', { stdout: 'late\n', delayMs });
-        const started = Date.now();
+        const started = performance.now();
         const pending = trackSettled(runner.run({ file: 'gh', args: ['auth', 'status'] }));
         // The stub records the call before its delay starts, so from the moment the record appears it stays alive
         // for nearly the whole delay, far longer than the one second checked here.
@@ -199,7 +199,7 @@ await describe('stub executables', async () => {
         const result = await pending.promise;
         assert.equal(result.code, 0);
         assert.equal(result.stdout, 'late\n');
-        assert.ok(Date.now() - started >= delayMs - 100);
+        assert.ok(performance.now() - started >= delayMs - 100);
     });
 
     await test('gh records the caller GH_CONFIG_DIR and GH_HOST', async (t) => {
@@ -331,8 +331,8 @@ await describe('createTestEnv', async () => {
         assert.equal(deps.env, env.env);
         const controller = new AbortController();
         controller.abort();
-        const started = Date.now();
+        const started = performance.now();
         await deps.sleep(5000, controller.signal);
-        assert.ok(Date.now() - started < 1000);
+        assert.ok(performance.now() - started < 1000);
     });
 });

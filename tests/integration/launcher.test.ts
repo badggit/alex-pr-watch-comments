@@ -466,10 +466,10 @@ await describe('launch handshake', async () => {
     await test('a claimed decision without a value exits after the grace period', async (t) => {
         const kit = await prepareKit(t, { wait: 3, go: false });
         fs.mkdirSync(path.join(kit.rd, 'decision.d'), { mode: 0o700 });
-        const started = Date.now();
+        const started = performance.now();
         const pid = startOrphanLauncher(kit);
         assert.ok(await waitUntil(20_000, () => !pidAlive(pid)));
-        assert.ok(Date.now() - started >= 7000, 'exited before the timeout plus the grace period');
+        assert.ok(performance.now() - started >= 7000, 'exited before the timeout plus the grace period');
         assertClaudeNeverStarted(kit);
         assert.equal(exitStatus(kit), 'cancelled');
         assert.equal(launchDecision(kit.env.stateDir, RUN_ID), 'claimed');
