@@ -66,15 +66,12 @@ function hookEntry(rd: string, kind: HookKind, matcher?: string): HookEntry {
     return matcher === undefined ? { hooks } : { matcher, hooks };
 }
 
-// Rule paths use Claude Code's //absolute/path form: rd is absolute, so a leading slash is added.
+// Rule paths use Claude Code's //absolute/path form: rd is absolute, so a leading slash is added. Edit rules cover
+// every file-editing tool, Write included; Claude Code ignores Write(path) rules and warns about them at startup.
 function allowRules(rd: string, commands: readonly string[]): string[] {
     const files = runFiles(rd);
     const writable = [files.reply, files.commitMsg, files.prBody];
-    return [
-        `Read(/${rd}/**)`,
-        ...writable.flatMap((file) => [`Edit(/${file})`, `Write(/${file})`]),
-        ...commands.map((line) => `Bash(${line})`),
-    ];
+    return [`Read(/${rd}/**)`, ...writable.map((file) => `Edit(/${file})`), ...commands.map((line) => `Bash(${line})`)];
 }
 
 export function buildSettings(record: RunRecord, rd: string): string | undefined {

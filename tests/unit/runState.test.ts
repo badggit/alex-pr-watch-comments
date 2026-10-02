@@ -5,10 +5,11 @@ import { describe, test, type TestContext } from 'node:test';
 
 import { acquireWorktreeLock, worktreeLockHolder } from '../../src/locks.ts';
 import { pidAlive } from '../../src/proc.ts';
-import { captureRun, decideRun, evaluateRun, type DecideInput } from '../../src/runState.ts';
+import { attentionHint, captureRun, decideRun, evaluateRun, type DecideInput } from '../../src/runState.ts';
 import { createRun, launchDecision, mergeRecord, readLoggedCursor } from '../../src/runStore.ts';
 import { runDir } from '../../src/stateStore.ts';
 import type { EventKind, EventsSnapshot, LookupResult } from '../../src/types.ts';
+import { safeText } from '../../src/validate.ts';
 import {
     answerPaneTag,
     appendEvents,
@@ -199,6 +200,19 @@ await describe('decideRun', async () => {
             state: 'needs_attention',
             reason: 'claude-did-not-start',
         });
+    });
+
+    await test('claude-did-not-start carries a plain ASCII hint about a waiting dialog', () => {
+        const hint = attentionHint('claude-did-not-start');
+        assert.ok(hint.length > 0);
+        assert.equal(safeText(hint), hint);
+        // The longest run id: a 14-digit timestamp, a dash and a 15-digit comment database id.
+        const notice = `pr-watch-comments: run 20261002233613-${'9'.repeat(15)} needs attention: claude-did-not-start, ${hint}`;
+        assert.equal(safeText(notice), notice, 'the whole notice must survive safeText without being cut');
+        assert.ok(hint.includes('worker pane'));
+        assert.ok(hint.includes('trust'));
+        assert.equal(attentionHint('waiting-for-permission'), '');
+        assert.equal(attentionHint('unknown-reason'), '');
     });
 
     await test('a prompt without a stop is still working', () => {
@@ -574,6 +588,22 @@ await describe('evaluateRun other effects', async () => {
         assert.deepEqual(second, first);
         assert.equal(tmuxMessages(fixture).length, 1);
         assert.equal(recordOf(fixture).reason, 'waiting-for-permission');
+    });
+
+    await test('claude-did-not-start notifies the owner once with its hint', async (t) => {
+        const fixture = await newRunFixture(t);
+        const startedAt = Math.floor(Date.now() / 1000) - 200;
+        await seedRun(fixture, { patch: { startedAt }, events: [] });
+        await startClaude(fixture, 'cooperative');
+        const first = await evaluate(fixture, lookupWith());
+        const second = await evaluate(fixture, lookupWith());
+        assert.deepEqual(first, { state: 'needs_attention', reason: 'claude-did-not-start' });
+        assert.deepEqual(second, first);
+        const messages = tmuxMessages(fixture);
+        assert.equal(messages.length, 1);
+        const text = messages[0]?.args.join(' ') ?? '';
+        assert.ok(text.includes('needs attention: claude-did-not-start'), text);
+        assert.ok(text.includes(attentionHint('claude-did-not-start')), text);
     });
 
     await test('a comment reported gone by the lookup needs attention', async (t) => {

@@ -8,6 +8,7 @@ import { getPath, isRecord, parseJson } from '../../src/json.ts';
 import { markLaunchReady, readLaunchResult } from '../../src/launchChannel.ts';
 import { acquirePrLock, acquireWorktreeLock, worktreeLockHolder } from '../../src/locks.ts';
 import { createProcessRunner, pidAlive, processStart } from '../../src/proc.ts';
+import { attentionHint } from '../../src/runState.ts';
 import {
     claimLaunch,
     createRun,
@@ -1398,6 +1399,24 @@ await describe('runs in flight across ticks', async () => {
         assert.equal(status.reason, 'run-missing');
         assert.equal(rt.inflightRunId, '20261002120000-777');
         assert.equal(splits(setup.fake), 0);
+    });
+
+    await test('a claude that never submitted its prompt shows the did-not-start hint in the status', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, { dbId: 101, claudePid, events: [], patch: { startedAt: setup.now - 200 } });
+        const comments = [rocketed(setup.now, 101, 300), rocketed(setup.now, 102, 100)];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        const status = statusOf(setup);
+        assert.equal(status.state, 'needs_attention');
+        assert.equal(status.reason, 'claude-did-not-start');
+        assert.equal(status.hint, attentionHint('claude-did-not-start'));
+        assert.ok(status.hint.length > 0);
+        assert.equal(rt.inflightRunId, runId);
     });
 
     await test('a claude pid that belongs to another process needs attention and keeps the slot', async (t) => {

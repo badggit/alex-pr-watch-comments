@@ -83,7 +83,7 @@ function recordPathsValid(record: RunRecord): boolean {
     );
 }
 
-// A trailing slash or a non-normalized spelling would put doubled slashes into the Read, Edit and Write rules.
+// A trailing slash or a non-normalized spelling would put doubled slashes into the Read and Edit rules.
 function isCanonicalRunDir(rd: string): boolean {
     return isSafeRunPath(rd) && rd.length > 1 && !rd.endsWith('/') && path.posix.normalize(rd) === rd;
 }

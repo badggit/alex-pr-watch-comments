@@ -206,18 +206,23 @@ await describe('buildSettings', async () => {
         assert.ok(!rules.some((rule) => rule.endsWith('-X PATCH *)')));
     });
 
-    await test('uses the double-slash absolute form for Read, Edit and Write', () => {
+    await test('uses the double-slash absolute form for Read and Edit', () => {
         const text = buildSettings(kitRecord(), RD) ?? '';
         assert.ok(text.includes('Read(//'));
         assert.ok(text.includes('Edit(//'));
-        assert.ok(text.includes('Write(//'));
         const rules = allowRules(parseSettings(kitRecord()));
         assert.ok(rules.includes(`Read(/${RD}/**)`));
         const files = ['reply.md', 'commit-msg.txt', 'pr-body.md'];
         const editRules = rules.filter((rule) => rule.startsWith('Edit(')).toSorted();
-        const writeRules = rules.filter((rule) => rule.startsWith('Write(')).toSorted();
         assert.deepEqual(editRules, files.map((file) => `Edit(/${RD}/${file})`).toSorted());
-        assert.deepEqual(writeRules, files.map((file) => `Write(/${RD}/${file})`).toSorted());
+    });
+
+    // Claude Code ignores Write(path) rules with a startup warning; Edit(path) rules cover every file-editing tool.
+    await test('emits no Write rule', () => {
+        const text = buildSettings(kitRecord(), RD) ?? '';
+        assert.ok(!text.includes('Write('));
+        const rules = allowRules(parseSettings(kitRecord()));
+        assert.ok(!rules.some((rule) => rule.startsWith('Write(')));
     });
 
     await test('has no deny list, no default mode and no bypass', () => {

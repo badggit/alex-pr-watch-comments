@@ -68,6 +68,11 @@ const TERM_POLL_MS = 1000;
 // The reason of the last owner notice per unreadable run of this process, so an unreadable or missing record is
 // announced once and not on every tick.
 const unreadableNotices = new Map<string, string>();
+// What the owner can do about a needs_attention reason; a reason without an entry has no hint. A hint uses only
+// characters safeText keeps and stays short, so the tmux notice (cut at 200 characters) still shows all of it.
+const ATTENTION_HINTS: ReadonlyMap<string, string> = new Map([
+    ['claude-did-not-start', 'see the worker pane: claude may wait at a dialog like folder trust - trust the dir'],
+]);
 const LOGGED_KINDS: ReadonlySet<EventKind | 'unknown'> = new Set<EventKind | 'unknown'>([
     'prompt',
     'stop',
@@ -154,11 +159,17 @@ export async function removeEyes(deps: Deps, session: Session, record: RunRecord
     }
 }
 
+export function attentionHint(reason: string): string {
+    return ATTENTION_HINTS.get(reason) ?? '';
+}
+
 async function recordAttention(ctx: RunContext, reason: string): Promise<EvaluateResult> {
     const { record, session } = ctx;
     mergeRecord(session.stateDir, record.runId, { state: 'needs_attention', reason });
     if (record.state !== 'needs_attention' || record.reason !== reason) {
-        await notifyOwner(ctx.deps, session, `run ${record.runId} needs attention: ${reason}`);
+        const hint = attentionHint(reason);
+        const suffix = hint.length > 0 ? `, ${hint}` : '';
+        await notifyOwner(ctx.deps, session, `run ${record.runId} needs attention: ${reason}${suffix}`);
     }
     return { state: 'needs_attention', reason };
 }

@@ -9,7 +9,7 @@ import { preflight } from './preflight.ts';
 import { processStart } from './proc.ts';
 import { buildQueue, lookupIds } from './queue.ts';
 import { reconcile } from './reconcile.ts';
-import { captureRun, evaluateRun } from './runState.ts';
+import { attentionHint, captureRun, evaluateRun } from './runState.ts';
 import { readRecord, readStatus, writeStatus } from './runStore.ts';
 import { initState, resolveStateDir, type InitStateResult } from './stateStore.ts';
 import type {
@@ -307,7 +307,8 @@ async function evaluateInflight(
         deps.log.info(`run ${safeText(runId)} deferred: ${reason}`);
     }
     const state = result.state === 'needs_attention' ? 'needs_attention' : 'running';
-    setStatus(deps, session, { state, reason, hint: '', ...runFields(session, runId) });
+    const hint = state === 'needs_attention' ? attentionHint(result.reason) : '';
+    setStatus(deps, session, { state, reason, hint, ...runFields(session, runId) });
     return { kind: 'kept' };
 }
 
