@@ -1,0 +1,24 @@
+{
+    "data": {
+        "viewer": { "login": "me" },
+        "rateLimit": { "remaining": 3990, "resetAt": "2026-01-01T01:00:00Z" },
+        "nodes": [
+            {
+                "id": "PRRC_c",
+                "databaseId": 103,
+                "url": "https://github.com/OWNER/REPO/pull/1#discussion_r103",
+                "lastEditedAt": null,
+                "body": "third",
+                "path": "src/c.ts",
+                "line": 7,
+                "author": { "login": "reviewer" },
+                "rocket": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": "R1" },
+                    "nodes": [{ "createdAt": "2026-01-01T00:04:00Z", "user": { "login": "me" } }]
+                },
+                "plus": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                "reactionGroups": [{ "content": "ROCKET", "viewerHasReacted": true }]
+            }
+        ]
+    }
+}

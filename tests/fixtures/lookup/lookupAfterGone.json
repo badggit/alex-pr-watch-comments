@@ -1,0 +1,24 @@
+{
+    "data": {
+        "viewer": { "login": "me" },
+        "rateLimit": { "remaining": 4100, "resetAt": "2026-01-01T01:00:00Z" },
+        "nodes": [
+            {
+                "id": "PRRC_kept",
+                "databaseId": 201,
+                "url": "https://github.com/OWNER/REPO/pull/1#discussion_r201",
+                "lastEditedAt": null,
+                "body": "kept",
+                "path": "src/kept.ts",
+                "line": 3,
+                "author": { "login": "reviewer" },
+                "rocket": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": "R1" },
+                    "nodes": [{ "createdAt": "2026-01-01T00:05:00Z", "user": { "login": "me" } }]
+                },
+                "plus": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                "reactionGroups": [{ "content": "ROCKET", "viewerHasReacted": true }]
+            }
+        ]
+    }
+}
