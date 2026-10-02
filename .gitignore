@@ -1,0 +1,42 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local
+*.local
+*.local.*
+local.*
+
+# Dependencies
+/node_modules
+package-lock.json
+/.pnp
+.pnp.*
+.yarn/*
+
+# Testing
+/coverage
+
+# Next.js
+.next/*
+out/*
+
+# Production
+/build
+
+# Misc
+.DS_Store
+*.pem
+
+# Debug
+npm-debug.log*
+.pnpm-debug.log*
+
+.vercel
+.idea
+.codex
+.claude
+
+# Typescript
+*.tsbuildinfo
