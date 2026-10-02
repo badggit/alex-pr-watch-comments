@@ -211,15 +211,27 @@ export function writeLoggedCursor(stateDir: string, runId: string, count: number
     writeTextAtomic(path.join(runDir(stateDir, runId), LOGGED_FILE), `${count}\n`);
 }
 
+// A claude.pid that exists but cannot be read (EIO, EACCES) may name a running claude, so it reads as unverifiable;
+// only a missing file (ENOENT) is absent.
+function readClaudePid(dir: string): number | 'absent' | 'unverifiable' {
+    let text: string;
+    try {
+        text = fs.readFileSync(path.join(dir, CLAUDE_PID_FILE), 'utf8').trim();
+    } catch (error) {
+        return error instanceof Error && 'code' in error && error.code === 'ENOENT' ? 'absent' : 'unverifiable';
+    }
+    return isUintString(text) ? Number.parseInt(text, 10) : 'absent';
+}
+
 // The only liveness predicate for a run: a live claude.pid, or a live panePid until exit_status exists (from then on
-// the launcher pane is the owner's fallback shell).
+// the launcher pane is the owner's fallback shell). An unreadable claude.pid counts as alive: fail closed.
 export function workerAlive(stateDir: string, runId: string): boolean {
     const dir = runDir(stateDir, runId);
     if (!fs.existsSync(dir)) {
         return false;
     }
-    const claudePid = readUint(path.join(dir, CLAUDE_PID_FILE));
-    if (claudePid !== undefined && pidAlive(claudePid)) {
+    const claudePid = readClaudePid(dir);
+    if (claudePid === 'unverifiable' || (claudePid !== 'absent' && pidAlive(claudePid))) {
         return true;
     }
     if (fs.existsSync(path.join(dir, EXIT_STATUS_FILE))) {

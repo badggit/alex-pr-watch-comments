@@ -186,6 +186,27 @@ await describe('workerAlive', async () => {
         assert.equal(workerAlive(fixture.stateDir, RUN_A), false);
         assert.equal(workerAlive(fixture.stateDir, RUN_B), false);
     });
+
+    for (const code of ['EIO', 'EACCES']) {
+        await test(`a claude.pid that fails to read with ${code} counts as alive without a live panePid`, async (t) => {
+            const fixture = await newFixture(t);
+            const dir = createRun(fixture.stateDir, RUN_A);
+            writeRecord(fixture.stateDir, sampleRecord(RUN_A, PR_KEY, await deadPid(fixture.env)));
+            const pidFile = path.join(dir, 'claude.pid');
+            fs.writeFileSync(pidFile, `${await deadPid(fixture.env)}\n`);
+            fs.writeFileSync(path.join(dir, 'exit_status'), '0');
+            const original = fs.readFileSync;
+            t.mock.method(fs, 'readFileSync', (target: fs.PathOrFileDescriptor, options: BufferEncoding) => {
+                if (target === pidFile) {
+                    throw Object.assign(new Error(`${code}: claude.pid cannot be read`), { code });
+                }
+                return original(target, options);
+            });
+            assert.equal(workerAlive(fixture.stateDir, RUN_A), true);
+            t.mock.restoreAll();
+            assert.equal(workerAlive(fixture.stateDir, RUN_A), false);
+        });
+    }
 });
 
 await describe('launch decision', async () => {

@@ -1,0 +1,154 @@
+import path from 'node:path';
+
+import { getNumber } from './json.ts';
+import { adoptWorktreeLock, worktreeLockHolder } from './locks.ts';
+import { pidAlive } from './proc.ts';
+import { notifyOwner, releaseRunLock, removeEyes } from './runState.ts';
+import { claimLaunch, clearRun, launchDecision, listRunIds, mergeRecord, readRecord, workerAlive } from './runStore.ts';
+import { readJsonFile, worktreeDir } from './stateStore.ts';
+import { paneForRun } from './tmuxControl.ts';
+import type { Deps, RecordPatch, RunRecord, RunState, Session } from './types.ts';
+
+export interface ReconcileResult {
+    inflightRunId: string | undefined;
+}
+
+type DropOutcome = 'dropped' | 'kept' | 'aborted';
+
+const UNFINISHED_STATES: ReadonlySet<RunState> = new Set<RunState>([
+    'preparing',
+    'running',
+    'needs_attention',
+    'abandoned',
+]);
+
+// A run with a live worker belongs to this watcher again: its record and worktree lock name this process. Nothing is
+// asked of GitHub; only the pane is looked up, on the tmux server the record names. A preparing run whose worker
+// already lives is promoted to running, so the tick evaluates it instead of resuming it into a second pane.
+async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promise<void> {
+    const { runId } = record;
+    const patch: RecordPatch = { watcherPid: process.pid };
+    if (record.state === 'preparing') {
+        Object.assign(patch, { state: 'running', reason: 'adopted', startedAt: record.startedAt ?? deps.nowSeconds() });
+    }
+    mergeRecord(session.stateDir, runId, patch);
+    if (!adoptWorktreeLock(session.stateDir, record.worktreeKey, runId, process.pid, deps.nowSeconds())) {
+        deps.log.warn(`could not adopt the worktree lock of run ${runId}`);
+    }
+    const pane = await paneForRun(deps, session.tools.tmux, record.socket, runId);
+    if (pane === undefined) {
+        const reason = 'worker-pane-not-found';
+        mergeRecord(session.stateDir, runId, { state: 'needs_attention', reason });
+        if (record.state !== 'needs_attention' || record.reason !== reason) {
+            await notifyOwner(deps, session, `run ${runId} needs attention: ${reason}`);
+        }
+    }
+    deps.log.info(`re-adopted run ${runId}`);
+}
+
+// The worker is dead. A stop observed during the EYES removal keeps record and lock, so the next start retries the
+// removal; a lock that cannot be released keeps the record as a running run the tick finishes later.
+async function dropRun(deps: Deps, session: Session, record: RunRecord, stop?: AbortSignal): Promise<DropOutcome> {
+    if (record.eyesAdded) {
+        await removeEyes(deps, session, record);
+        if (stop?.aborted === true) {
+            return 'aborted';
+        }
+    }
+    deps.log.info(`interrupted run ${record.runId}, add the rocket again to retry`);
+    if (!releaseRunLock(deps, session.stateDir, record.worktreeKey, record.runId)) {
+        mergeRecord(session.stateDir, record.runId, { state: 'running', reason: 'interrupted', eyesAdded: false });
+        return 'kept';
+    }
+    clearRun(session.stateDir, record.runId);
+    return 'dropped';
+}
+
+// An abandoned run kept for its worktree lock: cleared once its worker is gone and the lock released, otherwise kept
+// for the tick, whose evaluation retries.
+function finishAbandonedRun(deps: Deps, session: Session, record: RunRecord): DropOutcome {
+    const { stateDir } = session;
+    if (workerAlive(stateDir, record.runId) || !releaseRunLock(deps, stateDir, record.worktreeKey, record.runId)) {
+        return 'kept';
+    }
+    clearRun(stateDir, record.runId);
+    deps.log.info(`cleared abandoned run ${record.runId}`);
+    return 'dropped';
+}
+
+function lockWatcherPid(stateDir: string, wtKey: string): number | undefined {
+    return getNumber(readJsonFile(path.join(worktreeDir(stateDir, wtKey), 'lock', 'owner.json')), 'watcherPid');
+}
+
+// A run whose record cannot be read belongs to this PR only as far as it holds this clone's worktree lock for a dead
+// watcher; its launch is then cancelled, and while the slot is free it takes the slot and its lock is adopted by this
+// process (the tick reports it as needing attention). With the slot taken it is only logged: adopting its lock
+// without tracking the run would keep the clone busy for as long as this watcher lives.
+function claimUnreadable(deps: Deps, session: Session, runId: string, inflightRunId: string | undefined): boolean {
+    const { stateDir, worktreeKey } = session;
+    const watcherPid = lockWatcherPid(stateDir, worktreeKey);
+    if (worktreeLockHolder(stateDir, worktreeKey) !== runId || watcherPid === undefined || pidAlive(watcherPid)) {
+        deps.log.warn(`run ${runId} has an unreadable record and is not held for this clone; left alone`);
+        return false;
+    }
+    if (launchDecision(stateDir, runId) !== 'go') {
+        claimLaunch(stateDir, runId, 'cancel');
+    }
+    if (inflightRunId !== undefined) {
+        deps.log.warn(`run ${runId} has an unreadable record and needs attention; run ${inflightRunId} holds the slot`);
+        return false;
+    }
+    if (!adoptWorktreeLock(stateDir, worktreeKey, runId, process.pid, deps.nowSeconds())) {
+        deps.log.warn(`could not adopt the worktree lock of run ${runId}`);
+    }
+    deps.log.warn(`run ${runId} has an unreadable record; it keeps the worktree lock and needs attention`);
+    return true;
+}
+
+// Runs at watcher start for every run of the PR. A launcher still waiting for its decision is cancelled first; the
+// worktree lock is released and the run cleared only while workerAlive is false, whatever the pane lookup says. Only
+// one run is in flight: a further live run is left alone (its lock stays unreclaimable while its worker lives).
+export async function reconcile(deps: Deps, session: Session, stop?: AbortSignal): Promise<ReconcileResult> {
+    let inflightRunId: string | undefined;
+    const kept: string[] = [];
+    for (const runId of listRunIds(session.stateDir)) {
+        if (stop?.aborted === true) {
+            break;
+        }
+        const read = readRecord(session.stateDir, runId);
+        if (read.kind !== 'ok') {
+            if (claimUnreadable(deps, session, runId, inflightRunId)) {
+                inflightRunId = runId;
+            }
+            continue;
+        }
+        const { record } = read;
+        if (record.prKey !== session.pr.prKey) {
+            continue;
+        }
+        if (launchDecision(session.stateDir, runId) !== 'go') {
+            claimLaunch(session.stateDir, runId, 'cancel');
+        }
+        if (!UNFINISHED_STATES.has(record.state)) {
+            continue;
+        }
+        if (record.state === 'abandoned') {
+            if (finishAbandonedRun(deps, session, record) === 'kept') {
+                kept.push(runId);
+            }
+            continue;
+        }
+        if (!workerAlive(session.stateDir, runId)) {
+            const dropped = await dropRun(deps, session, record, stop);
+            if (dropped === 'kept') {
+                kept.push(runId);
+            }
+        } else if (inflightRunId === undefined) {
+            await adoptRun(deps, session, record);
+            inflightRunId = runId;
+        } else {
+            deps.log.warn(`run ${runId} also has a live worker; run ${inflightRunId} stays in flight`);
+        }
+    }
+    return { inflightRunId: inflightRunId ?? kept[0] };
+}

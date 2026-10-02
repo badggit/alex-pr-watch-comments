@@ -63,6 +63,15 @@ function removeTree(dir: string): void {
     fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// For cleanup after a failed change: a removal that fails as well leaves the entry for a later retry.
+function removeTreeQuietly(dir: string): void {
+    try {
+        removeTree(dir);
+    } catch {
+        return;
+    }
+}
+
 export function newLockToken(nowSeconds: number): string {
     return `${process.pid}-${nowSeconds}-${randomInt(TOKEN_RANDOM_LIMIT)}`;
 }
@@ -110,9 +119,13 @@ function highestClaimIndex(names: readonly string[], token: string): number {
     return highest;
 }
 
+function claimantPid(claimDir: string): number | undefined {
+    return getNumber(readJsonFile(path.join(claimDir, CLAIMANT_FILE)), 'pid');
+}
+
 // A claimant that cannot be identified is treated as alive, so the chain stays blocked rather than doubly claimed.
 function claimantDead(claimDir: string): boolean {
-    const pid = getNumber(readJsonFile(path.join(claimDir, CLAIMANT_FILE)), 'pid');
+    const pid = claimantPid(claimDir);
     return pid !== undefined && !pidAlive(pid);
 }
 
@@ -176,20 +189,34 @@ export function dropClaims(lockDir: string, token: string): void {
     }
 }
 
+// Lock changes of one process run synchronously, so a claim on token that names this process is a leftover of an
+// earlier change that failed after its claim (a failed rename, say); left alone it would block the chain for this
+// process for good. A removal that fails leaves the claim, and the next takeClaim simply finds the chain busy.
+function dropOwnClaims(lockDir: string, token: string, selfPid: number): void {
+    for (const name of readNames(lockDir) ?? []) {
+        const claimDir = path.join(lockDir, name);
+        if (isChainEntry(name, token) && claimantPid(claimDir) === selfPid) {
+            removeTreeQuietly(claimDir);
+        }
+    }
+}
+
 function ownerTokenAt(lockDir: string): string | undefined {
     return getString(readJsonFile(path.join(lockDir, OWNER_FILE)), 'token');
 }
 
 // Claims readToken, re-reads the owner and runs change only while that token is still current. A claim on a token
-// that was replaced meanwhile is removed again: nobody can act on a stale token anyway.
+// that was replaced meanwhile is removed again: nobody can act on a stale token anyway. The claim of a change that
+// failed is removed too, and a leftover claim of this process is dropped first, so a failed change can be retried.
 function changeLock(
     lockDir: string,
     readToken: string,
-    claimantPid: number,
+    selfPid: number,
     nowSeconds: number,
     change: () => boolean
 ): boolean {
-    const claim = takeClaim(lockDir, readToken, claimantPid, nowSeconds);
+    dropOwnClaims(lockDir, readToken, selfPid);
+    const claim = takeClaim(lockDir, readToken, selfPid, nowSeconds);
     if (claim === undefined) {
         return false;
     }
@@ -197,7 +224,11 @@ function changeLock(
         removeTree(claim);
         return false;
     }
-    return change();
+    if (change()) {
+        return true;
+    }
+    removeTreeQuietly(claim);
+    return false;
 }
 
 function replaceOwner(lockDir: string, owner: PrLockOwner | WorktreeLockOwner, oldToken: string): boolean {

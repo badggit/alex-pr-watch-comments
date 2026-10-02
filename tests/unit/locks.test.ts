@@ -450,6 +450,38 @@ await describe('release by rename', async () => {
         assert.deepEqual(siblings(wtLockDir(stateDir), 'released'), []);
         assert.ok(acquireWt(fixture, RUN_B, process.pid));
     });
+
+    await test('a worktree release whose rename fails once can be retried and frees the lock', async (t) => {
+        const fixture = await newFixture(t);
+        const { stateDir } = fixture;
+        assert.ok(acquireWt(fixture, RUN_A, process.pid));
+        const original = fs.renameSync;
+        let failures = 0;
+        t.mock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
+            if (failures === 0 && String(to).includes('.released.')) {
+                failures += 1;
+                throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+            }
+            original(from, to);
+        });
+        assert.equal(releaseWorktreeLock(stateDir, WT_KEY, RUN_A), false);
+        assert.equal(failures, 1);
+        assert.equal(worktreeLockHolder(stateDir, WT_KEY), RUN_A);
+        assert.ok(releaseWorktreeLock(stateDir, WT_KEY, RUN_A));
+        assert.equal(fs.existsSync(wtLockDir(stateDir)), false);
+        assert.ok(acquireWt(fixture, RUN_B, process.pid));
+    });
+
+    await test('a leftover claim of this process does not block a later release', async (t) => {
+        const fixture = await newFixture(t);
+        const { stateDir } = fixture;
+        assert.ok(acquireWt(fixture, RUN_A, process.pid));
+        const lockDir = wtLockDir(stateDir);
+        makeClaim(lockDir, `claim.${ownerToken(lockDir)}.0`, { pid: process.pid, token: '1-2-3' });
+        assert.ok(releaseWorktreeLock(stateDir, WT_KEY, RUN_A));
+        assert.equal(fs.existsSync(lockDir), false);
+        assert.ok(acquireWt(fixture, RUN_B, process.pid));
+    });
 });
 
 await describe('vanished lock', async () => {
