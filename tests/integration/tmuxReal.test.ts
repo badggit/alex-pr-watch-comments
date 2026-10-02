@@ -189,7 +189,7 @@ await describe('tmux control on a real isolated server', async () => {
             'sleep 30',
         ]);
         assert.notEqual(full?.code, 0);
-        assert.match(full?.stderr ?? '', /no space for new pane/u);
+        assert.match(full?.stderr ?? '', /no space for (?:a )?new pane/u);
         const result = await splitWorker(fixture.deps, fixture.tmuxPath, fixture.tmux, sleeper(fixture, 'R3'));
         assert.ok(result);
         assert.notEqual(await windowOf(fixture, result.paneId), fixture.tmux.windowId);

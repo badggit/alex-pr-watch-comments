@@ -28,6 +28,7 @@ const CONTEXT: TmuxContext = { socket: SOCKET, pane: '%1', sessionId: '$1', wind
 const SPLIT_FORMAT = '#{pane_id} #{pane_pid}';
 const WINDOW_FORMAT = '#{window_id} #{pane_id}';
 const NO_SPACE = { code: 1, stderr: 'no space for new pane\n' };
+const NO_SPACE_TMUX37 = { code: 1, stderr: 'size or position no space for a new pane\n' };
 const RUN_ID = '20260101000000-11';
 const PR_KEY = 'o+r+12';
 const ENV_ITEMS = ['PATH=/a:/b', 'GH_CONFIG_DIR=/cfg dir'];
@@ -269,6 +270,16 @@ await describe('splitWorker', async () => {
     await test('no space once: the retry after the tiled layout succeeds', async () => {
         const fake = createFakeRunner();
         fake.respond('tmux', 'split-window', NO_SPACE);
+        fake.respond('tmux', 'split-window', { stdout: '%6 555\n' });
+        const result = await splitWorker(depsOf(fake), TMUX, CONTEXT, splitOpts('/tmp/work'));
+        assert.deepEqual(result, { paneId: '%6', panePid: 555 });
+        assert.equal(fake.callCount('tmux', 'new-window'), 0);
+        assert.equal(fake.callCount('tmux', 'select-layout'), 1);
+    });
+
+    await test('the tmux 3.7 no-space message also triggers the tiled retry', async () => {
+        const fake = createFakeRunner();
+        fake.respond('tmux', 'split-window', NO_SPACE_TMUX37);
         fake.respond('tmux', 'split-window', { stdout: '%6 555\n' });
         const result = await splitWorker(depsOf(fake), TMUX, CONTEXT, splitOpts('/tmp/work'));
         assert.deepEqual(result, { paneId: '%6', panePid: 555 });

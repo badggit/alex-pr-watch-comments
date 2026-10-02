@@ -27,7 +27,8 @@ export type PaneState = 'alive' | 'dead' | 'missing';
 
 const PANE_PID_FORMAT = '#{pane_id} #{pane_pid}';
 const WINDOW_PANE_FORMAT = '#{window_id} #{pane_id}';
-const NO_SPACE = 'no space for new pane';
+// tmux 3.4-3.6 says 'no space for new pane'; 3.7+ says 'no space for a new pane' (3.7 adds a 'size or position' prefix).
+const NO_SPACE = /no space for (?:a )?new pane/u;
 const PANE_ID = /^%\d+$/u;
 const WINDOW_ID = /^@\d+$/u;
 const SESSION_ID = /^\$\d+$/u;
@@ -134,7 +135,7 @@ function workerPaneOf(result: CommandResult | undefined): WorkerPane | undefined
 }
 
 function isNoSpace(result: CommandResult | undefined): boolean {
-    return result !== undefined && result.code !== 0 && result.stderr.includes(NO_SPACE);
+    return result !== undefined && result.code !== 0 && NO_SPACE.test(result.stderr);
 }
 
 // Creates the worker pane: a split of the watcher's pane, after a tiled relayout when the window is full, and as a
