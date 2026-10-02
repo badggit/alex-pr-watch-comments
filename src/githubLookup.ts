@@ -2,6 +2,7 @@ import { GRAPHQL_OPS, PAGE_SIZE } from './constants.ts';
 import { ghGraphql, type GhDeps } from './gh.ts';
 import { getArray, getBoolean, getNumber, getPath, getRecord, getString, isoToEpoch, isRecord } from './json.ts';
 import type { GhFailure, GhResult, LookupEntry, LookupResult, RateInfo } from './types.ts';
+import { quoteUntrusted, visibleText } from './untrustedText.ts';
 import { isValidNodeId } from './validate.ts';
 
 export type PagedReaction = 'ROCKET' | 'THUMBS_UP';
@@ -62,7 +63,6 @@ const REMOVE_REACTION_MUTATION = [
     'removeReaction(input: { subjectId: $id, content: $content }) { reaction { content } } }',
 ].join(' ');
 const GHOST_AUTHOR = 'ghost';
-const LINE_BREAK = /\r\n|[\n\r\u0085\u2028\u2029]/u;
 
 function emptyRate(): RateInfo {
     return { remaining: undefined, resetAt: undefined };
@@ -323,20 +323,13 @@ export async function lookupComments(deps: GhDeps, ghPath: string, ids: readonly
     return { kind: 'ok', result: { rate: rate ?? emptyRate(), entries, gone } };
 }
 
-// Every body line is quoted with "> ", so no body line can start like a watcher-made frame line such as a header.
-function quoteBody(body: string): string {
-    return body
-        .split(LINE_BREAK)
-        .map((line) => (line.length === 0 ? '>' : `> ${line}`))
-        .join('\n');
-}
-
 function contextSection(node: unknown): string {
     const author = getString(getRecord(node, 'author'), 'login') ?? GHOST_AUTHOR;
     const createdAt = getString(node, 'createdAt');
     const timestamp = createdAt !== undefined && isoToEpoch(createdAt) !== undefined ? createdAt : 'unknown time';
     const body = getString(node, 'body') ?? '';
-    return `--- UNTRUSTED CONTEXT: earlier comment by ${author} at ${timestamp} ---\n${quoteBody(body)}\n`;
+    const header = `--- UNTRUSTED CONTEXT: earlier comment by ${visibleText(author)} at ${timestamp} ---`;
+    return `${header}\n${quoteUntrusted(body).join('\n')}\n`;
 }
 
 // Earlier thread comments in the given order, each under an UNTRUSTED CONTEXT header with its body quoted; one call
