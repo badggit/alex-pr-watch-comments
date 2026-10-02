@@ -1,0 +1,29 @@
+{
+    "data": {
+        "viewer": {
+            "login": "reviewer"
+        },
+        "rateLimit": {
+            "remaining": 4999,
+            "resetAt": "2026-10-02T13:00:00Z"
+        },
+        "repository": {
+            "pullRequest": {
+                "state": "MERGED",
+                "headRefName": "feature",
+                "isCrossRepository": false,
+                "maintainerCanModify": false,
+                "headRepository": {
+                    "owner": {
+                        "login": "o"
+                    },
+                    "name": "r",
+                    "viewerPermission": "WRITE"
+                },
+                "baseRepository": {
+                    "viewerPermission": "WRITE"
+                }
+            }
+        }
+    }
+}
