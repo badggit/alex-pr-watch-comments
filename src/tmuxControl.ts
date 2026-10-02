@@ -49,6 +49,17 @@ export function parseTmuxEnv(env: Env): { socket: string; pane: string } | undef
     return { socket, pane };
 }
 
+// tmux's command parser reads an argument that ends in ; as a command separator and turns a trailing \; into ;, so
+// one backslash before a trailing ; keeps any value literal (a\; becomes a\\; and round-trips as well).
+export function tmuxArg(value: string): string {
+    return value.endsWith(';') ? String.raw`${value.slice(0, -1)}\;` : value;
+}
+
+// Escapes a value for a tmux format comparison: # starts a format and , and } end its arguments.
+export function formatLiteral(value: string): string {
+    return value.replaceAll('#', '##').replaceAll(',', '#,').replaceAll('}', '#}');
+}
+
 // The only way this program calls tmux: always on an explicit socket, never on a relative or unsafe path. The
 // client runs with the runner's base env unless clientEnv replaces it.
 export async function tmuxOn(
@@ -61,7 +72,11 @@ export async function tmuxOn(
     if (!isSafeSocketPath(socket)) {
         return;
     }
-    return await deps.runner.run({ file: tmuxPath, args: ['-S', socket, ...args], env: clientEnv });
+    return await deps.runner.run({
+        file: tmuxPath,
+        args: ['-S', socket, ...args.map((arg) => tmuxArg(arg))],
+        env: clientEnv,
+    });
 }
 
 // The two space-separated fields of a one-line tmux output, or undefined when the call failed.
@@ -363,4 +378,29 @@ export async function paneWatcherTag(
         return;
     }
     return tag;
+}
+
+// Kills the pane only while it is dead and still carries the watcher tag of prKey, checked by the tmux server in the
+// same command, so a pane respawned or reused in between is never killed. True when the conditional command ran,
+// whether or not it killed the pane.
+export async function killDeadWatcherPane(
+    deps: TmuxDeps,
+    tmuxPath: string,
+    socket: string,
+    pane: string,
+    prKey: string
+): Promise<boolean> {
+    if (!PANE_ID.test(pane)) {
+        return false;
+    }
+    const condition = `#{&&:#{pane_dead},#{==:#{@prwc_watcher},${formatLiteral(prKey)}}}`;
+    const result = await tmuxOn(deps, tmuxPath, socket, [
+        'if-shell',
+        '-F',
+        '-t',
+        pane,
+        condition,
+        `kill-pane -t ${pane}`,
+    ]);
+    return succeeded(result);
 }

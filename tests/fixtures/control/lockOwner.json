@@ -1,0 +1,6 @@
+{
+    "paneId": "%1",
+    "windowId": "@3",
+    "socket": "/tmp/tmux_dir/default",
+    "dir": "/path/to/project"
+}

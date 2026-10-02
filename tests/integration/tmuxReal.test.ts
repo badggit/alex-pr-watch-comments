@@ -5,9 +5,11 @@ import { describe, test, type TestContext } from 'node:test';
 
 import { createProcessRunner } from '../../src/proc.ts';
 import {
+    killDeadWatcherPane,
     markPaneDone,
     newWatcherWindow,
     paneForRun,
+    paneState,
     paneWatcherTag,
     splitWorker,
     tmuxInit,
@@ -226,6 +228,44 @@ await describe('tmux control on a real isolated server', async () => {
         const socket = fixture.tmux.socket;
         assert.equal(await paneWatcherTag(fixture.deps, fixture.tmuxPath, socket, result.paneId), PR_KEY);
         assert.equal(await paneWatcherTag(fixture.deps, fixture.tmuxPath, socket, fixture.tmux.pane), undefined);
+    });
+
+    await test('killDeadWatcherPane kills only a dead pane that carries the watcher tag', async (t) => {
+        const fixture = await setUp(t);
+        const { deps, tmuxPath } = fixture;
+        const socket = fixture.tmux.socket;
+        const open = async (prKey: string): Promise<string> => {
+            const created = await newWatcherWindow(deps, tmuxPath, fixture.tmux, prKey, [], ['sleep', '30']);
+            assert.ok(created);
+            return created.paneId;
+        };
+        // Ends the pane's own process; remain-on-exit keeps the pane as dead.
+        const end = async (pane: string): Promise<void> => {
+            const pid = await tmuxOn(deps, tmuxPath, socket, ['display-message', '-p', '-t', pane, '#{pane_pid}']);
+            assert.equal(pid?.code, 0);
+            process.kill(Number.parseInt(pid.stdout, 10), 'SIGKILL');
+            const died = await waitUntil(
+                WAIT_MS,
+                async () => (await paneState(deps, tmuxPath, socket, pane)) === 'dead'
+            );
+            assert.ok(died, `pane ${pane} never died`);
+        };
+        const deadTagged = await open(PR_KEY);
+        const deadOther = await open('o+r+13');
+        const alive = await open(PR_KEY);
+        const respawned = await open(PR_KEY);
+        for (const pane of [deadTagged, deadOther, respawned]) {
+            await end(pane);
+        }
+        const revived = await tmuxOn(deps, tmuxPath, socket, ['respawn-pane', '-t', respawned, 'sleep 30']);
+        assert.equal(revived?.code, 0);
+        for (const pane of [deadTagged, deadOther, alive, respawned]) {
+            assert.equal(await killDeadWatcherPane(deps, tmuxPath, socket, pane, PR_KEY), true, pane);
+        }
+        assert.equal(await paneState(deps, tmuxPath, socket, deadTagged), 'missing');
+        assert.equal(await paneState(deps, tmuxPath, socket, deadOther), 'dead');
+        assert.equal(await paneState(deps, tmuxPath, socket, alive), 'alive');
+        assert.equal(await paneState(deps, tmuxPath, socket, respawned), 'alive');
     });
 
     await test('markPaneDone sets @prwc_done only for the pane of the same run', async (t) => {

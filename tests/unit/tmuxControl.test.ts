@@ -3,6 +3,8 @@ import { describe, test } from 'node:test';
 
 import {
     capDonePanes,
+    formatLiteral,
+    killDeadWatcherPane,
     killPane,
     markPaneDone,
     newWatcherWindow,
@@ -11,6 +13,7 @@ import {
     paneWatcherTag,
     parseTmuxEnv,
     splitWorker,
+    tmuxArg,
     tmuxInit,
     tmuxLiteral,
     tmuxMessage,
@@ -89,6 +92,61 @@ await describe('tmuxOn', async () => {
         assert.ok(call);
         assert.equal(call.file, TMUX);
         assert.deepEqual(call.args, ['-S', '/tmp/tmux_dir/default', 'list-sessions']);
+    });
+
+    await test('an argument ending in ; gets one backslash before it, so tmux does not read a separator', async () => {
+        const fake = createFakeRunner();
+        const args = ['new-window', '-e', 'X=y;', 'value;', String.raw`a\;`, ';', 'plain', 'mid;dle'];
+        await tmuxOn(depsOf(fake), TMUX, SOCKET, args);
+        assert.deepEqual(tmuxArgs(fake.calls()[0]), [
+            'new-window',
+            '-e',
+            String.raw`X=y\;`,
+            String.raw`value\;`,
+            String.raw`a\\;`,
+            String.raw`\;`,
+            'plain',
+            'mid;dle',
+        ]);
+    });
+});
+
+await describe('tmuxArg and formatLiteral', async () => {
+    await test('tmuxArg changes only a trailing ;', () => {
+        assert.equal(tmuxArg('a;'), String.raw`a\;`);
+        assert.equal(tmuxArg('a;b'), 'a;b');
+        assert.equal(tmuxArg(''), '');
+    });
+
+    await test('formatLiteral escapes #, , and }', () => {
+        assert.equal(formatLiteral('a#b,c}d'), 'a##b#,c#}d');
+        assert.equal(formatLiteral(PR_KEY), PR_KEY);
+    });
+});
+
+await describe('killDeadWatcherPane', async () => {
+    await test('one conditional command checks death and tag and kills on the given socket', async () => {
+        const fake = createFakeRunner();
+        assert.equal(await killDeadWatcherPane(depsOf(fake), TMUX, WORKER_SOCKET, '%7', 'o+r,x}'), true);
+        const calls = fake.calls();
+        assert.equal(calls.length, 1);
+        assert.deepEqual(socketOf(calls[0]), ['-S', WORKER_SOCKET]);
+        assert.deepEqual(tmuxArgs(calls[0]), [
+            'if-shell',
+            '-F',
+            '-t',
+            '%7',
+            '#{&&:#{pane_dead},#{==:#{@prwc_watcher},o+r#,x#}}}',
+            'kill-pane -t %7',
+        ]);
+    });
+
+    await test('a failing command gives false and a malformed pane id makes no call', async () => {
+        const fake = createFakeRunner();
+        fake.respond('tmux', 'if-shell', { code: 1, stderr: "can't find pane: %7\n" });
+        assert.equal(await killDeadWatcherPane(depsOf(fake), TMUX, SOCKET, '%7', PR_KEY), false);
+        assert.equal(await killDeadWatcherPane(depsOf(fake), TMUX, SOCKET, '%7; kill-server', PR_KEY), false);
+        assert.equal(fake.calls().length, 1);
     });
 });
 
