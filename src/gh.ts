@@ -1,0 +1,66 @@
+import { GITHUB_HOST } from './constants.ts';
+import { isRecord, parseJson } from './json.ts';
+import type { CommandResult, Deps, GhFailure, GhResult } from './types.ts';
+import { isValidNodeId } from './validate.ts';
+
+export type GhDeps = Pick<Deps, 'runner'>;
+
+const MESSAGE_LIMIT = 500;
+const AUTH_MARKERS: readonly string[] = ['HTTP 401', 'Bad credentials', 'gh auth login'];
+const GONE_MARKER = 'Could not resolve to a node with the global id of';
+const GONE_ID = /global id of '([^']*)'/gu;
+const GRAPHQL_ARGS: readonly string[] = ['api', 'graphql', '--hostname', GITHUB_HOST, '--input', '-'];
+
+// The message is the trimmed, truncated stderr and is not sanitized: callers that display it use safeText.
+export function classifyGhFailure(stderr: string): GhFailure {
+    const message = stderr.trim().slice(0, MESSAGE_LIMIT);
+    if (AUTH_MARKERS.some((marker) => stderr.includes(marker))) {
+        return { kind: 'auth', message };
+    }
+    if (stderr.includes(GONE_MARKER)) {
+        const quoted = [...stderr.matchAll(GONE_ID)].map((match) => match[1] ?? '');
+        const ids = [...new Set(quoted.filter((id) => isValidNodeId(id)))];
+        return { kind: 'gone', ids, message };
+    }
+    return { kind: 'transient', message };
+}
+
+// stdout of a failed call is never parsed: gh prints raw error bodies or partial data there.
+function commandFailure(result: CommandResult): GhFailure {
+    const failure = classifyGhFailure(result.stderr);
+    if (failure.message.length > 0) {
+        return failure;
+    }
+    const message =
+        result.spawnError === undefined
+            ? `gh exited with code ${result.code}`
+            : `gh could not be started: ${result.spawnError}`;
+    return { ...failure, message };
+}
+
+export async function ghGraphql(
+    deps: GhDeps,
+    ghPath: string,
+    query: string,
+    variables: Readonly<Record<string, unknown>>
+): Promise<GhResult> {
+    const input = JSON.stringify({ query, variables });
+    const result = await deps.runner.run({ file: ghPath, args: GRAPHQL_ARGS, input });
+    if (result.code !== 0) {
+        return commandFailure(result);
+    }
+    const parsed = parseJson(result.stdout);
+    if (!isRecord(parsed)) {
+        return { kind: 'transient', message: 'gh api graphql printed output that is not a JSON object' };
+    }
+    return { kind: 'ok', data: parsed.data };
+}
+
+// For non-graphql calls; the caller passes the full argument list, including --hostname github.com.
+export async function ghCommand(deps: GhDeps, ghPath: string, args: readonly string[]): Promise<GhResult> {
+    const result = await deps.runner.run({ file: ghPath, args });
+    if (result.code !== 0) {
+        return commandFailure(result);
+    }
+    return { kind: 'ok', data: undefined };
+}
