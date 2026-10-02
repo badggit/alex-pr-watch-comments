@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { GH_STRIP_VARS, GITHUB_HOST, PS_PATH } from './constants.ts';
+import { GH_STRIP_VARS, GITHUB_HOST } from './constants.ts';
+import { identityFunction } from './proc.ts';
 import { buildPrompt, conveyorCommands, kitInputsValid, runFiles } from './prompt.ts';
 import { writeTextAtomic } from './stateStore.ts';
 import type { RunRecord } from './types.ts';
@@ -26,10 +27,12 @@ const SETTINGS_FILE = 'settings.json';
 const GQL_DIR = 'gql';
 const DECISION_GRACE_SECONDS = 5;
 const PERMISSION_PATTERN = '"notification_type"[[:space:]]*:[[:space:]]*"permission_prompt"';
-// Runs as claude's parent shell: records the shell's own start time and pid, then execs claude in place, so both
-// files describe claude itself. Claude starts only after a non-empty start time and the pid were both written;
+// Runs as claude's parent shell: records the shell's own identity token (identityFunction, the same token
+// processStart reads) and pid, then execs claude in place, so both files describe claude itself (the pid and its
+// start are unchanged by the exec). Claude starts only after a non-empty token and the pid were both written;
 // otherwise the shell exits non-zero and the launcher records that status instead.
-const CLAUDE_EXEC = `LC_ALL=C TZ=UTC ${PS_PATH} -o lstart= -p $$ > "$1" && [ -s "$1" ] && echo $$ > "$2" && shift 2 && exec "$@"`;
+const CLAUDE_EXEC = `${identityFunction()}
+prwc_identity $$ > "$1" && [ -s "$1" ] && echo $$ > "$2" && shift 2 && exec "$@"`;
 // Stale values from a tmux server environment could point the conveyor's git at another repository or config.
 const GIT_REDIRECT_VARS: readonly string[] = [
     'GIT_DIR',

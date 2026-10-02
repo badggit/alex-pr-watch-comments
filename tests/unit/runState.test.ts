@@ -249,7 +249,7 @@ await describe('owner Stop hook blocked (C8)', async () => {
         const lookup = lookupWith({ plus1At: FRESH_PLUS1 });
         const result = await evaluateRun(fixture.deps, fixture.session, RUN_ID, capture, lookup, liveSignal());
         assert.equal(result.state, 'deferred');
-        assert.equal(fixture.fake.calls('ps').length, 0);
+        assert.equal(fixture.fake.calls('other').length, 0);
         assert.ok(pidAlive(claude));
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
         assert.ok(runExists(fixture));
@@ -419,7 +419,7 @@ await describe('evaluateRun decisions and effects', async () => {
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
         assert.deepEqual(result, { state: 'needs_attention', reason: 'claude-pid-reused' });
         assert.deepEqual(terms(), []);
-        assert.equal(fixture.fake.calls('ps').length, 1);
+        assert.equal(fixture.fake.calls('other').length, 1);
         assert.ok(pidAlive(claude));
         const record = recordOf(fixture);
         assert.equal(record.state, 'needs_attention');
@@ -436,7 +436,7 @@ await describe('evaluateRun decisions and effects', async () => {
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
         assert.deepEqual(result, { state: 'needs_attention', reason: 'claude-pid-reused' });
         assert.ok(pidAlive(claude));
-        assert.equal(fixture.fake.calls('ps').length, 0);
+        assert.equal(fixture.fake.calls('other').length, 0);
     });
 
     await test('an event during the identity check vetoes the signal', async (t) => {
@@ -444,14 +444,14 @@ await describe('evaluateRun decisions and effects', async () => {
         await seedRun(fixture, { events: SETTLED });
         const claude = await startClaude(fixture, 'cooperative');
         const start = fs.readFileSync(path.join(runDir(fixture.stateDir, RUN_ID), 'claude.start'), 'utf8');
-        fixture.fake.respond('ps', 'ps', () => {
+        fixture.fake.respond('other', 'other', () => {
             fs.appendFileSync(eventsFile(fixture), 'tool 1\n');
             return { stdout: start, delayMs: 500 };
         });
         const terms = spyKills(t);
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
         assert.equal(result.state, 'deferred');
-        assert.equal(fixture.fake.calls('ps').length, 1);
+        assert.equal(fixture.fake.calls('other').length, 1);
         assert.deepEqual(terms(), []);
         assert.ok(pidAlive(claude));
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
@@ -462,7 +462,7 @@ await describe('evaluateRun decisions and effects', async () => {
         const fixture = await newRunFixture(t, { psPassthrough: false });
         await seedRun(fixture, { events: SETTLED });
         const claude = await startClaude(fixture, 'cooperative');
-        fixture.fake.respond('ps', 'ps', { code: 1, stdout: '' });
+        fixture.fake.respond('other', 'other', { code: 1, stdout: '' });
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
         assert.equal(result.state, 'deferred');
         assert.ok(fixture.deps.logLines.some((line) => line.includes(`could not verify claude pid for run ${RUN_ID}`)));
@@ -546,7 +546,7 @@ await describe('evaluateRun decisions and effects', async () => {
         controller.abort();
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }), controller.signal);
         assert.equal(result.state, 'deferred');
-        assert.equal(fixture.fake.calls('ps').length, 0);
+        assert.equal(fixture.fake.calls('other').length, 0);
         assert.ok(pidAlive(claude));
         assert.ok(runExists(fixture));
     });
@@ -885,7 +885,7 @@ await describe('unreadable record recovery', async () => {
     await test('an unverifiable claude pid keeps the slot', async (t) => {
         const fixture = await brokenRun(t, { psPassthrough: false });
         await startClaude(fixture, 'cooperative');
-        fixture.fake.respond('ps', 'ps', { code: 1, stdout: '' });
+        fixture.fake.respond('other', 'other', { code: 1, stdout: '' });
         breakRecord(fixture);
         assertKept(fixture, await evaluate(fixture, lookupWith()));
     });

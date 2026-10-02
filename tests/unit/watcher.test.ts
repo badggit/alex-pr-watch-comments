@@ -227,7 +227,7 @@ function respondDefaults(fake: FakeRunner, panePid: number): void {
     fake.respond('tmux', 'display-message', (call) => (call.args.includes(TMUX_FORMAT) ? { stdout: '$1 @1\n' } : {}));
 }
 
-// git goes to the real git through the offline transport and ps to the real ps (unless psPassthrough is false);
+// git goes to the real git through the offline transport and ps and the identity read (/bin/sh, tool other) to the real runner (unless psPassthrough is false);
 // gh and tmux are answered by the fake runner. The clock is fixed at the setup time.
 async function makeSetup(t: TestContext, options?: SetupOptions): Promise<Setup> {
     const testEnv = await createTestEnv();
@@ -249,6 +249,7 @@ async function makeSetup(t: TestContext, options?: SetupOptions): Promise<Setup>
     const passthrough: Passthrough = { git: offlineGitRunner(real, gitRoot) };
     if (options?.psPassthrough !== false) {
         passthrough.ps = real;
+        passthrough.other = real;
     }
     const fake = createFakeRunner({ passthrough });
     const panePid = testEnv.spawnOrphan('sleep', ['300']);
@@ -1004,7 +1005,7 @@ await describe('runWatch', async () => {
             env: { PRWC_LAUNCH_TOKEN: TOKEN },
             psPassthrough: false,
             prime: (fake) => {
-                fake.respond('ps', 'ps', { code: 1, stdout: '' });
+                fake.respond('other', 'other', { code: 1, stdout: '' });
             },
         });
         markLaunchReady(setup.stateDir, PR_KEY, TOKEN);
@@ -1113,7 +1114,7 @@ await describe('abort priority', async () => {
         const setup = await makeSetup(t, {
             psPassthrough: false,
             prime: (fake) => {
-                fake.respond('ps', 'ps', () => {
+                fake.respond('other', 'other', () => {
                     controller.abort();
                     return { stdout: 'Thu Oct  1 12:00:00 2026\n' };
                 });
@@ -1270,7 +1271,7 @@ await describe('launch publication', async () => {
             env: { PRWC_LAUNCH_TOKEN: TOKEN },
             psPassthrough: false,
             prime: (fake) => {
-                fake.respond('ps', 'ps', () => {
+                fake.respond('other', 'other', () => {
                     throw new Error('ps exploded');
                 });
             },

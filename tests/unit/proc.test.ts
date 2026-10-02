@@ -6,7 +6,14 @@ import path from 'node:path';
 import { describe, test } from 'node:test';
 
 import { GH_STRIP_VARS, KILL_GRACE_MS, PS_PATH } from '../../src/constants.ts';
-import { createProcessRunner, pidAlive, processStart, signalIfSame } from '../../src/proc.ts';
+import {
+    createProcessRunner,
+    identityFunction,
+    LINUX_BOOT_ID_FILE,
+    pidAlive,
+    processStart,
+    signalIfSame,
+} from '../../src/proc.ts';
 import type { CommandResult, CommandRunner } from '../../src/types.ts';
 import { createFakeRunner } from '../support/fakeRunner.ts';
 import { createTestEnv, waitUntil, type TestEnv } from '../support/testEnv.ts';
@@ -335,25 +342,139 @@ await describe('processStart and signalIfSame', async () => {
         assert.equal(await processStart(runner, await deadPid(env)), undefined);
     });
 
-    await test('runs ps with the pinned path, arguments and environment', async () => {
+    await test('runs the identity function through /bin/sh with the pinned arguments and environment', async () => {
         const fake = createFakeRunner();
-        fake.respond('ps', 'ps', { stdout: ' Thu Oct  1 10:00:00 2026\n' });
-        assert.equal(await processStart(fake.runner, 4242), 'Thu Oct  1 10:00:00 2026');
-        const calls = fake.calls('ps');
+        fake.respond('other', 'other', { stdout: ' boot-1:42\n' });
+        assert.equal(await processStart(fake.runner, 4242), 'boot-1:42');
+        const calls = fake.calls('other');
         assert.equal(calls.length, 1);
-        assert.equal(calls[0]?.file, PS_PATH);
-        assert.deepEqual(calls[0]?.args, ['-o', 'lstart=', '-p', '4242']);
+        assert.equal(calls[0]?.file, '/bin/sh');
+        assert.deepEqual(calls[0]?.args, ['-c', `${identityFunction()}\nprwc_identity "$1"`, 'sh', '4242']);
         assert.deepEqual(calls[0]?.env, { LC_ALL: 'C', TZ: 'UTC', PATH: '/usr/bin:/bin' });
         assert.equal(calls[0]?.input, undefined);
     });
 
-    await test('treats a failed or empty ps answer as unknown', async () => {
+    await test('treats a failed or empty identity read as unknown', async () => {
         const failed = createFakeRunner();
-        failed.respond('ps', 'ps', { code: 1, stdout: 'Thu Oct  1 10:00:00 2026\n' });
+        failed.respond('other', 'other', { code: 1, stdout: 'boot-1:42\n' });
         assert.equal(await processStart(failed.runner, 4242), undefined);
         const empty = createFakeRunner();
-        empty.respond('ps', 'ps', { stdout: ' \n' });
+        empty.respond('other', 'other', { stdout: ' \n' });
         assert.equal(await processStart(empty.runner, 4242), undefined);
+    });
+
+    await test('the identity is the boot id plus the start tick on Linux and ps lstart elsewhere', () => {
+        assert.ok(identityFunction('linux').includes(LINUX_BOOT_ID_FILE));
+        assert.ok(identityFunction('darwin').includes(`${PS_PATH} -o lstart= -p "$1"`));
+        assert.ok(!identityFunction('darwin').includes('/proc'));
+    });
+
+    await test('on Linux the start tick comes after the last parenthesis of a hostile command name', async (t) => {
+        const env = await createTestEnv();
+        t.after(() => {
+            env.cleanup();
+        });
+        const link = path.join(env.root, 'a) b (c 1 2 3');
+        fs.symlinkSync('/bin/sleep', link);
+        const pid = env.spawnOrphan(link, ['30']);
+        const token = await processStart(runner, pid);
+        assert.ok(token !== undefined);
+        if (process.platform !== 'linux') {
+            assert.equal(token, (await processStart(runner, pid)) ?? '');
+            return;
+        }
+        const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+        assert.ok(stat.includes('(a) b (c 1 2 3)'), stat);
+        const tick = stat.slice(stat.lastIndexOf(')') + 2).split(' ', 20)[19];
+        const boot = fs.readFileSync(LINUX_BOOT_ID_FILE, 'utf8').trim();
+        assert.equal(token, `${boot}:${tick}`);
+    });
+
+    await test('the Linux identity reads the whole stat and validates its structure and the boot id', async (t) => {
+        const env = await createTestEnv();
+        t.after(() => {
+            env.cleanup();
+        });
+        const boot = '0123abcd-4567-89ef-0123-456789abcdef';
+        const fields = Array.from({ length: 18 }, (_value, index) => String(index + 1)).join(' ');
+        const stat = (head: string, tick = '777'): string => `${head} S ${fields} ${tick} 0 0\n`;
+        const run = async (statText: string, bootText: string): Promise<CommandResult> => {
+            const statFile = path.join(env.root, 'stat');
+            const bootFile = path.join(env.root, 'boot');
+            fs.writeFileSync(statFile, statText);
+            fs.writeFileSync(bootFile, bootText);
+            const fn = identityFunction('linux')
+                .replace(LINUX_BOOT_ID_FILE, bootFile)
+                .replace('"/proc/$1/stat"', `"${statFile}"`);
+            return await runner.run({ file: '/bin/sh', args: ['-c', `${fn}\nprwc_identity 1`] });
+        };
+        const valid = await run(stat('123 (a b)'), `${boot}\n`);
+        assert.equal(valid.code, 0, valid.stderr);
+        assert.equal(valid.stdout, `${boot}:777\n`);
+        const newline = await run(stat('123 (a)\nx (b)'), `${boot}\n`);
+        assert.equal(newline.code, 0, newline.stderr);
+        assert.equal(newline.stdout, `${boot}:777\n`);
+        const refused: [string, string, string][] = [
+            ['no parenthesis', stat('123 a'), `${boot}\n`],
+            ['tick not digits', stat('123 (a)', '77x'), `${boot}\n`],
+            ['boot id dash', stat('123 (a)'), '-\n'],
+            ['boot id uppercase', stat('123 (a)'), `${boot.toUpperCase()}\n`],
+            ['boot id too long', stat('123 (a)'), `${boot}0\n`],
+            ['boot id empty', stat('123 (a)'), '\n'],
+            ['stat empty', '', `${boot}\n`],
+        ];
+        for (const [name, statText, bootText] of refused) {
+            const result = await run(statText, bootText);
+            assert.notEqual(result.code, 0, name);
+            assert.equal(result.stdout, '', name);
+        }
+    });
+
+    await test('on Linux a command name with a newline still gives the identity of the process', async (t) => {
+        const env = await createTestEnv();
+        t.after(() => {
+            env.cleanup();
+        });
+        const link = path.join(env.root, 'a)\nx (b');
+        fs.symlinkSync('/bin/sleep', link);
+        const pid = env.spawnOrphan(link, ['30']);
+        const token = await processStart(runner, pid);
+        assert.ok(token !== undefined);
+        if (process.platform !== 'linux') {
+            assert.equal(await processStart(runner, pid), token);
+            return;
+        }
+        const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+        assert.ok(stat.includes('(a)\nx (b)'), stat);
+        const tick = stat.slice(stat.lastIndexOf(')') + 2).split(' ', 20)[19];
+        assert.equal(token, `${fs.readFileSync(LINUX_BOOT_ID_FILE, 'utf8').trim()}:${tick}`);
+    });
+
+    await test('the Linux identity fails closed when the boot id or the stat file cannot be read', async (t) => {
+        const env = await createTestEnv();
+        t.after(() => {
+            env.cleanup();
+        });
+        const pid = env.spawnOrphan('sleep', ['30']);
+        const emptyBoot = path.join(env.root, 'empty-boot');
+        const badBoot = path.join(env.root, 'bad-boot');
+        fs.writeFileSync(emptyBoot, '\n');
+        fs.writeFileSync(badBoot, 'not a boot id\n');
+        for (const bootFile of [path.join(env.root, 'missing'), emptyBoot, badBoot]) {
+            const fn = identityFunction('linux').replace(LINUX_BOOT_ID_FILE, bootFile);
+            const result = await runner.run({
+                file: '/bin/sh',
+                args: ['-c', `${fn}\nprwc_identity "$1"`, 'sh', String(pid)],
+            });
+            assert.notEqual(result.code, 0, bootFile);
+            assert.equal(result.stdout, '', bootFile);
+        }
+        const dead = await runner.run({
+            file: '/bin/sh',
+            args: ['-c', `${identityFunction('linux')}\nprwc_identity "$1"`, 'sh', String(await deadPid(env))],
+        });
+        assert.notEqual(dead.code, 0);
+        assert.equal(dead.stdout, '');
     });
 
     await test('sends the signal when the start time matches', async (t) => {
@@ -408,11 +529,11 @@ await describe('processStart and signalIfSame', async () => {
         const start = await processStart(runner, pid);
         assert.ok(start !== undefined);
         const fake = createFakeRunner();
-        fake.respond('ps', 'ps', { stdout: `${start}\n`, delayMs: 300 });
+        fake.respond('other', 'other', { stdout: `${start}\n`, delayMs: 300 });
         const guardRuns: { at: number; psCalls: number }[] = [];
         const started = performance.now();
         const outcome = await signalIfSame(fake.runner, pid, start, 'SIGTERM', () => {
-            guardRuns.push({ at: performance.now(), psCalls: fake.calls('ps').length });
+            guardRuns.push({ at: performance.now(), psCalls: fake.calls('other').length });
             return false;
         });
         assert.equal(outcome, 'vetoed');
@@ -429,7 +550,7 @@ await describe('processStart and signalIfSame', async () => {
         });
         const pid = env.spawnOrphan('sleep', ['30']);
         const fake = createFakeRunner();
-        fake.respond('ps', 'ps', { code: 1, stdout: '' });
+        fake.respond('other', 'other', { code: 1, stdout: '' });
         assert.equal(await signalIfSame(fake.runner, pid, 'Mon Jan  1 00:00:00 2001', 'SIGTERM'), 'unverifiable');
         assert.equal(await waitUntil(1000, () => !pidAlive(pid)), false);
     });
@@ -441,7 +562,7 @@ await describe('processStart and signalIfSame', async () => {
         });
         const pid = await deadPid(env);
         const fake = createFakeRunner();
-        fake.respond('ps', 'ps', { code: 1, stdout: '' });
+        fake.respond('other', 'other', { code: 1, stdout: '' });
         assert.equal(await signalIfSame(fake.runner, pid, 'Mon Jan  1 00:00:00 2001', 'SIGTERM'), 'gone');
     });
 
@@ -475,7 +596,7 @@ await describe('processStart and signalIfSame', async () => {
         const pid = env.spawnOrphan('sleep', ['30']);
         const start = 'Thu Oct  1 10:00:00 2026';
         const fake = createFakeRunner();
-        fake.respond('ps', 'ps', { stdout: `${start}\n` });
+        fake.respond('other', 'other', { stdout: `${start}\n` });
         const realKill = process.kill.bind(process);
         let failure = 'EPERM';
         const sent: (string | number | undefined)[] = [];

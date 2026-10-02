@@ -99,7 +99,8 @@ function buildSession(env: TestEnv, stateDir: string): Session {
     };
 }
 
-// ps goes to the real runner unless psPassthrough is false; gh and tmux are always answered by the fake runner.
+// The identity read (processStart runs /bin/sh, tool other) and ps go to the real runner unless psPassthrough is
+// false; gh and tmux are always answered by the fake runner.
 export async function newRunFixture(t: TestContext, options?: FixtureOptions): Promise<RunFixture> {
     const env = await createTestEnv();
     t.after(() => {
@@ -109,7 +110,7 @@ export async function newRunFixture(t: TestContext, options?: FixtureOptions): P
     assert.ok(init.ok);
     fs.mkdirSync(projectDir(env), { recursive: true });
     const realRunner = createProcessRunner(env.env);
-    const passthrough: Passthrough = options?.psPassthrough === false ? {} : { ps: realRunner };
+    const passthrough: Passthrough = options?.psPassthrough === false ? {} : { ps: realRunner, other: realRunner };
     const fake = createFakeRunner({ passthrough });
     const deps: TestDeps = { ...env.deps(fake.runner), env: { ...env.env, ...options?.env } };
     return { env, stateDir: init.stateDir, fake, deps, session: buildSession(env, init.stateDir), realRunner };

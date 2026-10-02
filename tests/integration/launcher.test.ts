@@ -5,7 +5,7 @@ import { describe, test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { PS_PATH } from '../../src/constants.ts';
-import { createProcessRunner, pidAlive, processStart } from '../../src/proc.ts';
+import { createProcessRunner, LINUX_BOOT_ID_FILE, pidAlive, processStart } from '../../src/proc.ts';
 import { claimLaunch, createRun, launchDecision } from '../../src/runStore.ts';
 import type { Env, RecordPatch, RunRecord } from '../../src/types.ts';
 import { buildHookScript, buildLauncherScript, writeWorkerKit } from '../../src/workerKit.ts';
@@ -154,12 +154,14 @@ function writeScript(file: string, lines: readonly string[]): void {
     fs.writeFileSync(file, `${['#!/bin/sh', ...lines].join('\n')}\n`, { mode: 0o755 });
 }
 
-// Swaps the start-time command inside the generated launcher for a test stub.
-function replacePs(kit: Kit, psStub: string): void {
+// Swaps the identity source inside the generated launcher for a test file: the boot id file on Linux, the ps
+// executable elsewhere.
+function replaceIdentitySource(kit: Kit, stub: string): void {
     const launcher = path.join(kit.rd, 'launcher.sh');
     const text = readText(launcher);
-    assert.ok(text.includes(PS_PATH));
-    fs.writeFileSync(launcher, text.replace(PS_PATH, psStub));
+    const source = process.platform === 'linux' ? LINUX_BOOT_ID_FILE : PS_PATH;
+    assert.ok(text.includes(source));
+    fs.writeFileSync(launcher, text.replace(source, stub));
 }
 
 function assertNotStartedWithFailure(kit: Kit): void {
@@ -293,6 +295,9 @@ await describe('launcher', async () => {
         const expected = await processStart(createProcessRunner(kit.env.env), pid);
         assert.ok(expected !== undefined);
         assert.equal(start.trim(), expected);
+        if (process.platform === 'linux') {
+            assert.match(expected, /^[\da-f-]+:\d+$/u);
+        }
         process.kill(pid, 'SIGTERM');
         const result = await observed.result;
         assert.equal(result.code, 0);
@@ -400,15 +405,25 @@ await describe('launcher', async () => {
     });
 
     await test('never starts claude when the start time cannot be read', async (t) => {
-        const cases: [string, string[]][] = [
-            ['ps-fails', ['exit 1']],
-            ['ps-empty', ['exit 0']],
-        ];
-        for (const [name, body] of cases) {
+        // Linux: a missing, empty or malformed boot id; elsewhere: a ps that fails or prints nothing.
+        const linux = process.platform === 'linux';
+        const cases: [string, string | undefined][] = linux
+            ? [
+                  ['boot-missing', undefined],
+                  ['boot-empty', '\n'],
+                  ['boot-malformed', 'not a boot id\n'],
+              ]
+            : [
+                  ['ps-fails', '#!/bin/sh\nexit 1\n'],
+                  ['ps-empty', '#!/bin/sh\nexit 0\n'],
+              ];
+        for (const [name, content] of cases) {
             const kit = await prepareKit(t);
-            const psStub = path.join(kit.env.root, name);
-            writeScript(psStub, body);
-            replacePs(kit, psStub);
+            const stub = path.join(kit.env.root, name);
+            if (content !== undefined) {
+                fs.writeFileSync(stub, content, { mode: 0o755 });
+            }
+            replaceIdentitySource(kit, stub);
             await runLauncher(kit);
             assertNotStartedWithFailure(kit);
             assert.ok(!fs.existsSync(path.join(kit.rd, 'claude.pid')), name);

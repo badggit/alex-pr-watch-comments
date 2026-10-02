@@ -15,6 +15,7 @@ const ABORTED_CODE = 143;
 const SPAWN_FAILED_CODE = 127;
 const KILLED_CODE = 137;
 const PS_ENV: Env = { LC_ALL: 'C', TZ: 'UTC', PATH: '/usr/bin:/bin' };
+export const LINUX_BOOT_ID_FILE = '/proc/sys/kernel/random/boot_id';
 
 function errorCode(error: unknown): string | undefined {
     if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
@@ -222,9 +223,45 @@ export function pidAlive(pid: number): boolean {
     }
 }
 
-// Undefined does not tell a dead pid from a failed ps; signalIfSame decides that with pidAlive.
+// Linux ps derives lstart from the boot time, which moves whenever the wall clock is stepped, so on Linux the
+// identity is the boot id (UUID shape) plus the boot-relative start tick of /proc/PID/stat: field 22, the 20th field
+// after the LAST ')' of the whole file, because the command name may hold spaces, parentheses and newlines. Only shell
+// builtins are used; any unreadable or malformed value fails, so the identity is unverifiable, never a match.
+const HEX = '[0-9a-f]';
+const UUID_PATTERN = [8, 4, 4, 4, 12].map((count) => HEX.repeat(count)).join('-');
+const LINUX_IDENTITY = [
+    'prwc_identity() (',
+    "    IFS=' '",
+    '    set -f',
+    "    stat=''",
+    '    while IFS= read -r line || [ -n "$line" ]; do',
+    '        stat="$stat$line "',
+    '    done < "/proc/$1/stat" || exit 1',
+    `    read -r boot < ${LINUX_BOOT_ID_FILE} || exit 1`,
+    "    case $stat in *')'*) ;; *) exit 1 ;; esac",
+    `    case $boot in ${UUID_PATTERN}) ;; *) exit 1 ;; esac`,
+    "    rest=${stat##*')'}",
+    '    set -- $rest',
+    '    [ "$#" -ge 20 ] || exit 1',
+    '    start=${20}',
+    "    case $start in '' | *[!0-9]*) exit 1 ;; esac",
+    `    printf '%s:%s\n' "$boot" "$start"`,
+    ')',
+].join('\n');
+// macOS ps records lstart at process start, so it stays stable for the life of the process.
+const PS_IDENTITY = ['prwc_identity() (', `    LC_ALL=C TZ=UTC exec ${PS_PATH} -o lstart= -p "$1"`, ')'].join('\n');
+
+// The POSIX sh function prwc_identity PID that prints the process identity token: the only definition, shared by
+// processStart and the worker launcher, which records claude's identity before it execs claude.
+export function identityFunction(platform: NodeJS.Platform = process.platform): string {
+    return platform === 'linux' ? LINUX_IDENTITY : PS_IDENTITY;
+}
+
+// The identity token of pid (see identityFunction). Undefined does not tell a dead pid from a failed read;
+// signalIfSame decides that with pidAlive.
 export async function processStart(runner: CommandRunner, pid: number): Promise<string | undefined> {
-    const result = await runner.run({ file: PS_PATH, args: ['-o', 'lstart=', '-p', String(pid)], env: PS_ENV });
+    const script = `${identityFunction()}\nprwc_identity "$1"`;
+    const result = await runner.run({ file: '/bin/sh', args: ['-c', script, 'sh', String(pid)], env: PS_ENV });
     const start = result.stdout.trim();
     if (result.code !== 0 || start.length === 0) {
         return;
@@ -232,7 +269,7 @@ export async function processStart(runner: CommandRunner, pid: number): Promise<
     return start;
 }
 
-// Signals pid only when its start time still equals expectedStart and the optional guard, called synchronously
+// Signals pid only when its identity token still equals expectedStart and the optional guard, called synchronously
 // after the ps result with no await before the kill, agrees. EPERM from the kill means the pid now belongs to a
 // process this user may not signal, so it cannot be the recorded one: mismatch.
 export async function signalIfSame(
