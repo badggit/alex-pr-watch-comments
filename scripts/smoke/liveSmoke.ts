@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { GH_STRIP_VARS, GH_TOKEN_VARS, GITHUB_HOST } from '../../src/constants.ts';
+import { GH_STRIP_VARS, GH_TOKEN_VARS, GITHUB_HOST, REPLY_TAG } from '../../src/constants.ts';
 import { ghGraphql } from '../../src/gh.ts';
 import { getArray, getBoolean, getNumber, getPath, getString, parseJson } from '../../src/json.ts';
 import { normalizeCallerPath, resolveExecutable } from '../../src/preflight.ts';
@@ -846,6 +846,12 @@ async function branchFailure(ctx: Ctx, target: Target): Promise<string | undefin
     return text.includes('beta') ? undefined : `${SCRATCH_FILE} on the scratch branch does not contain beta`;
 }
 
+// The tag must be the literal last line: only one final line break (LF or CRLF) may follow it.
+function endsWithReplyTag(body: string): boolean {
+    const text = body.replace(/\r?\n$/, '');
+    return text === REPLY_TAG || text.endsWith(`\n${REPLY_TAG}`);
+}
+
 async function githubFailure(ctx: Ctx, target: Target): Promise<string | undefined> {
     const { tools, repo, pr } = target;
     const reactions = await viewerReactions(ctx, tools, repo, pr);
@@ -854,8 +860,12 @@ async function githubFailure(ctx: Ctx, target: Target): Promise<string | undefin
         return reaction[1];
     }
     const comments = await listed(ctx, tools, `${pullPath(repo, pr)}/comments`);
-    if (!comments.some((comment) => getNumber(comment, 'in_reply_to_id') === target.commentA.id)) {
+    const replies = comments.filter((comment) => getNumber(comment, 'in_reply_to_id') === target.commentA.id);
+    if (replies.length === 0) {
         return 'no reply in the thread of comment A';
+    }
+    if (!replies.some((reply) => endsWithReplyTag(getString(reply, 'body') ?? ''))) {
+        return 'reply tag missing';
     }
     const issueComments = await listed(ctx, tools, `${repoPath(repo)}/issues/${pr.number}/comments`);
     if (issueComments.length > 0) {

@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import { REPLY_TAG } from '../../src/constants.ts';
 import { getArray, getPath, parseJson } from '../../src/json.ts';
 import { quoteUntrusted, visibleText } from '../../src/untrustedText.ts';
 
@@ -184,7 +185,7 @@ async function run(): Promise<number> {
     runHook(info.runDir, 'tool');
     fs.writeFileSync(
         info.replyFile,
-        `Stub reply from the pr-watch-comments smoke test for comment ${info.commentDbId}: no change was needed.\n`
+        `Stub reply from the pr-watch-comments smoke test for comment ${info.commentDbId}: no change was needed.\n${REPLY_TAG}\n`
     );
     const finished = resolveComment(lines, info, allow);
     recordPath();

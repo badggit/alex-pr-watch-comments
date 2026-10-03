@@ -5,6 +5,9 @@ export const STATE_FORMAT = 1;
 
 export const GITHUB_HOST = 'github.com';
 
+// Marks every inline reply the worker posts, on its own last line.
+export const REPLY_TAG = '#alex-pr-watch-comments';
+
 export const GH_TOKEN_VARS: readonly string[] = [
     'GH_TOKEN',
     'GITHUB_TOKEN',

@@ -4,12 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 
+import { REPLY_TAG } from '../../src/constants.ts';
 import { buildPrompt, conveyorCommands } from '../../src/prompt.ts';
 import type { RecordPatch, RunRecord } from '../../src/types.ts';
 
 const RD = '/state/runs/20261002120000-456';
 const SHA = 'a'.repeat(40);
 const TOOLS_DIR = '/opt/tools/bin';
+const TAG_RULE = `End the reply body with the tag ${REPLY_TAG} on its own last line, exactly as written, with nothing after it.`;
 
 const PHRASES: readonly string[] = [
     'Do not ask clarifying questions',
@@ -128,6 +130,26 @@ await describe('buildPrompt', async () => {
             assert.ok(mustPrompt(kitRecord()).includes(phrase));
         });
     }
+
+    await test('the reply tag is the fixed project tag', () => {
+        assert.equal(REPLY_TAG, '#alex-pr-watch-comments');
+    });
+
+    await test('the success reply step asks for the reply tag on its own last line', () => {
+        const lines = mustPrompt(kitRecord()).split('\n');
+        const step = lines.find((line) => line.startsWith('9. Reply inline in the same thread'));
+        assert.ok(step !== undefined, 'missing step 9');
+        assert.ok(step.includes(TAG_RULE), step);
+    });
+
+    await test('the failure path reply asks for the reply tag on its own last line', () => {
+        const lines = mustPrompt(kitRecord()).split('\n');
+        const header = lines.indexOf('Failure path:');
+        assert.ok(header !== -1, 'missing failure path');
+        const failure = lines[header + 1] ?? '';
+        assert.ok(failure.includes('explains the blocker'), failure);
+        assert.ok(failure.includes(TAG_RULE), failure);
+    });
 
     await test('describes the quoted context lines as untrusted data', () => {
         const prompt = mustPrompt(kitRecord());
