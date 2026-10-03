@@ -1,0 +1,10 @@
+{
+    "name": "pr-watch-comments",
+    "version": "0.1.0",
+    "description": "Watch a GitHub pull request and turn rocket-approved inline review comments into commits made by Claude Code in tmux panes.",
+    "author": {
+        "name": "badggit"
+    },
+    "repository": "https://github.com/badggit/pr-watch-comments",
+    "keywords": ["github", "pull-request", "code-review", "review-comments", "tmux", "automation"]
+}
