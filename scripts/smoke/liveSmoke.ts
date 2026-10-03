@@ -190,7 +190,7 @@ const KILL_ATTEMPTS = 3;
 const KILL_RETRY_MS = 1000;
 const WATCHING = /^watching \S+ in window (@\d+)$/mu;
 const TRUST_FAILURE =
-    'trust dialog: trust the repository directory in Claude Code (run claude once in it and choose Yes, I trust this folder), then rerun';
+    'trust dialog: trust .cache/smoke/clone in Claude Code (run claude once in it and choose Yes, I trust this folder), then rerun';
 // The first pane runs the background start and keeps its output and exit code in the work area.
 const PANE_SCRIPT = [
     'out=$1',
@@ -465,7 +465,10 @@ async function pushScratchBranch(
     branch: string,
     identity: Identity
 ): Promise<{ clone: string; headSha: string }> {
-    const clone = path.join(workArea, 'clone');
+    // Claude Code asks for folder trust per repository root, so the clone keeps one path across runs: the owner
+    // trusts it once and every later run reuses that decision. Two smokes at the same time would share it.
+    const clone = path.join(SMOKE_CACHE, 'clone');
+    fs.rmSync(clone, { recursive: true, force: true });
     const url = `https://github.com/${repo.owner}/${repo.repo}.git`;
     await git(ctx, tools, workArea, ['clone', '--quiet', '--no-tags', '--branch', repo.defaultBranch, url, clone]);
     await setIdentity(ctx, tools, clone, identity);
