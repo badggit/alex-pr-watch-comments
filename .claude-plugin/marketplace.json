@@ -1,0 +1,15 @@
+{
+    "$schema": "https://www.schemastore.org/claude-code-marketplace.json",
+    "name": "pr-watch-comments",
+    "description": "Marketplace for the pr-watch-comments plugin.",
+    "owner": {
+        "name": "badggit"
+    },
+    "plugins": [
+        {
+            "name": "pr-watch-comments",
+            "source": "./",
+            "description": "Watch a GitHub pull request and turn rocket-approved inline review comments into commits made by Claude Code in tmux panes."
+        }
+    ]
+}

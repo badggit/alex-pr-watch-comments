@@ -1,0 +1,13 @@
+{
+    "data": {
+        "viewer": { "login": "reviewer" },
+        "rateLimit": { "remaining": 4000, "resetAt": "2026-10-02T13:00:00Z" },
+        "repository": {
+            "pullRequest": {
+                "state": "CLOSED",
+                "headRefName": "feature",
+                "reviewThreads": { "pageInfo": { "hasNextPage": false, "endCursor": "T1" }, "nodes": [] }
+            }
+        }
+    }
+}

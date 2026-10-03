@@ -1,0 +1,17 @@
+{
+    "id": "PRRC_c101",
+    "databaseId": 101,
+    "url": "https://github.com/o/r/pull/12#discussion_r101",
+    "lastEditedAt": null,
+    "body": "please rename this",
+    "path": "src/app.ts",
+    "line": 7,
+    "author": { "login": "carol" },
+    "rocket": { "pageInfo": { "hasNextPage": false, "endCursor": "R1" }, "nodes": [] },
+    "plus": { "pageInfo": { "hasNextPage": false, "endCursor": "P1" }, "nodes": [] },
+    "reactionGroups": [
+        { "content": "ROCKET", "viewerHasReacted": false },
+        { "content": "THUMBS_UP", "viewerHasReacted": false },
+        { "content": "EYES", "viewerHasReacted": false }
+    ]
+}

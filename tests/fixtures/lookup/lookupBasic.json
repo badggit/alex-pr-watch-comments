@@ -1,0 +1,57 @@
+{
+    "data": {
+        "viewer": { "login": "me" },
+        "rateLimit": { "remaining": 4000, "resetAt": "2026-01-01T01:00:00Z" },
+        "nodes": [
+            {
+                "id": "PRRC_a",
+                "databaseId": 101,
+                "url": "https://github.com/OWNER/REPO/pull/1#discussion_r101",
+                "lastEditedAt": null,
+                "body": "fix\tthis\nplease C:\\path",
+                "path": "src/a.ts",
+                "line": 12,
+                "author": { "login": "reviewer" },
+                "rocket": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": "R2" },
+                    "nodes": [
+                        { "createdAt": "2026-01-01T00:00:05Z", "user": { "login": "other" } },
+                        { "createdAt": "2026-01-01T00:00:10Z", "user": { "login": "me" } }
+                    ]
+                },
+                "plus": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": "P1" },
+                    "nodes": [{ "createdAt": "2026-01-01T00:00:20Z", "user": { "login": "other" } }]
+                },
+                "reactionGroups": [
+                    { "content": "ROCKET", "viewerHasReacted": true },
+                    { "content": "THUMBS_UP", "viewerHasReacted": false },
+                    { "content": "EYES", "viewerHasReacted": true }
+                ]
+            },
+            {
+                "id": "PRRC_b",
+                "databaseId": 102,
+                "url": "https://github.com/OWNER/REPO/pull/1#discussion_r102",
+                "lastEditedAt": "2026-01-01T00:02:00Z",
+                "body": "second",
+                "path": "src/b.ts",
+                "line": null,
+                "author": { "login": "reviewer" },
+                "rocket": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": "R1" },
+                    "nodes": [{ "createdAt": "2026-01-01T00:01:00Z", "user": { "login": "me" } }]
+                },
+                "plus": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": "P1" },
+                    "nodes": [{ "createdAt": "2026-01-01T00:03:00Z", "user": { "login": "me" } }]
+                },
+                "reactionGroups": [
+                    { "content": "ROCKET", "viewerHasReacted": true },
+                    { "content": "THUMBS_UP", "viewerHasReacted": true },
+                    { "content": "EYES", "viewerHasReacted": false }
+                ]
+            }
+        ]
+    }
+}

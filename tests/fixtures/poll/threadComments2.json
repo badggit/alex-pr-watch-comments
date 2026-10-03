@@ -1,0 +1,94 @@
+{
+    "data": {
+        "rateLimit": {
+            "remaining": 100,
+            "resetAt": "2026-10-02T13:00:00Z"
+        },
+        "node": {
+            "comments": {
+                "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpHOAAAAyA=="
+                },
+                "nodes": [
+                    {
+                        "id": "PRRC_kwDOAbCdEf6AAAB3",
+                        "databaseId": 2102000003,
+                        "reactionGroups": [
+                            {
+                                "content": "THUMBS_UP",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "THUMBS_DOWN",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "LAUGH",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "HOORAY",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "CONFUSED",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "HEART",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "ROCKET",
+                                "viewerHasReacted": true
+                            },
+                            {
+                                "content": "EYES",
+                                "viewerHasReacted": false
+                            }
+                        ]
+                    },
+                    {
+                        "id": "PRRC_kwDOAbCdEf6AAAB4",
+                        "databaseId": 2102000004,
+                        "reactionGroups": [
+                            {
+                                "content": "THUMBS_UP",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "THUMBS_DOWN",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "LAUGH",
+                                "viewerHasReacted": true
+                            },
+                            {
+                                "content": "HOORAY",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "CONFUSED",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "HEART",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "ROCKET",
+                                "viewerHasReacted": false
+                            },
+                            {
+                                "content": "EYES",
+                                "viewerHasReacted": false
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+}

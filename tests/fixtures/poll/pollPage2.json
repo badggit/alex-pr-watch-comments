@@ -1,0 +1,112 @@
+{
+    "data": {
+        "viewer": {
+            "login": "reviewer"
+        },
+        "rateLimit": {
+            "remaining": 4997,
+            "resetAt": "2026-10-02T13:00:00Z"
+        },
+        "repository": {
+            "pullRequest": {
+                "state": "OPEN",
+                "headRefName": "feature/fix-parser",
+                "reviewThreads": {
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": "Y3Vyc29yOnYyOpK0Mg=="
+                    },
+                    "nodes": [
+                        {
+                            "id": "PRRT_kwDOAbCdEf5aAAA3",
+                            "comments": {
+                                "pageInfo": {
+                                    "hasNextPage": false,
+                                    "endCursor": "Y3Vyc29yOnYyOpHOAAAAAg=="
+                                },
+                                "nodes": [
+                                    {
+                                        "id": "PRRC_kwDOAbCdEf6AAAA4",
+                                        "databaseId": 2101000004,
+                                        "reactionGroups": [
+                                            {
+                                                "content": "THUMBS_UP",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "THUMBS_DOWN",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "LAUGH",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "HOORAY",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "CONFUSED",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "HEART",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "ROCKET",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "EYES",
+                                                "viewerHasReacted": false
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "id": "PRRC_kwDOAbCdEf6AAAA5",
+                                        "databaseId": 2101000005,
+                                        "reactionGroups": [
+                                            {
+                                                "content": "THUMBS_UP",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "THUMBS_DOWN",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "LAUGH",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "HOORAY",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "CONFUSED",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "HEART",
+                                                "viewerHasReacted": false
+                                            },
+                                            {
+                                                "content": "ROCKET",
+                                                "viewerHasReacted": true
+                                            },
+                                            {
+                                                "content": "EYES",
+                                                "viewerHasReacted": true
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

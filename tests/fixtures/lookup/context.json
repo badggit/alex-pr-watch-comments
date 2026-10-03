@@ -1,0 +1,19 @@
+{
+    "data": {
+        "rateLimit": { "remaining": 4000, "resetAt": "2026-01-01T01:00:00Z" },
+        "nodes": [
+            {
+                "id": "PRRC_second",
+                "createdAt": "2026-01-01T00:02:00Z",
+                "body": "second reply",
+                "author": { "login": "bob" }
+            },
+            {
+                "id": "PRRC_first",
+                "createdAt": "2026-01-01T00:01:00Z",
+                "body": "first comment\nwith two lines",
+                "author": { "login": "alice" }
+            }
+        ]
+    }
+}

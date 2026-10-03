@@ -1,0 +1,13 @@
+{
+    "nodeId": "PRRC_kwDOAbc456",
+    "dbId": 456,
+    "rocketAt": 1790000000,
+    "plus1At": null,
+    "eyes": false,
+    "editedAt": null,
+    "url": "https://github.com/o/r/pull/12#discussion_r456",
+    "author": "reviewer",
+    "path": "src/app.ts",
+    "line": 10,
+    "body": "Please rename this variable."
+}

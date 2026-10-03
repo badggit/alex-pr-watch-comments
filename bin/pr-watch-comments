@@ -1,0 +1,85 @@
+#!/bin/sh
+# Entry launcher: checks the Node.js version and hands off to src/main.ts. Must run under macOS /bin/sh
+# (bash 3.2 in POSIX mode) and dash, so it uses only POSIX features and no external command on the normal path.
+
+PROG=pr-watch-comments
+
+# A plain decimal number without leading zeros, of any length.
+is_count() {
+    case $1 in
+        '' | *[!0-9]* | 0?*) return 1 ;;
+    esac
+    return 0
+}
+
+# Compares a count (see is_count) with a minimum of at most two digits. A count of three or more digits is
+# at least 100 and is decided by its length, so no value is ever too long for shell arithmetic.
+at_least() {
+    if [ "${#1}" -gt 2 ]; then
+        return 0
+    fi
+    [ "$1" -ge "$2" ]
+}
+
+# Follows symlinks with plain readlink (no readlink -f, which older macOS lacks) to find the real script.
+self=$0
+hops=0
+while [ -h "$self" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 40 ]; then
+        printf '%s: too many levels of symbolic links: %s\n' "$PROG" "$0" >&2
+        exit 1
+    fi
+    link=$(readlink "$self") || exit 1
+    case $link in
+        /*) self=$link ;;
+        *)
+            case $self in
+                */*) self=${self%/*}/$link ;;
+                *) self=$link ;;
+            esac
+            ;;
+    esac
+done
+case $self in
+    */*) bin_dir=${self%/*} ;;
+    *) bin_dir=. ;;
+esac
+[ -n "$bin_dir" ] || bin_dir=/
+ROOT=$(CDPATH= cd -P -- "$bin_dir/.." && pwd) || exit 1
+
+if [ -n "${PRWC_NODE:-}" ]; then
+    NODE=$PRWC_NODE
+else
+    NODE=$(command -v node) || NODE=
+fi
+if [ -z "$NODE" ]; then
+    printf '%s: node not found; Node.js 22.18 or newer is required\n' "$PROG" >&2
+    exit 1
+fi
+
+VERSION=$("$NODE" -p process.versions.node 2>/dev/null) || VERSION=
+supported=0
+major=${VERSION%%.*}
+rest=${VERSION#*.}
+minor=${rest%%.*}
+patch=${rest#*.}
+# Exactly MAJOR.MINOR.PATCH, all numeric: anything else (a suffix, a fourth part) is refused.
+case $VERSION in
+    *.*.*.*) ;;
+    *.*.*)
+        if is_count "$major" && is_count "$minor" && is_count "$patch"; then
+            if at_least "$major" 24 ||
+                { [ "$major" = 23 ] && at_least "$minor" 6; } ||
+                { [ "$major" = 22 ] && at_least "$minor" 18; }; then
+                supported=1
+            fi
+        fi
+        ;;
+esac
+if [ "$supported" -ne 1 ]; then
+    printf '%s: Node.js 22.18 or newer is required, and 23.6 or newer on the 23 line (found %s)\n' "$PROG" "${VERSION:-unknown}" >&2
+    exit 1
+fi
+
+exec "$NODE" "$ROOT/src/main.ts" "$@"

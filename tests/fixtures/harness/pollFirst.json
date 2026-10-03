@@ -1,0 +1,6 @@
+{
+    "data": {
+        "repository": { "pullRequest": { "state": "OPEN", "reviewThreads": { "nodes": [] } } },
+        "rateLimit": { "remaining": 4999, "resetAt": "2026-01-01T00:00:00Z" }
+    }
+}

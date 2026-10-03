@@ -7,10 +7,10 @@
 *.local
 *.local.*
 local.*
+/.cache/
 
 # Dependencies
 /node_modules
-package-lock.json
 /.pnp
 .pnp.*
 .yarn/*
