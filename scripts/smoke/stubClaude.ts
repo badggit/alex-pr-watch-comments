@@ -1,6 +1,6 @@
 // Stand-in claude for the stub mode of the live smoke. It acts like a worker that found nothing to change: it fires
-// the run's hooks, posts an inline reply and swaps eyes for a fresh +1, each through the exact conveyor line of the
-// prompt's command list, then waits until the watcher terminates it.
+// the run's hooks and, for every comment of the batch in order, posts an inline reply and swaps eyes for a fresh +1,
+// each through the exact conveyor line the prompt names for that comment, then waits until the watcher terminates it.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,13 +10,13 @@ import { REPLY_TAG } from '../../src/constants.ts';
 import { getArray, getPath, parseJson } from '../../src/json.ts';
 import { quoteUntrusted, visibleText } from '../../src/untrustedText.ts';
 
-interface RunInfo {
-    commentDbId: string;
-    replyTo: string;
-    repository: string;
-    prNumber: string;
-    runDir: string;
+interface CommentInfo {
+    dbId: string;
     replyFile: string;
+    reply: string | undefined;
+    removeEyes: string | undefined;
+    removePlus1: string | undefined;
+    addPlus1: string | undefined;
 }
 
 interface ConveyorStep {
@@ -30,7 +30,7 @@ const COMMAND_TIMEOUT_MS = 120_000;
 const WAIT_SLICE_MS = 3_600_000;
 const HOOK_INPUT = '{}';
 const PERMISSION_INPUT = '{"notification_type":"permission_prompt"}';
-const PR_NUMBER = /\/pull\/(\d+)$/u;
+const COMMENT_HEADER = /^Comment \d+ of \d+:$/u;
 const TERMINATION_SIGNALS: readonly NodeJS.Signals[] = ['SIGTERM', 'SIGINT', 'SIGHUP'];
 
 // Prompt lines, paths and gh output are printed through visibleText, so they cannot add lines or terminal escapes.
@@ -48,22 +48,27 @@ function labeled(lines: readonly string[], label: string): string | undefined {
     return lines.find((line) => line.startsWith(prefix))?.slice(prefix.length);
 }
 
-function readRunInfo(lines: readonly string[]): RunInfo | undefined {
-    const commentDbId = labeled(lines, 'Comment database id');
-    const replyTo = labeled(lines, 'Reply to comment database id');
-    const repository = labeled(lines, 'Repository');
-    const prNumber = PR_NUMBER.exec(labeled(lines, 'PR') ?? '')?.[1];
-    const replyFile = labeled(lines, 'Reply body file');
-    if (
-        commentDbId !== undefined &&
-        replyTo !== undefined &&
-        repository !== undefined &&
-        prNumber !== undefined &&
-        replyFile !== undefined
-    ) {
-        return { commentDbId, replyTo, repository, prNumber, runDir: path.dirname(replyFile), replyFile };
+// Every "Comment K of N:" block of the prompt, in order; undefined when a block lacks its id or reply file.
+function readComments(lines: readonly string[]): CommentInfo[] | undefined {
+    const starts = lines.flatMap((line, index) => (COMMENT_HEADER.test(line) ? [index] : []));
+    const comments: CommentInfo[] = [];
+    for (const [order, start] of starts.entries()) {
+        const block = lines.slice(start, starts[order + 1] ?? lines.length);
+        const dbId = labeled(block, 'Comment database id');
+        const replyFile = labeled(block, 'Reply body file');
+        if (dbId === undefined || replyFile === undefined) {
+            return;
+        }
+        comments.push({
+            dbId,
+            replyFile,
+            reply: labeled(block, 'Reply command'),
+            removeEyes: labeled(block, 'Remove eyes command'),
+            removePlus1: labeled(block, 'Remove +1 command'),
+            addPlus1: labeled(block, 'Add +1 command'),
+        });
     }
-    return;
+    return comments.length > 0 ? comments : undefined;
 }
 
 function readAllowRules(settingsFile: string): ReadonlySet<string> {
@@ -81,11 +86,6 @@ function runHook(runDir: string, kind: string, input = HOOK_INPUT): void {
     if (result.status !== 0) {
         say(`hook ${kind} failed`);
     }
-}
-
-// Only the lines of the prompt's command list start with "gh api"; the step texts quote them mid-sentence.
-function findCommand(lines: readonly string[], matches: (_line: string) => boolean): string | undefined {
-    return lines.find((line) => line.startsWith('gh api ') && matches(line));
 }
 
 // Runs one conveyor line like claude's Bash tool under this process's PATH. A line the settings do not allow
@@ -113,27 +113,25 @@ function runConveyor(line: string, allow: ReadonlySet<string>, runDir: string): 
     return 'failed';
 }
 
-function gqlLine(lines: readonly string[], runDir: string, name: string): string | undefined {
-    const suffix = `=@${path.join(runDir, 'gql', `${name}.graphql`)}`;
-    return findCommand(lines, (line) => line.startsWith('gh api graphql ') && line.endsWith(suffix));
-}
-
 // Reply, then eyes off and a fresh +1; a removePlus1 failure (no +1 to remove) is logged and ignored. False when a
 // line was blocked by a permission prompt: claude would then wait without reaching its Stop hook.
-function resolveComment(lines: readonly string[], info: RunInfo, allow: ReadonlySet<string>): boolean {
-    const replyPrefix = `gh api repos/${info.repository}/pulls/${info.prNumber}/comments/${info.replyTo}/replies `;
+function resolveComment(comment: CommentInfo, allow: ReadonlySet<string>, runDir: string): boolean {
+    fs.writeFileSync(
+        comment.replyFile,
+        `Stub reply from the pr-watch-comments smoke test for comment ${comment.dbId}: no change was needed.\n${REPLY_TAG}\n`
+    );
     const steps: ConveyorStep[] = [
-        { name: 'reply', line: findCommand(lines, (line) => line.startsWith(replyPrefix)), optional: false },
-        { name: 'removeEyes', line: gqlLine(lines, info.runDir, 'removeEyes'), optional: false },
-        { name: 'removePlus1', line: gqlLine(lines, info.runDir, 'removePlus1'), optional: true },
-        { name: 'addPlus1', line: gqlLine(lines, info.runDir, 'addPlus1'), optional: false },
+        { name: 'reply', line: comment.reply, optional: false },
+        { name: 'removeEyes', line: comment.removeEyes, optional: false },
+        { name: 'removePlus1', line: comment.removePlus1, optional: true },
+        { name: 'addPlus1', line: comment.addPlus1, optional: false },
     ];
     for (const step of steps) {
         if (step.line === undefined) {
-            say(`the prompt has no conveyor line for ${step.name}`);
+            say(`the prompt has no conveyor line for ${step.name} of comment ${comment.dbId}`);
             return true;
         }
-        const outcome = runConveyor(step.line, allow, info.runDir);
+        const outcome = runConveyor(step.line, allow, runDir);
         if (outcome === 'blocked') {
             return false;
         }
@@ -174,23 +172,20 @@ async function run(): Promise<number> {
         say('usage: stubClaude.sh [ARGS] --settings FILE -- PROMPT');
         return 2;
     }
-    const lines = prompt.split('\n');
-    const info = readRunInfo(lines);
-    if (info === undefined) {
-        say('the prompt has no run details');
+    const comments = readComments(prompt.split('\n'));
+    const first = comments?.[0];
+    if (comments === undefined || first === undefined) {
+        say('the prompt has no comment details');
         return 2;
     }
+    const runDir = path.dirname(first.replyFile);
     const allow = readAllowRules(settingsFile);
-    runHook(info.runDir, 'prompt');
-    runHook(info.runDir, 'tool');
-    fs.writeFileSync(
-        info.replyFile,
-        `Stub reply from the pr-watch-comments smoke test for comment ${info.commentDbId}: no change was needed.\n${REPLY_TAG}\n`
-    );
-    const finished = resolveComment(lines, info, allow);
+    runHook(runDir, 'prompt');
+    runHook(runDir, 'tool');
+    const finished = comments.every((comment) => resolveComment(comment, allow, runDir));
     recordPath();
     if (finished) {
-        runHook(info.runDir, 'stop');
+        runHook(runDir, 'stop');
     }
     await waitForTermination();
     return 0;

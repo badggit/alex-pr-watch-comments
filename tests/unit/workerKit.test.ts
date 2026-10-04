@@ -24,26 +24,40 @@ const KIT_FILES: readonly string[] = [
     'settings.json',
     'hook.sh',
     'launcher.sh',
-    'gql/removeEyes.graphql',
-    'gql/removePlus1.graphql',
-    'gql/addPlus1.graphql',
+    'gql/removeEyes-456.graphql',
+    'gql/removePlus1-456.graphql',
+    'gql/addPlus1-456.graphql',
 ];
+const SECOND_COMMENT = {
+    nodeId: 'PRRC_kwDOAbc457',
+    dbId: 457,
+    url: 'https://github.com/o/r/pull/12#discussion_r457',
+    threadId: 'PRRT_kwDOThread8',
+    topDbId: 457,
+    rocketAt: 1_790_000_100,
+    eyesAdded: true,
+};
 
 function kitRecord(patch?: RecordPatch): RunRecord {
     return {
-        format: 1,
+        format: 2,
         runId: '20261002120000-456',
         prKey: 'o+r+12',
         owner: 'o',
         repo: 'r',
         number: 12,
         prUrl: 'https://github.com/o/r/pull/12',
-        commentNodeId: NODE_ID,
-        commentDbId: 456,
-        commentUrl: 'https://github.com/o/r/pull/12#discussion_r456',
-        threadId: 'PRRT_kwDOThread9',
-        topDbId: 400,
-        rocketAt: 1_790_000_000,
+        comments: [
+            {
+                nodeId: NODE_ID,
+                dbId: 456,
+                url: 'https://github.com/o/r/pull/12#discussion_r456',
+                threadId: 'PRRT_kwDOThread9',
+                topDbId: 400,
+                rocketAt: 1_790_000_000,
+                eyesAdded: true,
+            },
+        ],
         headSha: 'a'.repeat(40),
         remote: 'origin',
         branch: 'feature-x',
@@ -56,7 +70,6 @@ function kitRecord(patch?: RecordPatch): RunRecord {
         claudeArgs: ['--model', 'x'],
         state: 'preparing',
         reason: '',
-        eyesAdded: true,
         paneId: '',
         panePid: undefined,
         socket: '/tmp/prwc-test-socket',
@@ -162,7 +175,9 @@ await describe('buildSettings', async () => {
         assert.ok(rules.includes('Bash(git push origin HEAD:refs/heads/feature-x)'));
         assert.ok(rules.includes('Bash(git diff)'));
         assert.ok(rules.includes('Bash(git diff --cached)'));
-        assert.ok(rules.includes(`Bash(gh api graphql --hostname github.com -F query=@${RD}/gql/addPlus1.graphql)`));
+        assert.ok(
+            rules.includes(`Bash(gh api graphql --hostname github.com -F query=@${RD}/gql/addPlus1-456.graphql)`)
+        );
         assert.ok(rules.includes('Bash(git diff --cached --name-only)'));
         const commands = conveyorCommands(record, RD) ?? [];
         assert.deepEqual(
@@ -212,7 +227,7 @@ await describe('buildSettings', async () => {
         assert.ok(text.includes('Edit(//'));
         const rules = allowRules(parseSettings(kitRecord()));
         assert.ok(rules.includes(`Read(/${RD}/**)`));
-        const files = ['reply.md', 'commit-msg.txt', 'pr-body.md'];
+        const files = ['reply-456.md', 'commit-msg.txt', 'pr-body.md'];
         const editRules = rules.filter((rule) => rule.startsWith('Edit(')).toSorted();
         assert.deepEqual(editRules, files.map((file) => `Edit(/${RD}/${file})`).toSorted());
     });
@@ -313,9 +328,10 @@ await describe('builder refusals', async () => {
             { branch: 'x;rm' },
             { owner: 'o x' },
             { remote: 'origin;x' },
-            { commentNodeId: 'PRRC_a"b' },
+            { comments: [{ ...SECOND_COMMENT, nodeId: 'PRRC_a"b' }] },
             { headSha: 'HEAD' },
-            { topDbId: 0 },
+            { comments: [{ ...SECOND_COMMENT, topDbId: 0 }] },
+            { comments: [] },
             { repo: 'r x' },
             { callerPath: '/usr/bin::/bin' },
             { callerPath: 'bin:/usr/bin' },
@@ -353,21 +369,38 @@ await describe('writeWorkerKit', async () => {
         }
         assert.equal(fs.statSync(path.join(rd, 'gql')).mode & 0o777, 0o700);
         const read = (name: string): string => fs.readFileSync(path.join(rd, 'gql', name), 'utf8');
-        const removeEyes = read('removeEyes.graphql');
+        const removeEyes = read('removeEyes-456.graphql');
         assert.ok(removeEyes.includes('removeReaction'));
         assert.ok(removeEyes.includes(`"${NODE_ID}"`));
         assert.ok(removeEyes.includes('EYES'));
-        const removePlus1 = read('removePlus1.graphql');
+        const removePlus1 = read('removePlus1-456.graphql');
         assert.ok(removePlus1.includes('removeReaction'));
         assert.ok(removePlus1.includes('THUMBS_UP'));
         assert.ok(removePlus1.includes(`"${NODE_ID}"`));
-        const addPlus1 = read('addPlus1.graphql');
+        const addPlus1 = read('addPlus1-456.graphql');
         assert.ok(addPlus1.includes('addReaction'));
         assert.ok(addPlus1.includes('THUMBS_UP'));
         assert.ok(addPlus1.includes(`"${NODE_ID}"`));
         for (const text of [removeEyes, removePlus1, addPlus1]) {
             assert.ok(!text.includes('$'));
         }
+    });
+
+    await test('a batch gets the reaction documents and the reply rule of every comment', (t) => {
+        const rd = makeRunDir(tempRoot(t), 'state');
+        const record = kitRecord();
+        const batch = kitRecord({ comments: [...record.comments, SECOND_COMMENT] });
+        assert.equal(writeWorkerKit(rd, batch, 60), true);
+        for (const name of ['removeEyes', 'removePlus1', 'addPlus1']) {
+            const text = fs.readFileSync(path.join(rd, 'gql', `${name}-457.graphql`), 'utf8');
+            assert.ok(text.includes(`"${SECOND_COMMENT.nodeId}"`), name);
+        }
+        const settings: unknown = JSON.parse(fs.readFileSync(path.join(rd, 'settings.json'), 'utf8'));
+        const rules = allowRules(settings);
+        assert.ok(rules.includes(`Edit(/${rd}/reply-456.md)`));
+        assert.ok(rules.includes(`Edit(/${rd}/reply-457.md)`));
+        const reply = `gh api repos/o/r/pulls/12/comments/457/replies --hostname github.com -F body=@${rd}/reply-457.md`;
+        assert.ok(rules.includes(`Bash(${reply})`));
     });
 
     await test('an underscore in the run directory is accepted and named in the Read rule', (t) => {
@@ -393,7 +426,8 @@ await describe('writeWorkerKit', async () => {
     await test('a refused record writes nothing', (t) => {
         const rd = makeRunDir(tempRoot(t), 'state');
         assert.equal(writeWorkerKit(rd, kitRecord({ git: 'git' }), 60), false);
-        assert.equal(writeWorkerKit(rd, kitRecord({ commentNodeId: 'PRRC_a"b' }), 60), false);
+        const bad = { ...SECOND_COMMENT, nodeId: 'PRRC_a"b' };
+        assert.equal(writeWorkerKit(rd, kitRecord({ comments: [bad] }), 60), false);
         assert.deepEqual(listFiles(rd), []);
     });
 

@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { DEFAULT_INTERVAL, DEFAULT_KEEP_PANES } from './constants.ts';
+import { DEFAULT_BATCH_MAX, DEFAULT_INTERVAL, DEFAULT_KEEP_PANES, MAX_BATCH } from './constants.ts';
 import type { CliMode, CliOptions, PrRef } from './types.ts';
 import { isUintString, isValidName, safeText } from './validate.ts';
 
@@ -15,6 +15,7 @@ interface Draft {
     dir: string;
     interval: number;
     keepPanes: number;
+    batchMax: number;
     claude: string | undefined;
     claudeArgs: string[];
 }
@@ -29,6 +30,7 @@ const VALUE_OPTIONS: ReadonlySet<string> = new Set([
     '--claude',
     '--claude-arg',
     '--keep-panes',
+    '--batch-max',
 ]);
 // One day; also keeps the sleep far below the 2^31-1 ms limit above which Node timers fire at once.
 const MAX_INTERVAL = 86_400;
@@ -98,6 +100,14 @@ function applyValue(draft: Draft, name: string, value: string, cwd: string): str
                 return '--keep-panes needs a whole number, 0 or more';
             }
             draft.keepPanes = keepPanes;
+            return;
+        }
+        case '--batch-max': {
+            const batchMax = parseCount(value, 1, MAX_BATCH);
+            if (batchMax === undefined) {
+                return `--batch-max needs a whole number from 1 to ${MAX_BATCH}`;
+            }
+            draft.batchMax = batchMax;
             return;
         }
         case '--claude': {
@@ -175,6 +185,7 @@ function toResult(draft: Draft, mode: CliMode, pr?: PrRef): ParseResult {
             claude: draft.claude,
             claudeArgs: draft.claudeArgs,
             keepPanes: draft.keepPanes,
+            batchMax: draft.batchMax,
             once: draft.once,
         },
     };
@@ -215,6 +226,7 @@ export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
         dir: cwd,
         interval: DEFAULT_INTERVAL,
         keepPanes: DEFAULT_KEEP_PANES,
+        batchMax: DEFAULT_BATCH_MAX,
         claude: undefined,
         claudeArgs: [],
     };
@@ -254,10 +266,11 @@ export function usageText(): string {
         '',
         'Options:',
         '  --dir <path>          project directory (default: current directory)',
-        `  --interval <seconds>  polling interval, 1 to ${MAX_INTERVAL} (default ${DEFAULT_INTERVAL})`,
+        `  --interval <seconds>  how often to look for new rockets, 1 to ${MAX_INTERVAL} (default ${DEFAULT_INTERVAL})`,
         '  --claude <path>       claude executable (default: found on PATH at start)',
         '  --claude-arg <arg>    extra claude argument, repeatable, passed literally',
         `  --keep-panes <n>      finished worker panes to keep (default ${DEFAULT_KEEP_PANES})`,
+        `  --batch-max <n>       approved comments per run, 1 to ${MAX_BATCH} (default ${DEFAULT_BATCH_MAX})`,
         '  --once                one polling pass, then exit (not with --background)',
         '',
     ].join('\n');

@@ -6,7 +6,7 @@ At the start of each session, you MUST:
 
 ## Project
 
-`pr-watch-comments` is a Claude Code plugin that turns inline review comments on a GitHub pull request into commits. A background watcher polls the PR, and for every inline comment approved with a `rocket` reaction it opens a new tmux pane, starts `claude` in the project directory and hands it the comment to resolve. See `README.md` for the user-facing behavior.
+`pr-watch-comments` is a Claude Code plugin that turns inline review comments on a GitHub pull request into commits. A background watcher polls the PR, collects the inline comments approved with a `rocket` reaction into a batch, opens a new tmux pane, starts `claude` in the project directory and hands it the batch to resolve, one comment and one commit after another. Every comment the run leaves unresolved gets a `-1` from the watcher. See `README.md` for the user-facing behavior.
 
 - The repository is also a single-plugin marketplace. Marketplace, plugin and skill are all named `pr-watch-comments`, so the skill is invoked as `/pr-watch-comments:pr-watch-comments <PR URL>`.
 - The watcher must work in two ways: launched by the skill, and launched directly from a shell. Keep the skill a thin wrapper around the standalone command so both paths share one implementation.

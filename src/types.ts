@@ -58,6 +58,7 @@ export interface CliOptions {
     claude: string | undefined;
     claudeArgs: string[];
     keepPanes: number;
+    batchMax: number;
     once: boolean;
 }
 
@@ -110,6 +111,7 @@ export interface LookupEntry {
     rocketAt: number | undefined;
     plus1At: number | undefined;
     eyes: boolean;
+    minus1: boolean;
     editedAt: number | undefined;
     url: string;
     author: string;
@@ -170,6 +172,7 @@ export interface Session {
     stateDir: string;
     interval: number;
     keepPanes: number;
+    batchMax: number;
     claudeArgs: string[];
     once: boolean;
 }
@@ -178,20 +181,28 @@ export type GuardResult = { ok: true; headSha: string } | { ok: false; reason: s
 
 export type RunState = 'preparing' | 'running' | 'needs_attention' | 'completed' | 'failed' | 'exited' | 'abandoned';
 
+// One approved comment of a run. rocketAt is the viewer's rocket time, the baseline a +1 must be newer than to count
+// as done; eyesAdded says the watcher's EYES add succeeded.
+export interface RunComment {
+    nodeId: string;
+    dbId: number;
+    url: string;
+    threadId: string;
+    topDbId: number;
+    rocketAt: number;
+    eyesAdded: boolean;
+}
+
+// comments holds the run's batch in the order the worker resolves them (oldest rocket first), never empty.
 export interface RunRecord {
-    format: 1;
+    format: 2;
     runId: string;
     prKey: string;
     owner: string;
     repo: string;
     number: number;
     prUrl: string;
-    commentNodeId: string;
-    commentDbId: number;
-    commentUrl: string;
-    threadId: string;
-    topDbId: number;
-    rocketAt: number;
+    comments: RunComment[];
     headSha: string;
     remote: string;
     branch: string;
@@ -204,7 +215,6 @@ export interface RunRecord {
     claudeArgs: string[];
     state: RunState;
     reason: string;
-    eyesAdded: boolean;
     paneId: string;
     panePid: number | undefined;
     socket: string;
@@ -237,7 +247,7 @@ export interface WatcherStatus {
     reason: string;
     hint: string;
     runId: string;
-    comment: string;
+    comments: string;
     since: number;
     updatedAt: number;
     lastError: string;

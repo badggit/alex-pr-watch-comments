@@ -69,6 +69,7 @@ function sessionFor(testEnv: TestEnv, clone: string): Session {
         stateDir: testEnv.stateDir,
         interval: 15,
         keepPanes: 5,
+        batchMax: 5,
         claudeArgs: [],
         once: false,
     };

@@ -3,6 +3,9 @@ export const MIN_NODE_VERSION = '22.18.0';
 
 export const STATE_FORMAT = 1;
 
+// Format 2 holds a batch of comments per run; a format 1 record (one comment) reads as unreadable.
+export const RECORD_FORMAT = 2;
+
 export const GITHUB_HOST = 'github.com';
 
 // Marks every inline reply the worker posts, on its own last line.
@@ -17,9 +20,16 @@ export const GH_TOKEN_VARS: readonly string[] = [
 
 export const GH_STRIP_VARS: readonly string[] = [...GH_TOKEN_VARS, 'GH_REPO'];
 
-export const DEFAULT_INTERVAL = 15;
+export const DEFAULT_INTERVAL = 120;
+
+// How often a run in flight is checked; the PR itself is polled every --interval.
+export const DEFAULT_RUN_CHECK = 15;
 
 export const DEFAULT_KEEP_PANES = 5;
+
+export const DEFAULT_BATCH_MAX = 5;
+
+export const MAX_BATCH = 50;
 
 export const DEFAULT_LAUNCH_WAIT = 60;
 
@@ -71,4 +81,5 @@ export const ENV_NAMES = {
     stopQuiet: 'PRWC_STOP_QUIET',
     stopWait: 'PRWC_STOP_WAIT',
     readyWait: 'PRWC_READY_WAIT',
+    runCheck: 'PRWC_RUN_CHECK',
 } as const;

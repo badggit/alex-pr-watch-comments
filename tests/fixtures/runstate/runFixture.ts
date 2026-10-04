@@ -16,6 +16,7 @@ import type {
     LookupEntry,
     LookupResult,
     RecordPatch,
+    RunComment,
     RunRecord,
     Session,
 } from '../../../src/types.ts';
@@ -94,6 +95,7 @@ function buildSession(env: TestEnv, stateDir: string): Session {
         stateDir,
         interval: 15,
         keepPanes: 5,
+        batchMax: 5,
         claudeArgs: [],
         once: false,
     };
@@ -116,23 +118,32 @@ export async function newRunFixture(t: TestContext, options?: FixtureOptions): P
     return { env, stateDir: init.stateDir, fake, deps, session: buildSession(env, init.stateDir), realRunner };
 }
 
+// The run's one comment by default: the comment of lookupEntry.json, with EYES added.
+export function baseComment(patch?: Partial<RunComment>): RunComment {
+    return {
+        nodeId: NODE_ID,
+        dbId: 456,
+        url: 'https://github.com/o/r/pull/12#discussion_r456',
+        threadId: 'PRRT_kwDOThread9',
+        topDbId: 400,
+        rocketAt: ROCKET_AT,
+        eyesAdded: true,
+        ...patch,
+    };
+}
+
 // A record that also passes the worker kit checks, so the startup-race test can generate a real launcher from it.
 export function baseRecord(fixture: RunFixture, patch?: RecordPatch): RunRecord {
     const { env } = fixture;
     return {
-        format: 1,
+        format: 2,
         runId: RUN_ID,
         prKey: PR_KEY,
         owner: 'o',
         repo: 'r',
         number: 12,
         prUrl: 'https://github.com/o/r/pull/12',
-        commentNodeId: NODE_ID,
-        commentDbId: 456,
-        commentUrl: 'https://github.com/o/r/pull/12#discussion_r456',
-        threadId: 'PRRT_kwDOThread9',
-        topDbId: 400,
-        rocketAt: ROCKET_AT,
+        comments: [baseComment()],
         headSha: 'a'.repeat(40),
         remote: 'origin',
         branch: 'feature-x',
@@ -145,7 +156,6 @@ export function baseRecord(fixture: RunFixture, patch?: RecordPatch): RunRecord 
         claudeArgs: [],
         state: 'running',
         reason: '',
-        eyesAdded: true,
         paneId: '%5',
         panePid: undefined,
         socket: SESSION_SOCKET,
@@ -243,6 +253,7 @@ function readEntry(): LookupEntry {
         rocketAt: getNumber(value, 'rocketAt'),
         plus1At: getNumber(value, 'plus1At'),
         eyes: getBoolean(value, 'eyes') ?? false,
+        minus1: getBoolean(value, 'minus1') ?? false,
         editedAt: getNumber(value, 'editedAt'),
         url: getString(value, 'url') ?? '',
         author: getString(value, 'author') ?? '',
@@ -301,4 +312,42 @@ export function eyesRemovals(fixture: RunFixture): RecordedCall[] {
     return fixture.fake
         .calls('gh')
         .filter((call) => call.key === 'PrwcRemoveReaction' && (call.input ?? '').includes('"EYES"'));
+}
+
+export function thumbsDownAdds(fixture: RunFixture): RecordedCall[] {
+    return fixture.fake
+        .calls('gh')
+        .filter((call) => call.key === 'PrwcAddReaction' && (call.input ?? '').includes('"THUMBS_DOWN"'));
+}
+
+function isoAt(epoch: number): string {
+    return new Date(epoch * 1000).toISOString();
+}
+
+// Answers PrwcLookup with the run's one comment as GitHub would show it: the viewer's EYES, a viewer +1 at plus1At
+// and a viewer rocket at rocketAt (both absent unless given).
+export function answerLookup(fixture: RunFixture, state: { eyes: boolean; plus1At?: number; rocketAt?: number }): void {
+    const page = (epoch: number | undefined) => ({
+        pageInfo: { hasNextPage: false, endCursor: 'C1' },
+        nodes: epoch === undefined ? [] : [{ createdAt: isoAt(epoch), user: { login: 'me' } }],
+    });
+    const node = {
+        id: NODE_ID,
+        databaseId: 456,
+        url: 'https://github.com/o/r/pull/12#discussion_r456',
+        lastEditedAt: JSON.parse('null') as unknown,
+        body: 'Please rename this variable.',
+        path: 'src/app.ts',
+        line: 10,
+        author: { login: 'reviewer' },
+        rocket: page(state.rocketAt),
+        plus: page(state.plus1At),
+        reactionGroups: [
+            { content: 'ROCKET', viewerHasReacted: state.rocketAt !== undefined },
+            { content: 'THUMBS_UP', viewerHasReacted: state.plus1At !== undefined },
+            { content: 'EYES', viewerHasReacted: state.eyes },
+        ],
+    };
+    const rateLimit = { remaining: 4000, resetAt: isoAt(ROCKET_AT + 3600) };
+    fixture.fake.respond('gh', 'PrwcLookup', { json: { data: { viewer: { login: 'me' }, rateLimit, nodes: [node] } } });
 }

@@ -57,19 +57,24 @@ async function deadPid(env: TestEnv): Promise<number> {
 
 function sampleRecord(runId: string, prKey: string, panePid?: number): RunRecord {
     return {
-        format: 1,
+        format: 2,
         runId,
         prKey,
         owner: 'o',
         repo: 'r',
         number: 12,
         prUrl: 'https://github.com/o/r/pull/12',
-        commentNodeId: 'PRRC_1',
-        commentDbId: 1,
-        commentUrl: 'https://github.com/o/r/pull/12#discussion_r1',
-        threadId: 'PRRT_1',
-        topDbId: 1,
-        rocketAt: NOW,
+        comments: [
+            {
+                nodeId: 'PRRC_1',
+                dbId: 1,
+                url: 'https://github.com/o/r/pull/12#discussion_r1',
+                threadId: 'PRRT_1',
+                topDbId: 1,
+                rocketAt: NOW,
+                eyesAdded: false,
+            },
+        ],
         headSha: 'a'.repeat(40),
         remote: 'origin',
         branch: 'feature',
@@ -82,7 +87,6 @@ function sampleRecord(runId: string, prKey: string, panePid?: number): RunRecord
         claudeArgs: ['--model', 'x'],
         state: 'preparing',
         reason: '',
-        eyesAdded: false,
         paneId: '',
         panePid,
         socket: '/tmp/prwc-test-socket',
@@ -127,12 +131,36 @@ await describe('records', async () => {
         fs.writeFileSync(path.join(dir, 'record.json'), JSON.stringify({ ...sampleRecord(RUN_A, PR_KEY), format: 9 }));
         assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '9' });
         fs.writeFileSync(path.join(dir, 'record.json'), JSON.stringify({ ...sampleRecord(RUN_A, PR_KEY), state: 'x' }));
-        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '1' });
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
         fs.writeFileSync(
             path.join(dir, 'record.json'),
             JSON.stringify({ ...sampleRecord(RUN_A, PR_KEY), panePid: 'x' })
         );
         assert.equal(readRecord(fixture.stateDir, RUN_A).kind, 'unreadable');
+    });
+
+    await test('a record without comments, with a broken comment or in the one-comment format 1 is unreadable', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const sample = sampleRecord(RUN_A, PR_KEY);
+        const write = (value: unknown): void => {
+            fs.writeFileSync(path.join(dir, 'record.json'), JSON.stringify(value));
+        };
+        write({ ...sample, comments: [] });
+        assert.equal(readRecord(fixture.stateDir, RUN_A).kind, 'unreadable');
+        const [comment] = sample.comments;
+        write({ ...sample, comments: [comment, { ...comment, dbId: 'x' }] });
+        assert.equal(readRecord(fixture.stateDir, RUN_A).kind, 'unreadable');
+        const flat = Object.fromEntries(Object.entries(sample).filter(([key]) => key !== 'comments'));
+        write({ ...flat, format: 1, commentNodeId: 'PRRC_1', commentDbId: 1, eyesAdded: false });
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '1' });
+        write({ ...sample, comments: [comment, { ...comment, nodeId: 'PRRC_2', dbId: 2 }] });
+        const read = readRecord(fixture.stateDir, RUN_A);
+        assert.ok(read.kind === 'ok');
+        assert.deepEqual(
+            read.record.comments.map((item) => item.dbId),
+            [1, 2]
+        );
     });
 
     await test('runIdsForPr lists only runs of that PR and clearRun removes a run', async (t) => {

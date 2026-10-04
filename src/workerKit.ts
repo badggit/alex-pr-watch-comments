@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import { GH_STRIP_VARS, GITHUB_HOST } from './constants.ts';
 import { identityFunction } from './proc.ts';
-import { buildPrompt, conveyorCommands, kitInputsValid, runFiles } from './prompt.ts';
+import { buildPrompt, commentFiles, conveyorCommands, kitInputsValid, runFiles } from './prompt.ts';
 import { writeTextAtomic } from './stateStore.ts';
 import type { RunRecord } from './types.ts';
 import { isValidNodeId, shQuote } from './validate.ts';
@@ -68,9 +68,10 @@ function hookEntry(rd: string, kind: HookKind, matcher?: string): HookEntry {
 
 // Rule paths use Claude Code's //absolute/path form: rd is absolute, so a leading slash is added. Edit rules cover
 // every file-editing tool, Write included; Claude Code ignores Write(path) rules and warns about them at startup.
-function allowRules(rd: string, commands: readonly string[]): string[] {
+function allowRules(record: RunRecord, rd: string, commands: readonly string[]): string[] {
     const files = runFiles(rd);
-    const writable = [files.reply, files.commitMsg, files.prBody];
+    const replies = record.comments.map((comment) => commentFiles(rd, comment.dbId).reply);
+    const writable = [...replies, files.commitMsg, files.prBody];
     return [`Read(/${rd}/**)`, ...writable.map((file) => `Edit(/${file})`), ...commands.map((line) => `Bash(${line})`)];
 }
 
@@ -86,7 +87,7 @@ export function buildSettings(record: RunRecord, rd: string): string | undefined
             Notification: [hookEntry(rd, 'permission', 'permission_prompt')],
             PreToolUse: [hookEntry(rd, 'tool', '*')],
         },
-        permissions: { allow: allowRules(rd, commands) },
+        permissions: { allow: allowRules(record, rd, commands) },
     };
     return `${JSON.stringify(settings, undefined, 4)}\n`;
 }
@@ -250,30 +251,35 @@ export function buildLauncherScript(record: RunRecord, rd: string, launchWaitSec
     ].join('\n');
 }
 
+// The three reaction documents of one comment, or undefined when its node id is refused.
+function commentMutations(rd: string, nodeId: string, dbId: number): [string, string][] | undefined {
+    const files = commentFiles(rd, dbId);
+    const removeEyes = buildReactionMutation(nodeId, 'remove', 'EYES');
+    const removePlus1 = buildReactionMutation(nodeId, 'remove', 'THUMBS_UP');
+    const addPlus1 = buildReactionMutation(nodeId, 'add', 'THUMBS_UP');
+    if (removeEyes !== undefined && removePlus1 !== undefined && addPlus1 !== undefined) {
+        return [
+            [files.removeEyes, `${removeEyes}\n`],
+            [files.removePlus1, `${removePlus1}\n`],
+            [files.addPlus1, `${addPlus1}\n`],
+        ];
+    }
+    return;
+}
+
 function buildKit(record: RunRecord, rd: string, launchWaitSeconds: number): [string, string][] | undefined {
     const prompt = buildPrompt(record, rd);
     const settings = buildSettings(record, rd);
     const launcher = buildLauncherScript(record, rd, launchWaitSeconds);
-    const removeEyes = buildReactionMutation(record.commentNodeId, 'remove', 'EYES');
-    const removePlus1 = buildReactionMutation(record.commentNodeId, 'remove', 'THUMBS_UP');
-    const addPlus1 = buildReactionMutation(record.commentNodeId, 'add', 'THUMBS_UP');
-    if (
-        prompt !== undefined &&
-        settings !== undefined &&
-        launcher !== undefined &&
-        removeEyes !== undefined &&
-        removePlus1 !== undefined &&
-        addPlus1 !== undefined
-    ) {
-        const files = runFiles(rd);
+    const mutations = record.comments.map((comment) => commentMutations(rd, comment.nodeId, comment.dbId));
+    const documents = mutations.filter((files) => files !== undefined).flat();
+    if (prompt !== undefined && settings !== undefined && launcher !== undefined && !mutations.includes(undefined)) {
         return [
             [path.join(rd, PROMPT_FILE), prompt],
             [path.join(rd, SETTINGS_FILE), settings],
             [path.join(rd, HOOK_FILE), buildHookScript(rd)],
             [path.join(rd, LAUNCHER_FILE), launcher],
-            [files.removeEyes, `${removeEyes}\n`],
-            [files.removePlus1, `${removePlus1}\n`],
-            [files.addPlus1, `${addPlus1}\n`],
+            ...documents,
         ];
     }
     return;

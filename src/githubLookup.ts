@@ -6,7 +6,7 @@ import { quoteUntrusted, visibleText } from './untrustedText.ts';
 import { isValidNodeId } from './validate.ts';
 
 export type PagedReaction = 'ROCKET' | 'THUMBS_UP';
-export type ReactionContent = PagedReaction | 'EYES';
+export type ReactionContent = PagedReaction | 'EYES' | 'THUMBS_DOWN';
 export type ReactionAction = 'add' | 'remove';
 
 export type LookupOutcome = { kind: 'ok'; result: LookupResult } | GhFailure;
@@ -187,6 +187,7 @@ function decodeComment(node: unknown): Omit<LookupEntry, 'rocketAt' | 'plus1At'>
         nodeId,
         dbId,
         eyes: viewerHasReacted(node, 'EYES'),
+        minus1: viewerHasReacted(node, 'THUMBS_DOWN'),
         editedAt: edited.editedAt,
         url,
         author: getString(getRecord(node, 'author'), 'login') ?? GHOST_AUTHOR,

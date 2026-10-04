@@ -66,8 +66,9 @@ await describe('parseArgs', async () => {
         assert.equal(options.mode, 'watch');
         assert.equal(options.pr?.prKey, 'o+r+12');
         assert.equal(options.dir, CWD);
-        assert.equal(options.interval, 15);
+        assert.equal(options.interval, 120);
         assert.equal(options.keepPanes, 5);
+        assert.equal(options.batchMax, 5);
         assert.equal(options.claude, undefined);
         assert.deepEqual(options.claudeArgs, []);
         assert.equal(options.once, false);
@@ -94,6 +95,8 @@ await describe('parseArgs', async () => {
         assert.equal(okOptions(['--dir', '/abs', PR_URL]).dir, '/abs');
         assert.equal(okOptions([PR_URL, '--interval', '86400']).interval, 86_400);
         assert.equal(okOptions([PR_URL, '--interval', '1']).interval, 1);
+        assert.equal(okOptions([PR_URL, '--batch-max', '1']).batchMax, 1);
+        assert.equal(okOptions([PR_URL, '--batch-max', '50']).batchMax, 50);
     });
 
     await test('--claude-arg values are kept literally', () => {
@@ -129,6 +132,9 @@ await describe('parseArgs', async () => {
         );
         assert.match(errorMessage([PR_URL, '--interval', '2147484']), /--interval/u);
         assert.match(errorMessage([PR_URL, '--keep-panes', '-1']), /--keep-panes/u);
+        for (const value of ['0', '51', 'x']) {
+            assert.equal(errorMessage([PR_URL, '--batch-max', value]), '--batch-max needs a whole number from 1 to 50');
+        }
         assert.match(errorMessage([PR_URL, '--bogus']), /unknown option/u);
         assert.match(errorMessage([PR_URL, '--interval']), /missing value/u);
         assert.match(errorMessage(['--list', PR_URL]), /--list/u);
@@ -155,12 +161,13 @@ await describe('parseArgs', async () => {
             '--claude',
             '--claude-arg',
             '--keep-panes',
+            '--batch-max',
             '--once',
             '--help',
         ]) {
             assert.ok(usage.includes(option), option);
         }
-        assert.match(usage, /default 15/u);
+        assert.match(usage, /default 120/u);
         assert.match(usage, /default 5/u);
     });
 });

@@ -81,7 +81,7 @@ async function setUp(t: TestContext, opts?: SetupOptions): Promise<Setup> {
 }
 
 function cliOptions(dir: string, claude?: string): CliOptions {
-    return { mode: 'watch', pr: PR, dir, interval: 15, claude, claudeArgs: [], keepPanes: 5, once: false };
+    return { mode: 'watch', pr: PR, dir, interval: 15, claude, claudeArgs: [], keepPanes: 5, batchMax: 5, once: false };
 }
 
 async function runPreflight(setup: Setup, opts?: RunOptions): Promise<Run> {
@@ -284,7 +284,10 @@ await describe('preflight', async () => {
         assert.equal(session.headOwner, 'o');
         assert.equal(session.headRepo, 'r');
         assert.equal(session.stateDir, testEnv.stateDir);
-        assert.deepEqual([session.interval, session.keepPanes, session.claudeArgs, session.once], [15, 5, [], false]);
+        assert.deepEqual(
+            [session.interval, session.keepPanes, session.batchMax, session.claudeArgs, session.once],
+            [15, 5, 5, [], false]
+        );
         const auth = fake.calls('gh').find((call) => call.key === 'auth_status');
         assert.deepEqual(auth?.args, ['auth', 'status', '--hostname', 'github.com']);
         const info = fake.calls('gh').find((call) => call.key === 'PrwcPrInfo');

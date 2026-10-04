@@ -214,6 +214,7 @@ function sessionFor(testEnv: TestEnv, clone: string, stateDir: string): Session 
         stateDir,
         interval: 15,
         keepPanes: 5,
+        batchMax: 5,
         claudeArgs: [],
         once: false,
     };
@@ -284,19 +285,24 @@ function eventLines(now: number, kinds: readonly string[]): string {
 function runRecord(setup: Setup, runId: string, dbId: number, patch?: RecordPatch): RunRecord {
     const { session } = setup;
     return {
-        format: 1,
+        format: 2,
         runId,
         prKey: PR_KEY,
         owner: 'o',
         repo: 'r',
         number: 12,
         prUrl: PR.prUrl,
-        commentNodeId: nodeIdOf(dbId),
-        commentDbId: dbId,
-        commentUrl: `https://github.com/o/r/pull/12#discussion_r${dbId}`,
-        threadId: THREAD,
-        topDbId: 101,
-        rocketAt: setup.now - 600,
+        comments: [
+            {
+                nodeId: nodeIdOf(dbId),
+                dbId: dbId,
+                url: `https://github.com/o/r/pull/12#discussion_r${dbId}`,
+                threadId: THREAD,
+                topDbId: 101,
+                rocketAt: setup.now - 600,
+                eyesAdded: true,
+            },
+        ],
         headSha: 'a'.repeat(40),
         remote: 'origin',
         branch: BRANCH,
@@ -309,7 +315,6 @@ function runRecord(setup: Setup, runId: string, dbId: number, patch?: RecordPatc
         claudeArgs: [],
         state: 'running',
         reason: '',
-        eyesAdded: true,
         paneId: '%5',
         panePid: setup.panePid,
         socket: session.tmux.socket,
@@ -405,6 +410,7 @@ function cliOptions(setup: Setup, once: boolean): CliOptions {
         claude: undefined,
         claudeArgs: [],
         keepPanes: 5,
+        batchMax: 5,
         once,
     };
 }
@@ -757,7 +763,9 @@ await describe('applyPacing', async () => {
         });
         const rt = createRuntime('', '@1');
         rt.inflightRunId = runId;
+        rt.lastPollAt = setup.deps.nowSeconds();
         assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 0);
         assert.equal(applyPacing(setup.deps, setup.session, rt), 900);
         assert.equal(statusOf(setup).state, 'throttled');
     });
@@ -970,7 +978,7 @@ await describe('runWatch', async () => {
         assert.equal(fs.existsSync(prLockDir(setup)), false);
     });
 
-    await test('an abort during the first TERM wait stops promptly after the first poll', async (t) => {
+    await test('an abort during the first TERM wait stops promptly after the first GitHub check', async (t) => {
         const setup = await makeSetup(t, { env: { PRWC_LAUNCH_TOKEN: TOKEN, PRWC_TERM_WAIT: '30' } });
         markLaunchReady(setup.stateDir, PR_KEY, TOKEN);
         const termPath = path.join(setup.testEnv.root, 'term.flag');
@@ -995,7 +1003,8 @@ await describe('runWatch', async () => {
         assert.ok(reached, 'the first poll was not published or the TERM did not arrive');
         controller.abort();
         assert.equal(await within(watching, 3000), 0);
-        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 1);
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 0);
         assert.equal(launchResultOf(setup), 'firstPoll');
         assert.equal(fs.existsSync(prLockDir(setup)), false);
         assert.equal(stateOf(setup, runId), 'running');
@@ -1584,9 +1593,7 @@ await describe('runs in flight across ticks', async () => {
         assert.equal(splits(setup.fake), 0);
         failing.mock.restore();
         assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
-        assert.equal(rt.inflightRunId, undefined);
-        assert.equal(statusOf(setup).reason, 'abandoned');
-        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.ok(rt.inflightRunId !== undefined, 'the comment is dispatched again');
         assert.equal(splits(setup.fake), 1);
         assert.equal(stateOf(setup, rt.inflightRunId), 'running');
     });
@@ -1599,6 +1606,7 @@ await describe('runs in flight across ticks', async () => {
         });
         const comments = [rocketed(setup.now, 103, 100)];
         respondPoll(setup, comments);
+        respondPoll(setup, [{ dbId: 103 }]);
         respondLookup(setup, comments);
         const failing = failWorktreeReleases(t);
         const rt = createRuntime('', '@1');
@@ -1615,5 +1623,97 @@ await describe('runs in flight across ticks', async () => {
         assert.equal(rt.inflightRunId, undefined);
         assert.deepEqual(listRunIds(setup.stateDir), []);
         assert.equal(statusOf(setup).reason, 'abandoned');
+    });
+});
+
+await describe('batches and run checks', async () => {
+    await test('one run takes the oldest approved comments up to batchMax', async (t) => {
+        const setup = await makeSetup(t);
+        const session = { ...setup.session, batchMax: 2 };
+        const comments = [rocketed(setup.now, 101, 100), rocketed(setup.now, 102, 300), rocketed(setup.now, 103, 200)];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        const rt = createRuntime('', '@1');
+        assert.equal(await watchTick(setup.deps, session, rt, NEVER), 'ok');
+        assert.equal(splits(setup.fake), 1);
+        assert.ok(rt.inflightRunId?.endsWith('-102'), `dispatched ${rt.inflightRunId}`);
+        const read = readRecord(setup.stateDir, rt.inflightRunId ?? '');
+        assert.ok(read.kind === 'ok');
+        assert.deepEqual(
+            read.record.comments.map((comment) => comment.dbId),
+            [102, 103]
+        );
+        assert.equal(rocketRemovals(setup.fake, 101).length, 0);
+        assert.equal(rocketRemovals(setup.fake, 102).length, 1);
+        assert.equal(rocketRemovals(setup.fake, 103).length, 1);
+        assert.equal(statusOf(setup).comments, '102,103');
+    });
+
+    await test('a run in flight is checked without a poll until the interval has passed', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, { dbId: 101, claudePid, events: ['prompt', 'tool'] });
+        respondLookup(setup, [{ dbId: 101 }]);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        rt.lastPollAt = setup.deps.nowSeconds();
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 0);
+        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 1);
+        assert.equal(rt.inflightRunId, runId);
+        assert.equal(statusOf(setup).reason, 'working');
+    });
+
+    await test('a run that ends starts the next batch in the same tick and its comment gets a -1', async (t) => {
+        const setup = await makeSetup(t);
+        const runId = await seedRun(setup, { dbId: 101, events: ['prompt'], exitStatus: true });
+        const comments = [rocketed(setup.now, 102, 300), rocketed(setup.now, 103, 200)];
+        respondLookup(setup, [{ dbId: 101 }]);
+        respondLookup(setup, comments);
+        respondPoll(setup, [{ dbId: 101 }, ...comments]);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        rt.lastPollAt = setup.deps.nowSeconds();
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        const thumbsDown = setup.fake
+            .calls('gh')
+            .filter((call) => call.key === 'PrwcAddReaction' && variable(call, 'content') === 'THUMBS_DOWN');
+        assert.deepEqual(
+            thumbsDown.map((call) => variable(call, 'id')),
+            [nodeIdOf(101)]
+        );
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assert.equal(splits(setup.fake), 1);
+        assert.ok(rt.inflightRunId?.endsWith('-102'), `dispatched ${rt.inflightRunId}`);
+        assert.equal(stateOf(setup, rt.inflightRunId), 'running');
+    });
+
+    await test('the next tick comes after the run check while a run is in flight', async (t) => {
+        const setup = await makeSetup(t);
+        const session = { ...setup.session, interval: 300 };
+        const rt = createRuntime('', '@1');
+        assert.equal(applyPacing(setup.deps, session, rt), 300);
+        rt.inflightRunId = '20261002120000-101';
+        assert.equal(applyPacing(setup.deps, session, rt), 15);
+        const custom = await makeSetup(t, { env: { PRWC_RUN_CHECK: '7' } });
+        assert.equal(applyPacing(custom.deps, session, rt), 7);
+        assert.equal(applyPacing(custom.deps, { ...session, interval: 5 }, rt), 5);
+    });
+
+    await test('a failing poll keeps backing off while the run checks succeed', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, { dbId: 101, claudePid, events: ['prompt', 'tool'] });
+        respondLookup(setup, [{ dbId: 101 }]);
+        setup.fake.respond('gh', 'PrwcPoll', { code: 1, stderr: 'HTTP 502: Bad Gateway' });
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        for (let tick = 1; tick <= 3; tick += 1) {
+            assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+            assert.equal(rt.failures, tick);
+        }
+        rt.lastPollAt = setup.deps.nowSeconds();
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(rt.failures, 0);
     });
 });

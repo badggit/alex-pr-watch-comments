@@ -1,17 +1,31 @@
 {
-    "format": 1,
+    "format": 2,
     "runId": "20261002120000-101",
     "prKey": "o+r+12",
     "owner": "o",
     "repo": "r",
     "number": 12,
     "prUrl": "https://github.com/o/r/pull/12",
-    "commentNodeId": "PRRC_c101",
-    "commentDbId": 101,
-    "commentUrl": "https://github.com/o/r/pull/12#discussion_r101",
-    "threadId": "PRRT_t1",
-    "topDbId": 101,
-    "rocketAt": 1790942400,
+    "comments": [
+        {
+            "nodeId": "PRRC_c101",
+            "dbId": 101,
+            "url": "https://github.com/o/r/pull/12#discussion_r101",
+            "threadId": "PRRT_t1",
+            "topDbId": 101,
+            "rocketAt": 1790942400,
+            "eyesAdded": true
+        },
+        {
+            "nodeId": "PRRC_c102",
+            "dbId": 102,
+            "url": "https://github.com/o/r/pull/12#discussion_r102",
+            "threadId": "PRRT_t2",
+            "topDbId": 102,
+            "rocketAt": 1790942410,
+            "eyesAdded": true
+        }
+    ],
     "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "remote": "origin",
     "branch": "feature",
@@ -24,7 +38,6 @@
     "claudeArgs": [],
     "state": "running",
     "reason": "",
-    "eyesAdded": true,
     "paneId": "%5",
     "socket": "/tmp/tmux_dir/default",
     "startedAt": 1790942400,

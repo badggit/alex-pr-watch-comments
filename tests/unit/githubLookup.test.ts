@@ -131,6 +131,7 @@ await describe('lookupComments', async () => {
             rocketAt: epoch('2026-01-01T00:00:10Z'),
             plus1At: undefined,
             eyes: true,
+            minus1: false,
             editedAt: undefined,
             url: 'https://github.com/OWNER/REPO/pull/1#discussion_r101',
             author: 'reviewer',
@@ -143,6 +144,7 @@ await describe('lookupComments', async () => {
         assert.equal(second.plus1At, epoch('2026-01-01T00:03:00Z'));
         assert.equal(second.editedAt, epoch('2026-01-01T00:02:00Z'));
         assert.equal(second.eyes, false);
+        assert.equal(second.minus1, true);
         assert.equal(second.line, undefined);
         assert.deepEqual(result.rate, { remaining: 4000, resetAt: epoch('2026-01-01T01:00:00Z') });
         assert.deepEqual(result.gone, []);
