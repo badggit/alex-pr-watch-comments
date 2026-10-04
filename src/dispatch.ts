@@ -4,7 +4,8 @@ import { DEFAULT_LAUNCH_WAIT, ENV_NAMES } from './constants.ts';
 import { fetchContext, react, type ReactOutcome } from './githubLookup.ts';
 import { runGuards } from './guards.ts';
 import { acquireWorktreeLock, releaseWorktreeLock, worktreeLockHolder } from './locks.ts';
-import { runFiles } from './prompt.ts';
+import { commentFiles } from './prompt.ts';
+import { markFailed, type FailTarget } from './reactions.ts';
 import { claimLaunch, clearRun, createRun, launchDecision, mergeRecord, readRecord, writeRecord } from './runStore.ts';
 import { runDir, writeTextAtomic } from './stateStore.ts';
 import { splitWorker, tmuxMessage } from './tmuxControl.ts';
@@ -16,6 +17,7 @@ import type {
     PollComment,
     PollResult,
     ResumeOutcome,
+    RunComment,
     RunRecord,
     Session,
 } from './types.ts';
@@ -42,9 +44,11 @@ export interface ResumeResult {
     runId: string | undefined;
 }
 
-// What the exception path must know about the GitHub side: EYES added before a throw are left on and logged.
+// What the failure paths must know about the GitHub side: comments holds the run's comments with their EYES state,
+// rocketless the node ids whose rocket is gone, so only those comments are marked as failed.
 interface Progress {
-    eyesAdded: boolean;
+    comments: RunComment[];
+    rocketless: Set<string>;
 }
 
 type WorkerStart = { started: true } | { started: false; keptRunId: string | undefined };
@@ -55,6 +59,7 @@ const STAMP_LENGTH = 14;
 const MESSAGE_PREFIX = 'pr-watch-comments:';
 const LOCK_KEPT_REASON = 'lock-release-failed';
 const NOT_RESUMABLE_REASON = 'not-resumable';
+const STALE_REACTIONS = ['THUMBS_UP', 'THUMBS_DOWN'] as const;
 
 function runIdFor(nowSeconds: number, dbId: number): string {
     const stamp = new Date(nowSeconds * 1000).toISOString().replaceAll(NOT_DIGIT, '').slice(0, STAMP_LENGTH);
@@ -76,15 +81,23 @@ function reactFailure(outcome: ReactOutcome): string {
     return outcome.kind === 'ok' ? '' : safeText(outcome.message);
 }
 
-function buildSnapshot(record: RunRecord, entry: LookupEntry, context: string): string {
+function newProgress(): Progress {
+    return { comments: [], rocketless: new Set() };
+}
+
+function idList(comments: readonly { dbId: number }[]): string {
+    return comments.map((comment) => comment.dbId).join(',');
+}
+
+function buildSnapshot(record: RunRecord, comment: RunComment, entry: LookupEntry, context: string): string {
     const line = entry.line === undefined ? 'without a line' : `line ${entry.line}`;
     const header = [
         `pr-watch-comments snapshot of run ${record.runId}`,
         `PR: ${record.prUrl}`,
-        `Comment URL: ${inlineUntrusted(record.commentUrl)}`,
-        `Comment node id: ${record.commentNodeId}`,
-        `Comment database id: ${record.commentDbId}`,
-        `Thread id: ${inlineUntrusted(record.threadId)}`,
+        `Comment URL: ${inlineUntrusted(comment.url)}`,
+        `Comment node id: ${comment.nodeId}`,
+        `Comment database id: ${comment.dbId}`,
+        `Thread id: ${inlineUntrusted(comment.threadId)}`,
         `Recorded head commit: ${record.headSha}`,
     ];
     const approved = [
@@ -103,28 +116,34 @@ function earlierCommentIds(poll: PollResult, approved: PollComment): string[] {
         .map((comment) => comment.nodeId);
 }
 
-function newRecord(
-    session: Session,
-    candidate: Candidate,
-    runId: string,
-    headSha: string,
-    rocketAt: number
-): RunRecord {
+// Undefined when the comment has no rocket time: the queue never offers such a candidate.
+function runComment(candidate: Candidate): RunComment | undefined {
+    const { entry, poll } = candidate;
+    if (entry.rocketAt === undefined) {
+        return;
+    }
+    return {
+        nodeId: entry.nodeId,
+        dbId: entry.dbId,
+        url: entry.url,
+        threadId: poll.threadId,
+        topDbId: poll.topDbId,
+        rocketAt: entry.rocketAt,
+        eyesAdded: false,
+    };
+}
+
+function newRecord(session: Session, comments: RunComment[], runId: string, headSha: string): RunRecord {
     const { pr } = session;
     return {
-        format: 1,
+        format: 2,
         runId,
         prKey: pr.prKey,
         owner: pr.owner,
         repo: pr.repo,
         number: pr.number,
         prUrl: pr.prUrl,
-        commentNodeId: candidate.entry.nodeId,
-        commentDbId: candidate.entry.dbId,
-        commentUrl: candidate.entry.url,
-        threadId: candidate.poll.threadId,
-        topDbId: candidate.poll.topDbId,
-        rocketAt,
+        comments,
         headSha,
         remote: session.remote,
         branch: session.headRef,
@@ -137,7 +156,6 @@ function newRecord(
         claudeArgs: [...session.claudeArgs],
         state: 'preparing',
         reason: '',
-        eyesAdded: false,
         paneId: '',
         panePid: undefined,
         socket: session.tmux.socket,
@@ -155,31 +173,73 @@ async function announce(deps: Deps, session: Session, text: string): Promise<voi
     }
 }
 
-async function removeRocket(deps: Deps, session: Session, record: RunRecord): Promise<boolean> {
-    const removed = await react(deps, session.tools.gh, 'remove', record.commentNodeId, 'ROCKET');
-    if (removed.kind === 'ok') {
-        return true;
+// Removes the viewer's rocket from every comment that still carries it (present decides); every removal is tried,
+// and true means none failed.
+async function removeRockets(
+    deps: Deps,
+    session: Session,
+    comments: readonly RunComment[],
+    present: (_nodeId: string) => boolean,
+    progress: Progress
+): Promise<boolean> {
+    let removedAll = true;
+    for (const comment of comments) {
+        if (present(comment.nodeId)) {
+            const removed = await react(deps, session.tools.gh, 'remove', comment.nodeId, 'ROCKET');
+            if (removed.kind !== 'ok') {
+                deps.log.warn(
+                    `comment ${comment.dbId}: rocket removal failed, retrying next tick: ${reactFailure(removed)}`
+                );
+                removedAll = false;
+                continue;
+            }
+        }
+        progress.rocketless.add(comment.nodeId);
     }
-    deps.log.warn(`comment ${record.commentDbId}: rocket removal failed, retrying next tick: ${reactFailure(removed)}`);
-    return false;
+    return removedAll;
 }
 
-// Step 5: a stale +1 of the viewer goes, EYES comes; failures are logged and do not stop the dispatch.
-async function markInProgress(deps: Deps, session: Session, record: RunRecord, entry: LookupEntry, progress: Progress) {
+// Step 5 for one comment: a stale +1 and a stale -1 of the viewer go, EYES comes; failures are logged and do not stop
+// the dispatch.
+async function markOneInProgress(deps: Deps, session: Session, comment: RunComment, entry: LookupEntry | undefined) {
     const gh = session.tools.gh;
-    if (entry.plus1At !== undefined) {
-        const removed = await react(deps, gh, 'remove', record.commentNodeId, 'THUMBS_UP');
+    const stale = STALE_REACTIONS.filter((content) =>
+        content === 'THUMBS_UP' ? entry?.plus1At !== undefined : entry?.minus1 === true
+    );
+    for (const content of stale) {
+        const removed = await react(deps, gh, 'remove', comment.nodeId, content);
         if (removed.kind !== 'ok') {
-            deps.log.warn(`comment ${record.commentDbId}: +1 removal failed: ${reactFailure(removed)}`);
+            deps.log.warn(`comment ${comment.dbId}: ${content} removal failed: ${reactFailure(removed)}`);
         }
     }
-    const added = await react(deps, gh, 'add', record.commentNodeId, 'EYES');
+    const added = await react(deps, gh, 'add', comment.nodeId, 'EYES');
     if (added.kind !== 'ok') {
-        deps.log.warn(`comment ${record.commentDbId}: EYES add failed: ${reactFailure(added)}`);
+        deps.log.warn(`comment ${comment.dbId}: EYES add failed: ${reactFailure(added)}`);
         return;
     }
-    progress.eyesAdded = true;
-    mergeRecord(session.stateDir, record.runId, { eyesAdded: true });
+    comment.eyesAdded = true;
+}
+
+// Every EYES that was added is recorded at once, so a crash right after leaves a record that names it.
+async function markInProgress(
+    deps: Deps,
+    session: Session,
+    record: RunRecord,
+    entries: ReadonlyMap<string, LookupEntry>,
+    progress: Progress
+) {
+    for (const comment of progress.comments) {
+        await markOneInProgress(deps, session, comment, entries.get(comment.nodeId));
+        if (comment.eyesAdded) {
+            mergeRecord(session.stateDir, record.runId, { comments: progress.comments });
+        }
+    }
+}
+
+function failTargets(progress: Progress): FailTarget[] {
+    return progress.comments
+        .filter((comment) => progress.rocketless.has(comment.nodeId))
+        .map((comment) => ({ nodeId: comment.nodeId, dbId: comment.dbId, eyesOn: comment.eyesAdded }));
 }
 
 // True once the worktree lock no longer names the run: released now, or held by nobody or by another run.
@@ -208,7 +268,8 @@ function freeRun(deps: Deps, stateDir: string, wtKey: string, runId: string): st
     return runId;
 }
 
-// Frees a run whose worker could not be started. The rocket is not restored.
+// Frees a run whose worker could not be started. The rockets are not restored: every comment that lost its rocket
+// is marked as failed instead.
 async function abandonRun(
     deps: Deps,
     session: Session,
@@ -218,15 +279,11 @@ async function abandonRun(
 ): Promise<string | undefined> {
     const { stateDir } = session;
     claimLaunch(stateDir, record.runId, 'cancel');
-    if (progress.eyesAdded) {
-        const removed = await react(deps, session.tools.gh, 'remove', record.commentNodeId, 'EYES');
-        if (removed.kind !== 'ok') {
-            deps.log.warn(`comment ${record.commentDbId}: EYES left on, removal failed: ${reactFailure(removed)}`);
-        }
-    }
+    await markFailed(deps, session, failTargets(progress));
     const kept = freeRun(deps, stateDir, record.worktreeKey, record.runId);
-    deps.log.warn(`comment ${record.commentDbId}: ${why}, abandoned`);
-    await announce(deps, session, `comment ${record.commentDbId} abandoned`);
+    const ids = idList(progress.comments);
+    deps.log.warn(`comments ${ids}: ${why}, abandoned`);
+    await announce(deps, session, `comments ${ids} abandoned`);
     return kept;
 }
 
@@ -236,14 +293,14 @@ async function startWorker(
     deps: Deps,
     session: Session,
     record: RunRecord,
-    entry: LookupEntry,
+    entries: ReadonlyMap<string, LookupEntry>,
     progress: Progress
 ): Promise<WorkerStart> {
-    await markInProgress(deps, session, record, entry, progress);
+    await markInProgress(deps, session, record, entries, progress);
     const { stateDir } = session;
     const rd = runDir(stateDir, record.runId);
     const launchWait = readEnvSeconds(deps.env, ENV_NAMES.launchWait, DEFAULT_LAUNCH_WAIT);
-    const kitWritten = writeWorkerKit(rd, { ...record, eyesAdded: progress.eyesAdded }, launchWait);
+    const kitWritten = writeWorkerKit(rd, { ...record, comments: progress.comments }, launchWait);
     const pane = kitWritten
         ? await splitWorker(deps, session.tools.tmux, session.tmux, {
               runId: record.runId,
@@ -272,21 +329,24 @@ async function startWorker(
 }
 
 // The exception path: never rethrows, so no lock outlives the failure unnoticed. Claiming cancel is a no-op when
-// the run directory does not exist. Returns the run id when the run had to be kept.
-function failRun(
+// the run directory does not exist; the cancel also means no worker can start, so every comment that lost its rocket
+// is marked as failed. Returns the run id when the run had to be kept.
+async function failRun(
     deps: Deps,
-    stateDir: string,
-    wtKey: string,
-    runId: string,
+    session: Session,
+    ids: { wtKey: string; runId: string },
     error: unknown,
     progress: Progress
-): string | undefined {
-    const comment = runId.slice(runId.indexOf('-') + 1);
-    deps.log.error(`dispatch of comment ${comment} failed: ${safeText(errorText(error))}`);
+): Promise<string | undefined> {
+    const { stateDir } = session;
+    const { wtKey, runId } = ids;
+    deps.log.error(`dispatch of run ${runId} failed: ${safeText(errorText(error))}`);
     claimLaunch(stateDir, runId, 'cancel');
     const kept = freeRun(deps, stateDir, wtKey, runId);
-    if (progress.eyesAdded) {
-        deps.log.warn(`comment ${comment}: EYES left on`);
+    try {
+        await markFailed(deps, session, failTargets(progress));
+    } catch (markError) {
+        deps.log.warn(`run ${runId}: could not mark its comments as failed: ${safeText(errorText(markError))}`);
     }
     return kept;
 }
@@ -304,27 +364,61 @@ async function confirmLaunch(deps: Deps, session: Session, record: RunRecord, ho
         claimLaunch(session.stateDir, record.runId, 'cancel');
         deps.log.error(`launch of run ${record.runId} not confirmed: ${safeText(errorText(error))}`);
     }
-    await announce(deps, session, `PR ${record.number} comment ${record.commentDbId} dispatched`);
+    await announce(deps, session, `PR ${record.number} comments ${idList(record.comments)} dispatched`);
 }
 
+function entryMap(entries: readonly LookupEntry[]): Map<string, LookupEntry> {
+    return new Map(entries.map((entry) => [entry.nodeId, entry]));
+}
+
+// Writes the snapshot of every comment; false (after a logged warning) when a context fetch failed.
+async function writeSnapshots(
+    deps: Deps,
+    session: Session,
+    record: RunRecord,
+    candidates: readonly Candidate[],
+    poll: PollResult
+): Promise<boolean> {
+    const rd = runDir(session.stateDir, record.runId);
+    for (const [index, candidate] of candidates.entries()) {
+        const comment = record.comments[index];
+        if (comment === undefined) {
+            throw new Error('the record does not match the candidates');
+        }
+        const context = await fetchContext(deps, session.tools.gh, earlierCommentIds(poll, candidate.poll));
+        if (context.kind !== 'ok') {
+            deps.log.warn(`comment ${comment.dbId}: context fetch failed: ${safeText(context.message)}`);
+            return false;
+        }
+        const snapshot = buildSnapshot(record, comment, candidate.entry, context.text);
+        writeTextAtomic(commentFiles(rd, comment.dbId).snapshot, snapshot);
+    }
+    return true;
+}
+
+// Starts one run for the whole batch: candidates are in the order the worker resolves them.
 export async function dispatch(
     deps: Deps,
     session: Session,
-    candidate: Candidate,
+    candidates: readonly Candidate[],
     poll: PollResult,
     hooks?: DispatchHooks
 ): Promise<DispatchResult> {
     const { stateDir, worktreeKey: wtKey } = session;
-    const { entry } = candidate;
-    const runId = runIdFor(deps.nowSeconds(), entry.dbId);
-    const progress: Progress = { eyesAdded: false };
+    const first = candidates[0];
+    if (first === undefined) {
+        return result('abandoned');
+    }
+    const runId = runIdFor(deps.nowSeconds(), first.entry.dbId);
+    const progress = newProgress();
     let record: RunRecord;
     try {
         if (!acquireWorktreeLock(stateDir, wtKey, runId, process.pid, deps.log, deps.nowSeconds())) {
             return result('busy');
         }
-        if (entry.rocketAt === undefined) {
-            throw new Error('the comment has no rocket time');
+        const comments = candidates.map((candidate) => runComment(candidate)).filter((item) => item !== undefined);
+        if (comments.length !== candidates.length) {
+            throw new Error('a comment has no rocket time');
         }
         const guard = await runGuards(deps, session);
         if (!guard.ok) {
@@ -334,24 +428,23 @@ export async function dispatch(
             }
             return held;
         }
-        const rd = createRun(stateDir, runId);
-        record = newRecord(session, candidate, runId, guard.headSha, entry.rocketAt);
+        createRun(stateDir, runId);
+        record = newRecord(session, comments, runId, guard.headSha);
         writeRecord(stateDir, record);
-        const context = await fetchContext(deps, session.tools.gh, earlierCommentIds(poll, candidate.poll));
-        if (context.kind !== 'ok') {
-            deps.log.warn(`comment ${entry.dbId}: context fetch failed: ${safeText(context.message)}`);
+        progress.comments = record.comments.map((comment) => ({ ...comment }));
+        if (!(await writeSnapshots(deps, session, record, candidates, poll))) {
             return result('contextFailed', freeRun(deps, stateDir, wtKey, runId));
         }
-        writeTextAtomic(runFiles(rd).snapshot, buildSnapshot(record, entry, context.text));
-        if (!(await removeRocket(deps, session, record))) {
+        if (!(await removeRockets(deps, session, record.comments, () => true, progress))) {
             return result('rocketRemovalFailed', runId);
         }
-        const start = await startWorker(deps, session, record, entry, progress);
+        const entries = entryMap(candidates.map((candidate) => candidate.entry));
+        const start = await startWorker(deps, session, record, entries, progress);
         if (!start.started) {
             return result('abandoned', start.keptRunId);
         }
     } catch (error) {
-        return result('abandoned', failRun(deps, stateDir, wtKey, runId, error, progress));
+        return result('abandoned', await failRun(deps, session, { wtKey, runId }, error, progress));
     }
     await confirmLaunch(deps, session, record, hooks);
     return result('dispatched', runId);
@@ -411,17 +504,18 @@ function refusedResume(deps: Deps, stateDir: string, runId: string, record: RunR
 }
 
 // Continues a preparing run after a failed ROCKET removal: no lock acquire, no guards and no context fetch, since
-// the record already holds the head commit and the snapshot the approved text. An undefined entry means the comment
-// is gone.
+// the record already holds the head commit and the snapshots the approved text. rocketed holds the node ids that still
+// carry the viewer's rocket; a comment without an entry is gone and leaves the batch, and a batch without any comment
+// left is abandoned.
 export async function resumeDispatch(
     deps: Deps,
     session: Session,
     runId: string,
-    rocketStillPresent: boolean,
-    entry?: LookupEntry
+    rocketed: ReadonlySet<string>,
+    entries: readonly LookupEntry[]
 ): Promise<ResumeResult> {
     const { stateDir } = session;
-    const progress: Progress = { eyesAdded: false };
+    const progress = newProgress();
     let wtKey = session.worktreeKey;
     let record: RunRecord;
     try {
@@ -436,21 +530,28 @@ export async function resumeDispatch(
             return refusedResume(deps, stateDir, runId, record);
         }
         wtKey = record.worktreeKey;
-        progress.eyesAdded = record.eyesAdded;
-        if (entry === undefined) {
-            const kept = freeRun(deps, stateDir, wtKey, runId);
-            deps.log.info(`comment ${record.commentDbId}: comment deleted before start, abandoned`);
-            return { outcome: 'abandoned', runId: kept };
+        const byId = entryMap(entries);
+        const left = record.comments.filter((comment) => byId.has(comment.nodeId));
+        const gone = record.comments.filter((comment) => !byId.has(comment.nodeId));
+        if (gone.length > 0) {
+            deps.log.info(`comments ${idList(gone)}: deleted before start, left out of run ${runId}`);
         }
-        if (rocketStillPresent && !(await removeRocket(deps, session, record))) {
+        if (left.length === 0) {
+            return { outcome: 'abandoned', runId: freeRun(deps, stateDir, wtKey, runId) };
+        }
+        if (gone.length > 0) {
+            record = mergeRecord(stateDir, runId, { comments: left }) ?? record;
+        }
+        progress.comments = left.map((comment) => ({ ...comment }));
+        if (!(await removeRockets(deps, session, left, (nodeId) => rocketed.has(nodeId), progress))) {
             return { outcome: 'rocketRemovalFailed', runId };
         }
-        const start = await startWorker(deps, session, record, entry, progress);
+        const start = await startWorker(deps, session, { ...record, comments: left }, byId, progress);
         if (!start.started) {
             return { outcome: 'abandoned', runId: start.keptRunId };
         }
     } catch (error) {
-        return { outcome: 'abandoned', runId: failRun(deps, stateDir, wtKey, runId, error, progress) };
+        return { outcome: 'abandoned', runId: await failRun(deps, session, { wtKey, runId }, error, progress) };
     }
     await confirmLaunch(deps, session, record);
     return { outcome: 'dispatched', runId };

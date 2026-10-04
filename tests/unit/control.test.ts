@@ -151,6 +151,7 @@ function bgOptions(setup: Setup, claudeArgs: string[] = []): CliOptions {
         claude: undefined,
         claudeArgs,
         keepPanes: 5,
+        batchMax: 5,
         once: false,
     };
 }
@@ -164,6 +165,7 @@ function stopOptions(pr = PR): CliOptions {
         claude: undefined,
         claudeArgs: [],
         keepPanes: 5,
+        batchMax: 5,
         once: false,
     };
 }
@@ -684,10 +686,10 @@ await describe('list', async () => {
         assert.ok(watcherLine.startsWith('o/r pull 12 state=holding age=30s'), output);
         assert.ok(watcherLine.includes('reason=clone busy'), output);
         assert.ok(watcherLine.includes('hint=commit or stash first'), output);
-        assert.ok(watcherLine.includes('comment=101'), output);
+        assert.ok(watcherLine.includes('comments=101,102'), output);
         assert.ok(watcherLine.includes('last_error=HTTP 502: Bad Gateway'), output);
         assert.ok(!watcherLine.endsWith(' dead'), output);
-        assert.equal(runLine, 'run 20261002120000-101 state=running comment=101 age=90s');
+        assert.equal(runLine, 'run 20261002120000-101 state=running comments=101,102 age=90s');
     });
 
     await test('status text is shown without control characters or forged lines', async (t) => {

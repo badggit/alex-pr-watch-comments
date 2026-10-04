@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { STATE_FORMAT } from './constants.ts';
-import { getPath, getString } from './json.ts';
+import { RECORD_FORMAT } from './constants.ts';
+import { getArray, getPath, getString } from './json.ts';
 import { pidAlive } from './proc.ts';
 import {
     createFieldReader,
@@ -18,6 +18,7 @@ import type {
     EventsSnapshot,
     LaunchDecision,
     RecordPatch,
+    RunComment,
     RunRecord,
     RunState,
     WatcherState,
@@ -80,26 +81,43 @@ function formatText(value: unknown): string {
     return typeof format === 'number' || typeof format === 'string' ? String(format) : 'unknown';
 }
 
+function narrowComment(value: unknown): RunComment | undefined {
+    const read = createFieldReader(value);
+    const comment: RunComment = {
+        nodeId: read.text('nodeId'),
+        dbId: read.integer('dbId'),
+        url: read.text('url'),
+        threadId: read.text('threadId'),
+        topDbId: read.integer('topDbId'),
+        rocketAt: read.integer('rocketAt'),
+        eyesAdded: read.flag('eyesAdded'),
+    };
+    return read.failed() ? undefined : comment;
+}
+
+// A run holds at least one comment, and every comment must be readable.
+function narrowComments(value: unknown): RunComment[] | undefined {
+    const items = getArray(value, 'comments');
+    const comments = items?.map((item) => narrowComment(item)).filter((item) => item !== undefined) ?? [];
+    return comments.length > 0 && comments.length === items?.length ? comments : undefined;
+}
+
 function narrowRecord(value: unknown): RunRecord | undefined {
     const state = getString(value, 'state');
-    if (getPath(value, 'format') !== STATE_FORMAT || !isRunState(state)) {
+    const comments = narrowComments(value);
+    if (getPath(value, 'format') !== RECORD_FORMAT || !isRunState(state) || comments === undefined) {
         return;
     }
     const read = createFieldReader(value);
     const record: RunRecord = {
-        format: STATE_FORMAT,
+        format: RECORD_FORMAT,
         runId: read.text('runId'),
         prKey: read.text('prKey'),
         owner: read.text('owner'),
         repo: read.text('repo'),
         number: read.integer('number'),
         prUrl: read.text('prUrl'),
-        commentNodeId: read.text('commentNodeId'),
-        commentDbId: read.integer('commentDbId'),
-        commentUrl: read.text('commentUrl'),
-        threadId: read.text('threadId'),
-        topDbId: read.integer('topDbId'),
-        rocketAt: read.integer('rocketAt'),
+        comments,
         headSha: read.text('headSha'),
         remote: read.text('remote'),
         branch: read.text('branch'),
@@ -112,7 +130,6 @@ function narrowRecord(value: unknown): RunRecord | undefined {
         claudeArgs: read.texts('claudeArgs'),
         state,
         reason: read.text('reason'),
-        eyesAdded: read.flag('eyesAdded'),
         paneId: read.text('paneId'),
         panePid: read.optionalNumber('panePid'),
         socket: read.text('socket'),
@@ -280,7 +297,7 @@ export function readStatus(stateDir: string, prKey: string): WatcherStatus | und
         reason: read.text('reason'),
         hint: read.text('hint'),
         runId: read.text('runId'),
-        comment: read.text('comment'),
+        comments: read.text('comments'),
         since: read.integer('since'),
         updatedAt: read.integer('updatedAt'),
         lastError: read.text('lastError'),
@@ -296,7 +313,7 @@ export function writeStatus(stateDir: string, prKey: string, patch: Partial<Watc
         reason: '',
         hint: '',
         runId: '',
-        comment: '',
+        comments: '',
         since: nowSeconds,
         updatedAt: nowSeconds,
         lastError: '',

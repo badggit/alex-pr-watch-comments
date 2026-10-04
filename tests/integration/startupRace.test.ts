@@ -11,6 +11,7 @@ import { claimLaunch, launchDecision, mergeRecord, readRecord } from '../../src/
 import { runDir } from '../../src/stateStore.ts';
 import { writeWorkerKit } from '../../src/workerKit.ts';
 import {
+    baseComment,
     deadPid,
     lockExists,
     lookupWith,
@@ -122,7 +123,13 @@ await describe('startup race', async () => {
         const fixture = await newRunFixture(t);
         const watcher = await deadPid(fixture.env);
         await seedRun(fixture, {
-            patch: { state: 'preparing', paneId: '', panePid: undefined, eyesAdded: false, watcherPid: watcher },
+            patch: {
+                state: 'preparing',
+                paneId: '',
+                panePid: undefined,
+                comments: [baseComment({ eyesAdded: false })],
+                watcherPid: watcher,
+            },
             decision: 'none',
             lockWatcherPid: watcher,
         });

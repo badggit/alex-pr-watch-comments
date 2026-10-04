@@ -2,20 +2,21 @@
 
 Turn inline review comments on a GitHub pull request into commits, hands-free.
 
-Leave a comment on a line of the PR diff, approve it with a `rocket` reaction, and a watcher picks it up. It opens a new tmux pane, starts [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) in your project and gives it the comment to resolve. Claude fixes the code if needed, commits and pushes to the PR branch, replies in the comment thread and marks the comment as done.
+Leave comments on lines of the PR diff, approve them with a `rocket` reaction, and a watcher picks them up. It opens a new tmux pane, starts [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) in your project and gives it every approved comment to resolve, one after another. For each comment Claude fixes the code if needed, commits and pushes to the PR branch, replies in the comment thread and marks the comment as done.
 
 ## How it works
 
 1. You start the watcher for one PR from a tmux session, for a local clone of the PR's repository with the PR branch checked out.
-2. Every 15 seconds (`--interval`) the watcher reads the PR's inline review threads with `gh`.
-3. A comment is picked up when it carries a `rocket` reaction added by you, the account `gh` is logged in as. Only inline review comments (comments on the diff) count; general PR comments (the "Conversation" tab) are ignored. When several comments are approved, the oldest rocket goes first, one run at a time.
-4. The watcher checks the clone, saves the approved comment text, replaces your `rocket` with `eyes`, opens a new pane next to the watcher (when the window is full it retiles the window, and as a last resort opens a new one) and starts `claude` there. The task is passed as claude's initial prompt on the command line; nothing is typed into the pane. Claude then:
+2. Every 2 minutes (`--interval`, default 120 seconds) the watcher reads the PR's inline review threads with `gh`.
+3. A comment is picked up when it carries a `rocket` reaction added by you, the account `gh` is logged in as. Only inline review comments (comments on the diff) count; general PR comments (the "Conversation" tab) are ignored. All comments approved at that moment go into one run as a batch, oldest rocket first, at most `--batch-max` (default 5) of them; the rest wait for the next batch. One run at a time.
+4. The watcher checks the clone, saves the text of every approved comment, replaces each of your `rocket` reactions with `eyes`, opens a new pane next to the watcher (when the window is full it retiles the window, and as a last resort opens a new one) and starts `claude` there. The task is passed as claude's initial prompt on the command line; nothing is typed into the pane. Claude then works through the comments in order, one at a time:
     - reads the comment and decides whether the code needs a change;
-    - if it does, fixes the code, commits and pushes to the PR branch;
+    - if it does, fixes the code, commits only that change and pushes to the PR branch, so every comment gets its own commit;
     - replies to the comment inline, in the same thread, ending the reply with the tag `#alex-pr-watch-comments` on its own last line;
-    - checks whether the PR description is still accurate and updates it if needed;
     - removes `eyes` and adds a fresh `+1`.
-5. Once claude has added the fresh `+1` and stayed idle for a short quiet period, the watcher ends that claude session, marks its pane as finished and moves on to the next approved comment.
+
+    After the last comment it checks whether the PR description is still accurate and updates it if needed.
+5. While the run is in flight the watcher checks it every 15 seconds (`PRWC_RUN_CHECK`). Once claude has stopped and stayed idle for a short quiet period, and every comment of the batch has its fresh `+1` or a failure reply, the watcher ends that claude session and marks its pane as finished. Every comment without a fresh `+1` gets a `-1`. Then it reads the PR again right away, and the comments approved in the meantime become the next batch.
 
 ### Reactions
 
@@ -24,15 +25,17 @@ Leave a comment on a line of the PR diff, approve it with a `rocket` reaction, a
 | `rocket` | You approve the comment for automatic processing.                |
 | `eyes`   | The watcher took the comment, a Claude session is working on it. |
 | `+1`     | Done: the reply is posted and any fix is pushed.                 |
+| `-1`     | Failed: the comment was not resolved; see the reply or the log.  |
 
 ### Reaction lifecycle
 
-- Only your own `rocket` counts. It is removed when the run starts, so the same comment never runs twice by accident. To run a comment again, add the `rocket` again.
+- Only your own `rocket` counts. It is removed when the run starts, so the same comment never runs twice by accident. To run a comment again, add the `rocket` again; the watcher removes your old `+1` or `-1` when the new run starts.
 - If the comment was edited at or after the time of your `rocket`, it is not run: the watcher removes the `rocket` and logs that the comment was edited after approval. Read the new text and add the `rocket` again to approve it.
-- A run completes only after claude has stayed idle for a short quiet period after a fresh `+1` (a `+1` newer than your `rocket`). The quiet period is `PRWC_STOP_QUIET`, default 10 seconds: one of your own Stop hooks may make claude continue after it stopped once, and that work shows up as new activity before the period ends.
-- If claude cannot do the task, it posts a reply that explains the blocker (also ending with the `#alex-pr-watch-comments` tag), removes `eyes` and adds no `+1`. The run ends as failed.
-- If claude exits before the run is done (for example you quit it), the run ends as exited and the watcher removes `eyes`. Add the `rocket` again to retry.
-- Anything else (claude idle without a `+1`, a permission prompt, a deleted comment) leaves the run in needs attention. See [State and logs](#state-and-logs).
+- A run completes only after claude has stayed idle for a short quiet period and every comment of the batch has a fresh `+1` (a `+1` newer than your `rocket`). The quiet period is `PRWC_STOP_QUIET`, default 10 seconds: one of your own Stop hooks may make claude continue after it stopped once, and that work shows up as new activity before the period ends.
+- If claude cannot resolve a comment, it posts a reply that explains the blocker (also ending with the `#alex-pr-watch-comments` tag), removes `eyes`, adds no `+1` and goes on with the next comment. When claude has stopped, the watcher adds a `-1` to every such comment, and the run ends as failed.
+- If claude exits before the run is done (for example you quit it, or it crashed), or the run could not be started or was interrupted, the run ends as exited: the watcher removes `eyes` and adds a `-1` to every comment of the batch that has no fresh `+1`. Add the `rocket` again to retry a comment.
+- A comment whose `rocket` you added again during the run gets no `-1`: it goes into the next batch.
+- A deleted comment simply drops out of its batch. Anything else (claude idle while a comment has neither `+1` nor a failure reply, a permission prompt, every comment of the batch deleted) leaves the run in needs attention; that is not a failure yet, so no `-1` is added. See [State and logs](#state-and-logs).
 
 ### Stop hooks
 
@@ -125,10 +128,11 @@ pr-watch-comments --help                           show this help
 | `--list`             | List watchers and runs. Takes no PR URL. Needs no tmux.                                                                                                                                       |
 | `--stop PR_URL`      | Stop the watcher of a PR. Needs no tmux session of its own.                                                                                                                                   |
 | `--dir PATH`         | Project directory, default: the current directory.                                                                                                                                            |
-| `--interval SECONDS` | Polling interval, a whole number from 1 to 86400, default 15.                                                                                                                                 |
+| `--interval SECONDS` | How often the PR is read for new rockets, a whole number from 1 to 86400, default 120.                                                                                                        |
 | `--claude PATH`      | The claude executable, default: `claude` found on `PATH` at start.                                                                                                                            |
 | `--claude-arg ARG`   | One extra argument for claude, repeatable, passed literally as its own argument (never through a shell). A value cannot contain a newline. An argument ending in `;` is passed literally too. |
 | `--keep-panes N`     | Finished worker panes to keep for the PR, 0 or more, default 5. Older finished panes are closed.                                                                                              |
+| `--batch-max N`      | Approved comments one run takes at most, 1 to 50, default 5. The oldest rockets go first; the rest wait for the next batch.                                                                    |
 | `--once`             | One polling pass, then exit. Not with `--background`.                                                                                                                                         |
 | `--help`             | Show the usage text.                                                                                                                                                                          |
 
@@ -147,7 +151,8 @@ All values are whole seconds unless noted. A value that is not a positive whole 
 | Variable             | Default                            | Meaning                                                                                                                 |
 | -------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `PRWC_STATE_DIR`     | `~/.local/state/pr-watch-comments` | State directory, see [State and logs](#state-and-logs).                                                                 |
-| `PRWC_STOP_QUIET`    | 10                                 | Quiet period after the fresh `+1` before a run counts as done.                                                          |
+| `PRWC_STOP_QUIET`    | 10                                 | Quiet period after claude stopped before a run counts as done.                                                          |
+| `PRWC_RUN_CHECK`     | 15                                 | How often a run in flight is checked (or `--interval`, when that is shorter).                                           |
 | `PRWC_START_TIMEOUT` | 120                                | Time from the pane start until claude's first prompt must be recorded; after that the run shows `claude-did-not-start`. |
 | `PRWC_TERM_WAIT`     | 10                                 | Time the watcher waits for claude to exit after it ended a finished run.                                                |
 | `PRWC_LAUNCH_WAIT`   | 60                                 | Time a new worker pane waits for the watcher's go before it gives up.                                                   |
@@ -185,7 +190,7 @@ The watcher and its runs work in your clone, the one given by `--dir`:
 
 - The clone must have the PR head branch checked out (`gh pr checkout NUMBER`), and it needs a remote for the PR head repository. The fetch and push destinations of that remote, after any `insteadOf` or `pushInsteadOf` rewrite, must all name that same repository (`https://github.com/OWNER/REPO.git`, `ssh://git@github.com/OWNER/REPO.git` or `git@github.com:OWNER/REPO.git`). Anything else is refused.
 - Before each run the watcher checks the remote and the branch, that tracked files have no uncommitted changes, fetches the branch and checks that the local branch is not ahead of the remote. If a check fails, the watcher is holding: it shows the reason and a hint in `--list` and tries again on the next poll. Nothing on GitHub changes while it is holding.
-- One clone runs one comment at a time. Watchers for other PRs on the same clone wait (`holding` with `clone busy`).
+- One clone runs one batch at a time. Watchers for other PRs on the same clone wait (`holding` with `clone busy`).
 - While a run is in flight, do not change tracked files, the index or the checked-out branch in that clone. The run commits and pushes from there.
 
 The easiest way to keep this contract is a dedicated clone for the watcher, given with `--dir`, while you keep working in your usual one.
@@ -195,7 +200,7 @@ The easiest way to keep this contract is a dedicated clone for the watcher, give
 The worker runs your normal `claude`, with your settings and your permission rules.
 
 - Trust the project directory in Claude Code once before the first run: run `claude` in it and accept the folder trust dialog. Subdirectories inherit that decision. Otherwise claude waits at the trust dialog, and the run ends in needs attention with `claude-did-not-start` and the hint `see the worker pane: claude may wait at a dialog like folder trust - trust the dir`.
-- Every run adds one settings layer (`--settings` with a per-run file). It adds hooks that report claude's activity to the watcher, and allow rules for the conveyor's own commands: the exact git and gh commands listed under [Safety](#safety), `Read` of the run directory, and `Edit(path)` rules for the three files claude writes there (the reply body, the commit message and the PR body). It never removes your rules and never bypasses permissions.
+- Every run adds one settings layer (`--settings` with a per-run file). It adds hooks that report claude's activity to the watcher, and allow rules for the conveyor's own commands: the exact git and gh commands listed under [Safety](#safety), `Read` of the run directory, and `Edit(path)` rules for the files claude writes there (one reply body per comment, the commit message and the PR body). It never removes your rules and never bypasses permissions.
 - Your own ask and deny rules still apply to the conveyor's commands. For example, a rule `Bash(git push *)` that asks makes the run stop at that prompt, and the run shows as needs attention. Any other prompt, for example for editing project files when your settings ask for that, shows as needs attention too. Answer it in the worker pane and the run goes on.
 - The allow rules do not cover editing the project's own files: your permission mode and rules decide that. To let runs edit without asking, allow it in your settings or pass a mode, for example `--claude-arg --permission-mode --claude-arg acceptEdits`.
 
@@ -212,9 +217,9 @@ Every run starts an agent that edits code and pushes it to your branch, so the t
 
 - Only a `rocket` reaction added by you, the account `gh` is logged in as, starts a run. On a public repository anyone can react to a comment, and those reactions are ignored.
 - An edit of the comment after your `rocket` needs a fresh `rocket`: the watcher never runs text you did not approve.
-- The text saved when the run starts (the snapshot) is the only approved text. Earlier comments of the same thread are included as untrusted context only. The worker never fetches other comments or replies.
+- The text saved when the run starts (one snapshot per comment) is the only approved text. Earlier comments of the same thread are included as untrusted context only. The worker never fetches other comments or replies.
 - Scope: claude changes only what the comment asks for, never runs commands quoted in comments, and does not touch dependencies, lockfiles, CI or workflow files or package scripts unless the approved comment asks for that file. It replies only inline in the same thread, never as a general PR comment or a review.
-- The worker can use git and gh only through these exact commands (`RUN_DIR` is the run's directory in the state directory; `*` stands for explicit file paths):
+- The worker can use git and gh only through these exact commands (`RUN_DIR` is the run's directory in the state directory; `ID` is the database id of a comment of the batch and `REPLY_TO_ID` the first comment of its thread, and the four lines with them repeat for every comment; `*` stands for explicit file paths):
 
     ```text
     git status
@@ -231,15 +236,15 @@ Every run starts an agent that edits code and pushes it to your branch, so the t
     git add -- *
     git commit -F RUN_DIR/commit-msg.txt -- *
     git push REMOTE HEAD:refs/heads/BRANCH
-    gh api repos/OWNER/REPO/pulls/NUMBER/comments/COMMENT_ID/replies --hostname github.com -F body=@RUN_DIR/reply.md
-    gh api graphql --hostname github.com -F query=@RUN_DIR/gql/removeEyes.graphql
-    gh api graphql --hostname github.com -F query=@RUN_DIR/gql/removePlus1.graphql
-    gh api graphql --hostname github.com -F query=@RUN_DIR/gql/addPlus1.graphql
+    gh api repos/OWNER/REPO/pulls/NUMBER/comments/REPLY_TO_ID/replies --hostname github.com -F body=@RUN_DIR/reply-ID.md
+    gh api graphql --hostname github.com -F query=@RUN_DIR/gql/removeEyes-ID.graphql
+    gh api graphql --hostname github.com -F query=@RUN_DIR/gql/removePlus1-ID.graphql
+    gh api graphql --hostname github.com -F query=@RUN_DIR/gql/addPlus1-ID.graphql
     gh api repos/OWNER/REPO/pulls/NUMBER --hostname github.com --jq .body
     gh api -X PATCH repos/OWNER/REPO/pulls/NUMBER --hostname github.com -F body=@RUN_DIR/pr-body.md
     ```
 
-    There is no wildcard `git diff`: with a path wildcard, `git diff` could read any file outside the repository. The reaction files are written per run and name only the approved comment. The push goes only to the PR branch: no force push, no amend, no rebase.
+    There is no wildcard `git diff`: with a path wildcard, `git diff` could read any file outside the repository. The reaction files are written per comment and name only that approved comment. The worker never adds a `-1`: only the watcher does. The push goes only to the PR branch: no force push, no amend, no rebase.
 
 - `PATH` entries inside the working tree are ignored when the watcher resolves `git`, `gh`, `tmux` and `claude`, and a tool that would resolve inside the working tree refuses the start. Before claude starts, the worker checks that `git` and `gh` still resolve to the same executables the watcher checked at start.
 - Accepted risk: the worker runs with your Claude Code permissions and your stored gh login. The comment text is still untrusted input, and the `rocket` is your approval to act on it, so read the comment before you add one.
@@ -257,8 +262,8 @@ The watcher logs to its own pane (the foreground pane or the background window),
 `--list` prints one line per watcher and one per run:
 
 ```text
-OWNER/REPO pull 123 state=running age=40s reason=working hint= comment=COMMENT_ID last_error=
-run 20261003120000-COMMENT_ID state=running comment=COMMENT_ID age=38s
+OWNER/REPO pull 123 state=running age=40s reason=working hint= comments=COMMENT_ID,COMMENT_ID last_error=
+run 20261003120000-COMMENT_ID state=running comments=COMMENT_ID,COMMENT_ID age=38s
 ```
 
 A watcher line ends with ` dead` when its process is gone. Watcher states:
@@ -275,7 +280,7 @@ A watcher line ends with ` dead` when its process is gone. Watcher states:
 | `exited`          | The PR was closed or merged.                                                                                                                                                                                                                                                                                                                                       |
 | `fatal`           | The watcher stopped on an error, for example a failed GitHub authentication.                                                                                                                                                                                                                                                                                       |
 
-The delay between polls never drops below the configured `--interval`.
+The delay between two reads of the PR never drops below the configured `--interval`. While a run is in flight, the watcher checks it every `PRWC_RUN_CHECK` seconds (only the comments of the run are read then), and right after the run ends it reads the PR at once for the next batch.
 
 A gap in which the wall clock advanced more than 30 seconds beyond the monotonic clock (the host was asleep) is not counted as a polling failure.
 
@@ -284,16 +289,16 @@ Needs-attention reasons:
 | Reason                                       | What to do                                                                                                                                                                                                                    |
 | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `waiting-for-permission`                     | Answer the permission prompt in the worker pane.                                                                                                                                                                              |
-| `idle-without-done-marker`                   | Claude stopped without `+1`. Look at the worker pane; finish the task there or quit claude.                                                                                                                                   |
+| `idle-without-done-marker`                   | Claude stopped while a comment has neither `+1` nor a failure reply. Look at the worker pane; finish the task there or quit claude.                                                                                          |
 | `claude-did-not-start`                       | See the worker pane: claude may wait at a dialog like folder trust. Answer it there, or quit claude, trust the project directory and add the `rocket` again.                                                                  |
-| `comment-deleted`                            | The comment is gone. Quit claude in the worker pane.                                                                                                                                                                          |
+| `comment-deleted`                            | Every comment of the batch is gone. Quit claude in the worker pane.                                                                                                                                                           |
 | `claude-did-not-exit`                        | Claude did not exit after the run ended. Quit it in the worker pane.                                                                                                                                                          |
 | `claude-pid-reused`, `claude-pid-unreadable` | The recorded claude process could not be verified, so nothing was signalled. Quit claude in the worker pane.                                                                                                                  |
 | `worker-pane-not-found`                      | After a watcher restart, the run's claude still runs but the watcher could not find a tmux pane for the run. Find that claude and quit it.                                                                                    |
 | `run-missing`                                | The run's directory was removed while the watcher ran. Make sure no claude still runs in the clone (`--stop` never stops a worker), then stop and start the watcher, which frees the clone; remove a leftover `eyes` by hand. |
 | `record-unreadable`, `claude-pid-mismatch`   | The run's record cannot be read, or its claude process cannot be matched. See manual recovery below.                                                                                                                          |
 
-For the reasons above `run-missing`, once claude in the worker pane has exited, the watcher clears the run as `claude-exited`, removes `eyes` and frees the clone. A `record-unreadable` run whose claude is gone and whose pane is closed is cleared too, as `record-unreadable`, but its `eyes` may remain: remove it by hand. Add the `rocket` again to retry the comment.
+For the reasons above `run-missing`, once claude in the worker pane has exited, the watcher clears the run as `claude-exited`, removes `eyes`, adds a `-1` to every comment without a fresh `+1` and frees the clone. A `record-unreadable` run whose claude is gone and whose pane is closed is cleared too, as `record-unreadable`, but its `eyes` reactions may remain: remove them by hand. Add the `rocket` again to retry a comment.
 
 ### Manual recovery
 
@@ -302,7 +307,7 @@ Manual recovery is needed only when the watcher cannot clear the run itself, for
 1. Stop the watcher: `pr-watch-comments --stop PR_URL`.
 2. Make sure no claude is running in the clone (quit it in the worker pane).
 3. Delete `runs/RUN_ID` under the state directory (`RUN_ID` is shown by `--list` and in the notice).
-4. Start the watcher again, and remove a leftover `eyes` from the comment by hand.
+4. Start the watcher again, and remove leftover `eyes` reactions from its comments by hand.
 
 ## Development
 

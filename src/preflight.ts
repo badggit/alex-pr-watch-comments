@@ -373,6 +373,7 @@ export async function preflight(
             stateDir,
             interval: options.interval,
             keepPanes: options.keepPanes,
+            batchMax: options.batchMax,
             claudeArgs: options.claudeArgs,
             once: options.once,
         },

@@ -5,7 +5,14 @@ import { describe, test, type TestContext } from 'node:test';
 
 import { acquireWorktreeLock, worktreeLockHolder } from '../../src/locks.ts';
 import { pidAlive } from '../../src/proc.ts';
-import { attentionHint, captureRun, decideRun, evaluateRun, type DecideInput } from '../../src/runState.ts';
+import {
+    attentionHint,
+    captureRun,
+    commentOutcome,
+    decideRun,
+    evaluateRun,
+    type DecideInput,
+} from '../../src/runState.ts';
 import { createRun, launchDecision, mergeRecord, readLoggedCursor } from '../../src/runStore.ts';
 import { runDir } from '../../src/stateStore.ts';
 import type { EventKind, EventsSnapshot, LookupResult } from '../../src/types.ts';
@@ -13,6 +20,7 @@ import { safeText } from '../../src/validate.ts';
 import {
     answerPaneTag,
     appendEvents,
+    baseComment,
     doneMarks,
     eventsFile,
     eyesRemovals,
@@ -31,6 +39,7 @@ import {
     STALE_PLUS1,
     startClaude,
     startTermReportingClaude,
+    thumbsDownAdds,
     tmuxMessages,
     WORKER_SOCKET,
     type RunFixture,
@@ -74,15 +83,12 @@ function snapshot(kinds: readonly EventKind[], lastAt: number): EventsSnapshot {
 function decideInput(patch?: Partial<DecideInput>): DecideInput {
     return {
         alive: true,
-        commentGone: false,
+        comments: ['open'],
         events: snapshot(['prompt', 'stop'], NOW - 60),
         startedAt: NOW - 200,
         now: NOW,
         startTimeout: 120,
         stopQuiet: 10,
-        freshPlus1: false,
-        eyesOn: false,
-        eyesAdded: true,
         ...patch,
     };
 }
@@ -148,14 +154,14 @@ function failLockRenames(t: TestContext): void {
 
 await describe('decideRun', async () => {
     await test('dead worker gives exited', () => {
-        assert.deepEqual(decideRun(decideInput({ alive: false, freshPlus1: true })), {
+        assert.deepEqual(decideRun(decideInput({ alive: false, comments: ['done'] })), {
             state: 'exited',
             reason: 'claude-exited',
         });
     });
 
     await test('deleted comment needs attention', () => {
-        assert.deepEqual(decideRun(decideInput({ commentGone: true, freshPlus1: true })), {
+        assert.deepEqual(decideRun(decideInput({ comments: ['gone'] })), {
             state: 'needs_attention',
             reason: 'comment-deleted',
         });
@@ -170,28 +176,60 @@ await describe('decideRun', async () => {
     });
 
     await test('settled stop with a fresh +1 completes', () => {
-        assert.deepEqual(decideRun(decideInput({ freshPlus1: true })), { state: 'completed', reason: 'done' });
+        assert.deepEqual(decideRun(decideInput({ comments: ['done'] })), { state: 'completed', reason: 'done' });
     });
 
     await test('settled stop without +1 and with EYES gone fails', () => {
-        assert.deepEqual(decideRun(decideInput({ eyesAdded: true, eyesOn: false })), {
+        assert.deepEqual(decideRun(decideInput({ comments: ['failed'] })), {
             state: 'failed',
             reason: 'claude-took-failure-path',
         });
     });
 
-    await test('settled stop without +1 and with EYES still on needs attention', () => {
-        assert.deepEqual(decideRun(decideInput({ eyesAdded: true, eyesOn: true })), {
+    await test('settled stop with an open comment needs attention', () => {
+        assert.deepEqual(decideRun(decideInput({ comments: ['open'] })), {
             state: 'needs_attention',
             reason: 'idle-without-done-marker',
         });
     });
 
-    await test('settled stop without +1 and EYES never added needs attention', () => {
-        assert.deepEqual(decideRun(decideInput({ eyesAdded: false, eyesOn: false })), {
+    await test('a batch completes only when every comment is done or deleted', () => {
+        assert.deepEqual(decideRun(decideInput({ comments: ['done', 'gone', 'done'] })), {
+            state: 'completed',
+            reason: 'done',
+        });
+        assert.deepEqual(decideRun(decideInput({ comments: ['done', 'failed'] })), {
+            state: 'failed',
+            reason: 'claude-took-failure-path',
+        });
+        assert.deepEqual(decideRun(decideInput({ comments: ['done', 'open', 'failed'] })), {
             state: 'needs_attention',
             reason: 'idle-without-done-marker',
         });
+    });
+
+    await test('a batch with one deleted comment goes on; only an all-deleted batch needs attention', () => {
+        const events = snapshot(['prompt', 'tool'], NOW - 60);
+        assert.deepEqual(decideRun(decideInput({ events, comments: ['gone', 'open'] })), {
+            state: 'running',
+            reason: 'working',
+        });
+        assert.deepEqual(decideRun(decideInput({ events, comments: ['gone', 'gone'] })), {
+            state: 'needs_attention',
+            reason: 'comment-deleted',
+        });
+    });
+
+    await test('commentOutcome reads done, failed, open and gone from the lookup', () => {
+        const comment = baseComment();
+        const entry = lookupWith().entries[0];
+        assert.ok(entry !== undefined);
+        assert.equal(commentOutcome(comment, undefined, false), 'gone');
+        assert.equal(commentOutcome(comment, entry, true), 'gone');
+        assert.equal(commentOutcome(comment, { ...entry, plus1At: FRESH_PLUS1 }, false), 'done');
+        assert.equal(commentOutcome(comment, { ...entry, plus1At: STALE_PLUS1, eyes: false }, false), 'failed');
+        assert.equal(commentOutcome(comment, { ...entry, eyes: true }, false), 'open');
+        assert.equal(commentOutcome(baseComment({ eyesAdded: false }), { ...entry, eyes: false }, false), 'open');
     });
 
     await test('no prompt 121 seconds after the start: claude did not start', () => {
@@ -222,19 +260,22 @@ await describe('decideRun', async () => {
 
     await test('a fresh +1 while the last event is a prompt is still working', () => {
         const events = snapshot(['prompt', 'stop', 'prompt'], NOW - 60);
-        assert.deepEqual(decideRun(decideInput({ events, freshPlus1: true })), { state: 'running', reason: 'working' });
+        assert.deepEqual(decideRun(decideInput({ events, comments: ['done'] })), {
+            state: 'running',
+            reason: 'working',
+        });
     });
 });
 
 await describe('owner Stop hook blocked (C8)', async () => {
     await test('a stop inside the quiet period is settling, after it completed', () => {
         const young = snapshot(['prompt', 'stop'], NOW - 5);
-        assert.deepEqual(decideRun(decideInput({ events: young, freshPlus1: true, stopQuiet: 10 })), {
+        assert.deepEqual(decideRun(decideInput({ events: young, comments: ['done'], stopQuiet: 10 })), {
             state: 'running',
             reason: 'settling',
         });
         const old = snapshot(['prompt', 'stop'], NOW - 11);
-        assert.deepEqual(decideRun(decideInput({ events: old, freshPlus1: true, stopQuiet: 10 })), {
+        assert.deepEqual(decideRun(decideInput({ events: old, comments: ['done'], stopQuiet: 10 })), {
             state: 'completed',
             reason: 'done',
         });
@@ -242,13 +283,16 @@ await describe('owner Stop hook blocked (C8)', async () => {
 
     await test('tool activity after a stop is working', () => {
         const events = snapshot(['prompt', 'stop', 'tool'], NOW - 60);
-        assert.deepEqual(decideRun(decideInput({ events, freshPlus1: true })), { state: 'running', reason: 'working' });
+        assert.deepEqual(decideRun(decideInput({ events, comments: ['done'] })), {
+            state: 'running',
+            reason: 'working',
+        });
     });
 
     await test('a stop without a recorded prompt is neither completion nor failure', () => {
         const events = snapshot(['stop'], NOW - 60);
-        for (const freshPlus1 of [true, false]) {
-            const decision = decideRun(decideInput({ events, freshPlus1, eyesAdded: true, eyesOn: false }));
+        for (const outcome of ['done', 'failed'] as const) {
+            const decision = decideRun(decideInput({ events, comments: [outcome] }));
             assert.notEqual(decision.state, 'completed');
             assert.notEqual(decision.state, 'failed');
         }
@@ -514,6 +558,8 @@ await describe('evaluateRun decisions and effects', async () => {
         const result = await evaluate(fixture, lookupWith({ eyes: false }));
         assert.deepEqual(result, { state: 'failed', reason: 'claude-took-failure-path' });
         assert.equal(pidAlive(claude), false);
+        assert.equal(thumbsDownAdds(fixture).length, 1);
+        assert.equal(eyesRemovals(fixture).length, 0);
         assert.equal(doneMarks(fixture).length, 1);
         assert.equal(lockExists(fixture, SESSION_KEY), false);
         assert.equal(runExists(fixture), false);
@@ -617,12 +663,13 @@ await describe('evaluateRun other effects', async () => {
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
     });
 
-    await test('exited with EYES on removes EYES once and caps panes on the record socket', async (t) => {
+    await test('exited with EYES on removes EYES once, adds -1 and caps panes on the record socket', async (t) => {
         const fixture = await newRunFixture(t);
         await seedRun(fixture, { patch: { socket: WORKER_SOCKET }, events: ['prompt'] });
         const result = await evaluate(fixture, lookupWith({ eyes: true }));
         assert.deepEqual(result, { state: 'exited', reason: 'claude-exited' });
         assert.equal(eyesRemovals(fixture).length, 1);
+        assert.equal(thumbsDownAdds(fixture).length, 1);
         const listing = fixture.fake
             .calls('tmux')
             .find((call) => call.key === 'list-panes' && call.args.some((arg) => arg.includes('@prwc_done')));
@@ -631,13 +678,51 @@ await describe('evaluateRun other effects', async () => {
         assert.equal(runExists(fixture), false);
     });
 
-    await test('exited with EYES off removes nothing', async (t) => {
+    await test('exited with EYES off only adds the -1', async (t) => {
         const fixture = await newRunFixture(t);
         await seedRun(fixture, { events: ['prompt'] });
         const result = await evaluate(fixture, lookupWith({ eyes: false }));
         assert.equal(result.state, 'exited');
-        assert.equal(fixture.fake.calls('gh').length, 0);
+        assert.equal(fixture.fake.calls('gh').length, 1);
+        assert.equal(thumbsDownAdds(fixture).length, 1);
         assert.equal(runExists(fixture), false);
+    });
+
+    await test('exited after a fresh +1 or a new rocket adds no -1', async (t) => {
+        const fixture = await newRunFixture(t);
+        await seedRun(fixture, { events: ['prompt'] });
+        const done = await evaluate(fixture, lookupWith({ eyes: false, plus1At: FRESH_PLUS1 }));
+        assert.equal(done.state, 'exited');
+        assert.equal(fixture.fake.calls('gh').length, 0);
+        const again = await newRunFixture(t);
+        await seedRun(again, { events: ['prompt'] });
+        const approved = await evaluate(again, lookupWith({ eyes: true, rocketAt: FRESH_PLUS1 }));
+        assert.equal(approved.state, 'exited');
+        assert.equal(again.fake.calls('gh').length, 0);
+    });
+
+    await test('a batch with one done and one failed comment marks only the failed one', async (t) => {
+        const fixture = await newRunFixture(t);
+        const second = baseComment({
+            nodeId: 'PRRC_kwDOAbc457',
+            dbId: 457,
+            url: 'https://github.com/o/r/pull/12#discussion_r457',
+        });
+        await seedRun(fixture, { patch: { comments: [baseComment(), second] }, events: SETTLED });
+        await startClaude(fixture, 'cooperative');
+        answerPaneTag(fixture);
+        const [first] = lookupWith({ plus1At: FRESH_PLUS1 }).entries;
+        assert.ok(first !== undefined);
+        const lookup: LookupResult = {
+            ...lookupWith(),
+            entries: [first, { ...first, nodeId: second.nodeId, dbId: 457, plus1At: undefined, eyes: false }],
+        };
+        const result = await evaluate(fixture, lookup);
+        assert.deepEqual(result, { state: 'failed', reason: 'claude-took-failure-path' });
+        const marked = thumbsDownAdds(fixture);
+        assert.equal(marked.length, 1);
+        assert.ok((marked[0]?.input ?? '').includes(second.nodeId));
+        assert.ok(tmuxMessages(fixture).some((call) => call.args.some((arg) => arg.includes('comments 457'))));
     });
 
     await test('completed marks the pane on the record socket and frees the slot when marking fails', async (t) => {

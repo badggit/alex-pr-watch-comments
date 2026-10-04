@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { DEFAULT_START_TIMEOUT, DEFAULT_STOP_QUIET, DEFAULT_TERM_WAIT, ENV_NAMES } from './constants.ts';
-import { react } from './githubLookup.ts';
 import { releaseWorktreeLock, worktreeLockHolder } from './locks.ts';
 import { pidAlive, processStart, signalIfSame } from './proc.ts';
+import { markFailed, type FailTarget } from './reactions.ts';
 import {
     claimLaunch,
     clearRun,
@@ -24,25 +24,35 @@ import type {
     EvaluateState,
     EventKind,
     EventsSnapshot,
+    LookupEntry,
     LookupResult,
+    RunComment,
     RunDecision,
     RunRecord,
     Session,
     SignalOutcome,
 } from './types.ts';
-import { isUintString, readEnvSeconds, safeText } from './validate.ts';
+import { isUintString, readEnvSeconds } from './validate.ts';
+
+// done: a +1 newer than the rocket; failed: the watcher's EYES is gone without such a +1 (the worker's failure path);
+// gone: the comment was deleted; open: none of these yet.
+export type CommentOutcome = 'done' | 'failed' | 'open' | 'gone';
 
 export interface DecideInput {
     alive: boolean;
-    commentGone: boolean;
+    comments: readonly CommentOutcome[];
     events: EventsSnapshot;
     startedAt: number | undefined;
     now: number;
     startTimeout: number;
     stopQuiet: number;
-    freshPlus1: boolean;
-    eyesOn: boolean;
-    eyesAdded: boolean;
+}
+
+// One comment of the run with what the lookup says about it.
+interface CommentState {
+    comment: RunComment;
+    entry: LookupEntry | undefined;
+    outcome: CommentOutcome;
 }
 
 export interface EvaluateResult {
@@ -91,23 +101,34 @@ function settled(input: DecideInput): boolean {
     );
 }
 
+export function commentOutcome(comment: RunComment, entry: LookupEntry | undefined, gone: boolean): CommentOutcome {
+    if (entry === undefined || gone) {
+        return 'gone';
+    }
+    if (entry.plus1At !== undefined && entry.plus1At > comment.rocketAt) {
+        return 'done';
+    }
+    return comment.eyesAdded && !entry.eyes ? 'failed' : 'open';
+}
+
 // The run-state table, first match wins. A stop without a recorded prompt is never completion or failure evidence.
+// A deleted comment counts as resolved; only a batch whose comments are all gone needs the owner.
 export function decideRun(input: DecideInput): RunDecision {
-    const { events } = input;
+    const { events, comments } = input;
     if (!input.alive) {
         return { state: 'exited', reason: 'claude-exited' };
     }
-    if (input.commentGone) {
+    if (comments.every((outcome) => outcome === 'gone')) {
         return { state: 'needs_attention', reason: 'comment-deleted' };
     }
     if (events.lastEvent === 'permission') {
         return { state: 'needs_attention', reason: 'waiting-for-permission' };
     }
     if (settled(input)) {
-        if (input.freshPlus1) {
+        if (comments.every((outcome) => outcome === 'done' || outcome === 'gone')) {
             return { state: 'completed', reason: 'done' };
         }
-        if (input.eyesAdded && !input.eyesOn) {
+        if (comments.every((outcome) => outcome !== 'open')) {
             return { state: 'failed', reason: 'claude-took-failure-path' };
         }
         return { state: 'needs_attention', reason: 'idle-without-done-marker' };
@@ -151,12 +172,27 @@ export async function notifyOwner(deps: Deps, session: Session, text: string): P
     await tmuxMessage(deps, session.tools.tmux, session.tmux, `pr-watch-comments: ${text}`);
 }
 
-export async function removeEyes(deps: Deps, session: Session, record: RunRecord): Promise<void> {
-    const result = await react(deps, session.tools.gh, 'remove', record.commentNodeId, 'EYES');
-    if (result.kind !== 'ok') {
-        const detail = result.kind === 'invalid' ? 'invalid comment id' : safeText(result.message);
-        deps.log.warn(`could not remove EYES from comment ${record.commentDbId}: ${detail}`);
+// A comment to mark as failed: neither done nor deleted, and not approved again (a new rocket of the viewer puts it
+// into the next batch, which would remove the -1 at once). Its EYES is removed when the lookup still shows it.
+export function failTarget(
+    comment: RunComment,
+    entry: LookupEntry | undefined,
+    outcome: CommentOutcome
+): FailTarget | undefined {
+    if ((outcome !== 'open' && outcome !== 'failed') || entry?.rocketAt !== undefined) {
+        return;
     }
+    return { nodeId: comment.nodeId, dbId: comment.dbId, eyesOn: entry?.eyes ?? false };
+}
+
+function failTargets(states: readonly CommentState[]): FailTarget[] {
+    return states
+        .map((state) => failTarget(state.comment, state.entry, state.outcome))
+        .filter((target) => target !== undefined);
+}
+
+function idList(targets: readonly FailTarget[]): string {
+    return targets.map((target) => target.dbId).join(',');
 }
 
 export function attentionHint(reason: string): string {
@@ -292,7 +328,8 @@ async function waitWorkerGone(ctx: RunContext): Promise<WaitOutcome> {
     }
 }
 
-async function endRun(ctx: RunContext, decision: RunDecision): Promise<EvaluateResult> {
+// claude is ended first; only once it is gone are the comments it did not finish marked as failed.
+async function endRun(ctx: RunContext, decision: RunDecision, targets: readonly FailTarget[]): Promise<EvaluateResult> {
     const { deps, session, record } = ctx;
     const outcome = await terminateClaude(ctx);
     switch (outcome) {
@@ -325,24 +362,30 @@ async function endRun(ctx: RunContext, decision: RunDecision): Promise<EvaluateR
     if (waited === 'alive') {
         return await recordAttention(ctx, 'claude-did-not-exit');
     }
+    await markFailed(deps, session, targets, ctx.stop);
+    if (ctx.stop.aborted) {
+        return deferred('stop-requested');
+    }
     const interrupted = await finishRun(ctx);
     if (interrupted !== undefined) {
         return interrupted;
     }
     deps.log.info(`run ${record.runId} ${decision.state}: ${decision.reason}`);
     if (decision.state === 'failed') {
-        await notifyOwner(deps, session, `run ${record.runId} failed: ${decision.reason}`);
+        await notifyOwner(deps, session, `run ${record.runId} failed: ${decision.reason}, comments ${idList(targets)}`);
     }
     return decision;
 }
 
-async function endExited(ctx: RunContext, eyesOn: boolean, decision: RunDecision): Promise<EvaluateResult> {
+async function endExited(
+    ctx: RunContext,
+    targets: readonly FailTarget[],
+    decision: RunDecision
+): Promise<EvaluateResult> {
     const { deps, session, record } = ctx;
-    if (eyesOn) {
-        await removeEyes(deps, session, record);
-        if (ctx.stop.aborted) {
-            return deferred('stop-requested');
-        }
+    await markFailed(deps, session, targets, ctx.stop);
+    if (ctx.stop.aborted) {
+        return deferred('stop-requested');
     }
     const interrupted = await finishRun(ctx);
     if (interrupted !== undefined) {
@@ -421,8 +464,8 @@ async function taggedPane(deps: Deps, session: Session, runId: string): Promise<
 }
 
 // A run with an unreadable record is finished like an exited one when no pane on this watcher's tmux server carries
-// its tag and its claude is verifiably gone (no such process) or never started. The comment id is in the lost record,
-// so an EYES reaction cannot be removed. Otherwise the result is the reason the run keeps its slot: a live pid whose
+// its tag and its claude is verifiably gone (no such process) or never started. The comment ids are in the lost
+// record, so no EYES reaction can be removed and no comment marked. Otherwise the result is the reason the run keeps its slot: a live pid whose
 // start time differs is not proof of exit (the start time can shift after a host sleep), so it stays with the owner.
 async function recoverUnreadable(
     deps: Deps,
@@ -451,7 +494,7 @@ async function recoverUnreadable(
         return deferred('lock-release-failed');
     }
     clearRun(session.stateDir, runId);
-    deps.log.warn(`run ${runId} with an unreadable record has exited; an EYES reaction on its comment may remain`);
+    deps.log.warn(`run ${runId} with an unreadable record has exited; EYES reactions on its comments may remain`);
     return { state: 'exited', reason: 'record-unreadable' };
 }
 
@@ -505,19 +548,18 @@ export async function evaluateRun(
     if (readEvents(session.stateDir, runId).count !== capture.events.count) {
         return deferred('events-changed');
     }
-    const entry = lookup.entries.find((item) => item.nodeId === record.commentNodeId);
-    const eyesOn = entry?.eyes ?? false;
+    const states = record.comments.map((comment): CommentState => {
+        const entry = lookup.entries.find((item) => item.nodeId === comment.nodeId);
+        return { comment, entry, outcome: commentOutcome(comment, entry, lookup.gone.includes(comment.nodeId)) };
+    });
     const decision = decideRun({
         alive: capture.alive,
-        commentGone: entry === undefined || lookup.gone.includes(record.commentNodeId),
+        comments: states.map((state) => state.outcome),
         events: capture.events,
         startedAt: record.startedAt,
         now: deps.nowSeconds(),
         startTimeout: readEnvSeconds(deps.env, ENV_NAMES.startTimeout, DEFAULT_START_TIMEOUT),
         stopQuiet: readEnvSeconds(deps.env, ENV_NAMES.stopQuiet, DEFAULT_STOP_QUIET),
-        freshPlus1: entry?.plus1At !== undefined && entry.plus1At > record.rocketAt,
-        eyesOn,
-        eyesAdded: record.eyesAdded,
     });
     logNewEvents(deps, session.stateDir, runId, capture.events);
     if (stop.aborted) {
@@ -532,11 +574,11 @@ export async function evaluateRun(
             return await recordAttention(ctx, decision.reason);
         }
         case 'exited': {
-            return await endExited(ctx, eyesOn, decision);
+            return await endExited(ctx, failTargets(states), decision);
         }
         case 'completed':
         case 'failed': {
-            return await endRun(ctx, decision);
+            return await endRun(ctx, decision, failTargets(states));
         }
     }
 }

@@ -1,4 +1,4 @@
-import { DEFAULT_RATE_RESERVE, DEFAULT_READY_WAIT, ENV_NAMES } from './constants.ts';
+import { DEFAULT_RATE_RESERVE, DEFAULT_READY_WAIT, DEFAULT_RUN_CHECK, ENV_NAMES } from './constants.ts';
 import { dispatch, resumeDispatch, retryLockRelease, type DispatchResult } from './dispatch.ts';
 import { lookupComments, react } from './githubLookup.ts';
 import { pollPr } from './githubPoll.ts';
@@ -37,11 +37,13 @@ type TickOutcome = 'ok' | 'transient' | 'fatal' | 'prClosed' | 'stopped';
 type StatusFields = Pick<WatcherStatus, 'state' | 'reason' | 'hint'>;
 
 // The watcher loop's only mutable state. lastTickAt (epoch seconds) and lastTickMono (monotonic milliseconds from
-// monotonicMs) are taken together when a tick's delay is planned; pendingLockRunId names a worktree lock a held
-// dispatch could not release, retried on every tick; endMessage says why a terminal tick ended the loop;
-// unpublishedFatal is the first fatal message whose write was not confirmed, so its retry keeps the reason.
+// monotonicMs) are taken together when a tick's delay is planned; lastPollAt (epoch seconds) is the last PR poll that
+// succeeded; pendingLockRunId names a worktree lock a held dispatch could not release, retried on every tick;
+// endMessage says why a terminal tick ended the loop; unpublishedFatal is the first fatal message whose write was not
+// confirmed, so its retry keeps the reason.
 interface WatcherRuntime {
     inflightRunId: string | undefined;
+    lastPollAt: number | undefined;
     failures: number;
     rate: RateInfo;
     lastTickAt: number | undefined;
@@ -59,14 +61,22 @@ export interface TickHooks {
     beforePoll?(): void;
 }
 
-// A preparing run is resumed and never captured; any other in-flight run (an unreadable record too) is evaluated
-// on the capture taken before the poll.
+// A preparing run is resumed and never captured; any other in-flight run (an unreadable record too, without node
+// ids) is evaluated on the capture taken before its lookup.
 type Inflight =
-    | { kind: 'preparing'; runId: string; nodeId: string }
-    | { kind: 'evaluate'; runId: string; nodeId: string | undefined; capture: Capture };
+    | { kind: 'preparing'; runId: string; nodeIds: string[] }
+    | { kind: 'evaluate'; runId: string; nodeIds: string[]; capture: Capture };
 
 // kept: the run still holds the slot; cleared: the slot is free and reason says why the run ended.
 type InflightResult = { kind: 'kept' } | { kind: 'cleared'; reason: string };
+
+// A check that could not finish ends the tick with outcome (a failed lookup or a stop).
+type CheckResult = InflightResult | { kind: 'ended'; outcome: TickOutcome };
+
+interface TickContext {
+    stop: AbortSignal;
+    suspended: boolean;
+}
 
 interface StartContext {
     deps: Deps;
@@ -91,12 +101,13 @@ const NOT_CONFIRMED = 'launch not confirmed by the background start';
 const STOPPED_EARLY = 'watcher stopped before its first poll';
 const ENDED_EARLY = 'watcher ended before its first poll';
 const LOCK_PENDING = 'worktree lock release pending';
-const NO_RUN: Pick<WatcherStatus, 'runId' | 'comment'> = { runId: '', comment: '' };
+const NO_RUN: Pick<WatcherStatus, 'runId' | 'comments'> = { runId: '', comments: '' };
 const CLEARED_STATES: ReadonlySet<string> = new Set(['completed', 'failed', 'exited']);
 
 export function createRuntime(launchToken: string, windowId: string): WatcherRuntime {
     return {
         inflightRunId: undefined,
+        lastPollAt: undefined,
         failures: 0,
         rate: { remaining: undefined, resetAt: undefined },
         lastTickAt: undefined,
@@ -169,12 +180,13 @@ function setStatus(deps: Deps, session: Session, patch: Partial<WatcherStatus>):
     writeStatus(stateDir, pr.prKey, changed ? { ...patch, since: now } : patch, now);
 }
 
-function runFields(session: Session, runId: string | undefined): Pick<WatcherStatus, 'runId' | 'comment'> {
+function runFields(session: Session, runId: string | undefined): Pick<WatcherStatus, 'runId' | 'comments'> {
     if (runId === undefined) {
         return NO_RUN;
     }
     const read = readRecord(session.stateDir, runId);
-    return { runId: safeText(runId), comment: read.kind === 'ok' ? String(read.record.commentDbId) : '' };
+    const comments = read.kind === 'ok' ? read.record.comments.map((comment) => comment.dbId).join(',') : '';
+    return { runId: safeText(runId), comments };
 }
 
 // Pacing always uses whichever rate came last; a reading without a remaining budget (an all-gone lookup) is not one.
@@ -226,10 +238,11 @@ function failedFetch(
 function noteInflight(session: Session, runId: string): Inflight {
     const read = readRecord(session.stateDir, runId);
     const record = read.kind === 'ok' ? read.record : undefined;
+    const nodeIds = record?.comments.map((comment) => comment.nodeId) ?? [];
     if (record?.state === 'preparing') {
-        return { kind: 'preparing', runId, nodeId: record.commentNodeId };
+        return { kind: 'preparing', runId, nodeIds };
     }
-    return { kind: 'evaluate', runId, nodeId: record?.commentNodeId, capture: captureRun(session.stateDir, runId) };
+    return { kind: 'evaluate', runId, nodeIds, capture: captureRun(session.stateDir, runId) };
 }
 
 function retryPendingLock(deps: Deps, session: Session, rt: WatcherRuntime): void {
@@ -257,9 +270,12 @@ async function resumeInflight(
     lists: { poll: PollResult; lookup: LookupResult },
     stop: AbortSignal
 ): Promise<void> {
-    const comment = lists.poll.comments.find((item) => item.nodeId === inflight.nodeId);
-    const entry = lists.lookup.entries.find((item) => item.nodeId === inflight.nodeId);
-    const resumed = await resumeDispatch(deps, session, inflight.runId, comment?.rocket ?? false, entry);
+    const ids = new Set(inflight.nodeIds);
+    const rocketed = new Set(
+        lists.poll.comments.filter((item) => item.rocket && ids.has(item.nodeId)).map((item) => item.nodeId)
+    );
+    const entries = lists.lookup.entries.filter((item) => ids.has(item.nodeId));
+    const resumed = await resumeDispatch(deps, session, inflight.runId, rocketed, entries);
     rt.inflightRunId = resumed.runId;
     if (stop.aborted) {
         return;
@@ -335,20 +351,20 @@ function dispatchStatus(result: DispatchResult, lockPending: boolean): StatusFie
     }
 }
 
-// A kept run (abandoned or contextFailed with a run id) stays in flight, so its evaluation finishes it. Without a
-// candidate the status is polling with idleReason (why a run was just cleared, or empty).
+// A kept run (abandoned or contextFailed with a run id) stays in flight, so its evaluation finishes it. Without
+// candidates the status is polling with idleReason (why a run was just cleared, or empty).
 async function dispatchNext(
     deps: Deps,
     session: Session,
     rt: WatcherRuntime,
-    next: { candidate: Candidate | undefined; poll: PollResult; idleReason: string },
+    next: { candidates: Candidate[]; poll: PollResult; idleReason: string },
     stop: AbortSignal
 ): Promise<void> {
-    if (next.candidate === undefined) {
+    if (next.candidates.length === 0) {
         setStatus(deps, session, { state: 'polling', reason: next.idleReason, hint: '', ...NO_RUN });
         return;
     }
-    const result = await dispatch(deps, session, next.candidate, next.poll);
+    const result = await dispatch(deps, session, next.candidates, next.poll);
     if (result.pendingLockRunId !== undefined) {
         rt.pendingLockRunId = result.pendingLockRunId;
     }
@@ -364,27 +380,53 @@ function emptyLookup(): LookupResult {
     return { rate: { remaining: undefined, resetAt: undefined }, entries: [], gone: [] };
 }
 
-// One tick: capture, one poll, at most one batched lookup, the startup checkpoint, then the in-flight run (resume or
-// evaluation) or one dispatch. The stop signal is checked before the first effect and after every awaited step; an
-// observed abort always ends the tick as stopped.
-export async function watchTick(
+function pollDue(deps: Deps, session: Session, rt: WatcherRuntime): boolean {
+    return rt.lastPollAt === undefined || deps.nowSeconds() - rt.lastPollAt >= session.interval;
+}
+
+// Looks up the comments of the run in flight and evaluates it on the capture taken before the lookup. A lookup that
+// succeeded already counts as the startup checkpoint: ending a finished run can wait for claude to exit, and the
+// background start must not wait for that.
+async function checkInflight(
     deps: Deps,
     session: Session,
     rt: WatcherRuntime,
-    stop: AbortSignal,
-    hooks?: TickHooks
-): Promise<TickOutcome> {
-    if (stop.aborted) {
-        return 'stopped';
+    inflight: Extract<Inflight, { kind: 'evaluate' }>,
+    ctx: TickContext
+): Promise<CheckResult> {
+    let lookup = emptyLookup();
+    if (inflight.nodeIds.length > 0) {
+        const looked = await lookupComments(deps, session.tools.gh, inflight.nodeIds);
+        if (looked.kind !== 'ok') {
+            return { kind: 'ended', outcome: failedFetch(deps, session, rt, ctx.stop, looked, ctx.suspended) };
+        }
+        lookup = looked.result;
+        storeRate(rt, lookup.rate);
+        publishLaunch(deps.log, session.stateDir, session.pr.prKey, rt, 'firstPoll', 'first poll succeeded');
     }
+    if (ctx.stop.aborted) {
+        return { kind: 'ended', outcome: 'stopped' };
+    }
+    const evaluated = await evaluateInflight(deps, session, rt, inflight, lookup, ctx.stop);
+    return ctx.stop.aborted ? { kind: 'ended', outcome: 'stopped' } : evaluated;
+}
+
+// The PR poll, one batched lookup of the rocketed comments (and of a preparing run's comments), the startup
+// checkpoint, the refusals of edited comments, then the resume of a preparing run or, with the slot free, one
+// dispatch of up to batchMax comments. inflight is the run that still holds the slot after its check.
+async function pollTick(
+    deps: Deps,
+    session: Session,
+    rt: WatcherRuntime,
+    next: { inflight: Inflight | undefined; idleReason: string },
+    ctx: TickContext
+): Promise<TickOutcome> {
     const { stateDir, pr, tools } = session;
-    const suspended = hostSuspended(rt, deps.nowSeconds());
-    retryPendingLock(deps, session, rt);
-    const inflight = rt.inflightRunId === undefined ? undefined : noteInflight(session, rt.inflightRunId);
-    hooks?.beforePoll?.();
+    const { inflight } = next;
+    const { stop } = ctx;
     const polled = await pollPr(deps, tools.gh, pr);
     if (polled.kind !== 'ok') {
-        return failedFetch(deps, session, rt, stop, polled, suspended);
+        return failedFetch(deps, session, rt, stop, polled, ctx.suspended);
     }
     const poll = polled.result;
     storeRate(rt, poll.rate);
@@ -397,22 +439,24 @@ export async function watchTick(
         rt.endMessage = `pull request is ${poll.prState}`;
         return 'prClosed';
     }
-    const ids = lookupIds(poll, inflight?.nodeId);
+    const inflightIds = inflight?.nodeIds ?? [];
+    const ids = lookupIds(poll, inflight?.kind === 'preparing' ? inflightIds : []);
     let lookup = emptyLookup();
     if (ids.length > 0) {
         const looked = await lookupComments(deps, tools.gh, ids);
         if (looked.kind !== 'ok') {
-            return failedFetch(deps, session, rt, stop, looked, suspended);
+            return failedFetch(deps, session, rt, stop, looked, ctx.suspended);
         }
         lookup = looked.result;
         storeRate(rt, lookup.rate);
     }
     rt.failures = 0;
+    rt.lastPollAt = deps.nowSeconds();
     if (stop.aborted) {
         return 'stopped';
     }
     publishLaunch(deps.log, stateDir, pr.prKey, rt, 'firstPoll', 'first poll succeeded');
-    const queue = buildQueue(poll, lookup, inflight?.nodeId, deps.log);
+    const queue = buildQueue(poll, lookup, inflightIds, deps.log);
     for (const entry of queue.edited) {
         if (stop.aborted) {
             return 'stopped';
@@ -426,19 +470,52 @@ export async function watchTick(
         await resumeInflight(deps, session, rt, inflight, { poll, lookup }, stop);
         return stop.aborted ? 'stopped' : 'ok';
     }
-    let idleReason = '';
     if (inflight !== undefined) {
-        const evaluated = await evaluateInflight(deps, session, rt, inflight, lookup, stop);
-        if (stop.aborted) {
-            return 'stopped';
+        return 'ok';
+    }
+    const candidates = queue.candidates.slice(0, session.batchMax);
+    await dispatchNext(deps, session, rt, { candidates, poll, idleReason: next.idleReason }, stop);
+    return stop.aborted ? 'stopped' : 'ok';
+}
+
+// One tick. A run in flight is checked first, on a capture taken before its lookup; the PR is polled only when no
+// run holds the slot, when a preparing run needs its resume, when the run just ended (so the next batch starts at
+// once), or when --interval has passed since the last poll. The backoff counter is reset only by a tick whose every
+// GitHub request succeeded, so a failing poll keeps backing off while the run checks succeed. The stop signal is
+// checked before the first effect and after every awaited step; an observed abort always ends the tick as stopped.
+export async function watchTick(
+    deps: Deps,
+    session: Session,
+    rt: WatcherRuntime,
+    stop: AbortSignal,
+    hooks?: TickHooks
+): Promise<TickOutcome> {
+    if (stop.aborted) {
+        return 'stopped';
+    }
+    const ctx: TickContext = { stop, suspended: hostSuspended(rt, deps.nowSeconds()) };
+    retryPendingLock(deps, session, rt);
+    const inflight = rt.inflightRunId === undefined ? undefined : noteInflight(session, rt.inflightRunId);
+    hooks?.beforePoll?.();
+    if (inflight?.kind !== 'evaluate') {
+        return await pollTick(deps, session, rt, { inflight, idleReason: '' }, ctx);
+    }
+    const checked = await checkInflight(deps, session, rt, inflight, ctx);
+    switch (checked.kind) {
+        case 'ended': {
+            return checked.outcome;
         }
-        if (evaluated.kind === 'kept') {
+        case 'kept': {
+            if (pollDue(deps, session, rt)) {
+                return await pollTick(deps, session, rt, { inflight, idleReason: '' }, ctx);
+            }
+            rt.failures = 0;
             return 'ok';
         }
-        idleReason = evaluated.reason;
+        case 'cleared': {
+            return await pollTick(deps, session, rt, { inflight: undefined, idleReason: checked.reason }, ctx);
+        }
     }
-    await dispatchNext(deps, session, rt, { candidate: queue.candidates[0], poll, idleReason }, stop);
-    return stop.aborted ? 'stopped' : 'ok';
 }
 
 function resetLabel(resetAt: number | undefined): string {
@@ -446,11 +523,14 @@ function resetLabel(resetAt: number | undefined): string {
 }
 
 // Runs only after an ok or transient tick, so throttled never overwrites fatal or exited; a throttled status keeps the
-// tick's reason and hint.
+// tick's reason and hint. While a run is in flight the next tick comes after PRWC_RUN_CHECK seconds (or --interval,
+// when that is shorter), so its end is seen soon without polling the PR more often.
 export function applyPacing(deps: Deps, session: Session, rt: WatcherRuntime): number {
     const now = deps.nowSeconds();
     const reserve = readEnvSeconds(deps.env, ENV_NAMES.rateReserve, DEFAULT_RATE_RESERVE);
-    const step = nextDelay(session.interval, rt.failures, rt.rate, now, reserve);
+    const runCheck = readEnvSeconds(deps.env, ENV_NAMES.runCheck, DEFAULT_RUN_CHECK);
+    const base = rt.inflightRunId === undefined ? session.interval : Math.min(session.interval, runCheck);
+    const step = nextDelay(base, rt.failures, rt.rate, now, reserve);
     if (step.mode === 'throttled') {
         deps.log.warn(`throttled until ${resetLabel(rt.rate.resetAt)}`);
         setStatus(deps, session, { state: 'throttled' });

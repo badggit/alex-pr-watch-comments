@@ -1,9 +1,11 @@
 import path from 'node:path';
 
+import { lookupComments } from './githubLookup.ts';
 import { getNumber } from './json.ts';
 import { adoptWorktreeLock, worktreeLockHolder } from './locks.ts';
 import { pidAlive } from './proc.ts';
-import { notifyOwner, releaseRunLock, removeEyes } from './runState.ts';
+import { markFailed, removeEyes } from './reactions.ts';
+import { commentOutcome, failTarget, notifyOwner, releaseRunLock } from './runState.ts';
 import { claimLaunch, clearRun, launchDecision, listRunIds, mergeRecord, readRecord, workerAlive } from './runStore.ts';
 import { readJsonFile, worktreeDir } from './stateStore.ts';
 import { paneForRun } from './tmuxControl.ts';
@@ -46,18 +48,45 @@ async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promis
     deps.log.info(`re-adopted run ${runId}`);
 }
 
-// The worker is dead. A stop observed during the EYES removal keeps record and lock, so the next start retries the
-// removal; a lock that cannot be released keeps the record as a running run the tick finishes later.
-async function dropRun(deps: Deps, session: Session, record: RunRecord, stop?: AbortSignal): Promise<DropOutcome> {
-    if (record.eyesAdded) {
-        await removeEyes(deps, session, record);
-        if (stop?.aborted === true) {
-            return 'aborted';
+// Marks the comments of an interrupted run that failTarget picks, read from one lookup. When the lookup fails nothing
+// is marked (a done comment must not get a -1); every EYES the watcher added is removed instead.
+async function closeComments(deps: Deps, session: Session, record: RunRecord, stop?: AbortSignal): Promise<void> {
+    const looked = await lookupComments(
+        deps,
+        session.tools.gh,
+        record.comments.map((comment) => comment.nodeId)
+    );
+    if (looked.kind !== 'ok') {
+        deps.log.warn(`run ${record.runId}: could not look up its comments, so none was marked as failed`);
+        for (const comment of record.comments.filter((item) => item.eyesAdded)) {
+            if (stop?.aborted === true) {
+                return;
+            }
+            await removeEyes(deps, session, comment);
         }
+        return;
+    }
+    const { entries, gone } = looked.result;
+    const targets = record.comments
+        .map((comment) => {
+            const entry = entries.find((item) => item.nodeId === comment.nodeId);
+            return failTarget(comment, entry, commentOutcome(comment, entry, gone.includes(comment.nodeId)));
+        })
+        .filter((target) => target !== undefined);
+    await markFailed(deps, session, targets, stop);
+}
+
+// The worker is dead: its unfinished comments are marked as failed. A stop observed during that keeps record and lock,
+// so the next start marks again; a lock that cannot be released keeps the record as a running run the tick finishes
+// later, which marks the comments once more (adding a reaction twice changes nothing).
+async function dropRun(deps: Deps, session: Session, record: RunRecord, stop?: AbortSignal): Promise<DropOutcome> {
+    await closeComments(deps, session, record, stop);
+    if (stop?.aborted === true) {
+        return 'aborted';
     }
     deps.log.info(`interrupted run ${record.runId}, add the rocket again to retry`);
     if (!releaseRunLock(deps, session.stateDir, record.worktreeKey, record.runId)) {
-        mergeRecord(session.stateDir, record.runId, { state: 'running', reason: 'interrupted', eyesAdded: false });
+        mergeRecord(session.stateDir, record.runId, { state: 'running', reason: 'interrupted' });
         return 'kept';
     }
     clearRun(session.stateDir, record.runId);

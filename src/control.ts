@@ -6,6 +6,7 @@ import {
     DEFAULT_LAUNCH_WAIT,
     DEFAULT_RATE_RESERVE,
     DEFAULT_READY_WAIT,
+    DEFAULT_RUN_CHECK,
     DEFAULT_START_TIMEOUT,
     DEFAULT_STOP_QUIET,
     DEFAULT_STOP_WAIT,
@@ -58,6 +59,7 @@ const FORWARDED_OVERRIDES: readonly (readonly [string, number])[] = [
     [ENV_NAMES.stopQuiet, DEFAULT_STOP_QUIET],
     [ENV_NAMES.readyWait, DEFAULT_READY_WAIT],
     [ENV_NAMES.bgTimeout, DEFAULT_BG_TIMEOUT],
+    [ENV_NAMES.runCheck, DEFAULT_RUN_CHECK],
 ];
 const WINDOW_ID = /^@\d+$/u;
 const PANE_ID = /^%\d+$/u;
@@ -148,6 +150,8 @@ function watcherCommand(session: Session, entry: BackgroundEntry): string[] {
         String(session.interval),
         '--keep-panes',
         String(session.keepPanes),
+        '--batch-max',
+        String(session.batchMax),
         '--claude',
         session.tools.claude,
         ...session.claudeArgs.flatMap((arg) => ['--claude-arg', arg]),
@@ -313,7 +317,7 @@ function watcherLine(stateDir: string, prKey: string, now: number): string {
         `age=${ageText(now, status.since)}`,
         `reason=${safeText(status.reason)}`,
         `hint=${safeText(status.hint)}`,
-        `comment=${safeText(status.comment)}`,
+        `comments=${safeText(status.comments)}`,
         `last_error=${safeText(status.lastError)}`,
     ];
     return `${label} ${fields.join(' ')}${suffix}\n`;
@@ -329,7 +333,8 @@ function runLine(stateDir: string, run: RunEntry, now: number): string {
         return unreadableLine(stateDir, run, run.read.format);
     }
     const { record } = run.read;
-    const fields = [`state=${record.state}`, `comment=${record.commentDbId}`, `age=${ageText(now, record.startedAt)}`];
+    const comments = record.comments.map((comment) => comment.dbId).join(',');
+    const fields = [`state=${record.state}`, `comments=${comments}`, `age=${ageText(now, record.startedAt)}`];
     return `run ${safeText(run.runId)} ${fields.join(' ')}\n`;
 }
 

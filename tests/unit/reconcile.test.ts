@@ -10,9 +10,12 @@ import { captureRun, evaluateRun } from '../../src/runState.ts';
 import { createRun, launchDecision, readRecord, writeRecord } from '../../src/runStore.ts';
 import { runDir } from '../../src/stateStore.ts';
 import {
+    answerLookup,
+    baseComment,
     baseRecord,
     deadPid,
     eyesRemovals,
+    FRESH_PLUS1,
     lockExists,
     lockWatcherPid,
     lookupWith,
@@ -26,6 +29,7 @@ import {
     SESSION_SOCKET,
     socketOf,
     startClaude,
+    thumbsDownAdds,
     tmuxMessages,
     WORKER_SOCKET,
     type RunFixture,
@@ -131,7 +135,7 @@ await describe('reconcile', async () => {
         assertNoRocketAdded(fixture);
     });
 
-    await test('a dead claude is interrupted: EYES removed, run cleared, lock released', async (t) => {
+    await test('a dead claude is interrupted: EYES removed, -1 added, run cleared, lock released', async (t) => {
         const fixture = await newRunFixture(t);
         const watcher = await deadPid(fixture.env);
         await seedRun(fixture, {
@@ -139,9 +143,11 @@ await describe('reconcile', async () => {
             events: ['prompt', 'permission'],
             lockWatcherPid: watcher,
         });
+        answerLookup(fixture, { eyes: true });
         const result = await reconcile(fixture.deps, fixture.session);
         assert.deepEqual(result, { inflightRunId: undefined });
         assert.equal(eyesRemovals(fixture).length, 1);
+        assert.equal(thumbsDownAdds(fixture).length, 1);
         assert.ok(
             fixture.deps.logLines.some((line) =>
                 line.includes(`interrupted run ${RUN_ID}, add the rocket again to retry`)
@@ -152,28 +158,78 @@ await describe('reconcile', async () => {
         assertNoRocketAdded(fixture);
     });
 
-    await test('a dead run without EYES makes no gh call', async (t) => {
+    await test('a done comment of a dead run keeps its +1 and gets no -1', async (t) => {
         const fixture = await newRunFixture(t);
         const watcher = await deadPid(fixture.env);
-        await seedRun(fixture, { patch: { eyesAdded: false, watcherPid: watcher }, lockWatcherPid: watcher });
+        await seedRun(fixture, { patch: { watcherPid: watcher }, lockWatcherPid: watcher });
+        answerLookup(fixture, { eyes: false, plus1At: FRESH_PLUS1 });
+        await reconcile(fixture.deps, fixture.session);
+        assert.deepEqual(
+            fixture.fake.calls('gh').map((call) => call.key),
+            ['PrwcLookup']
+        );
+        assert.equal(runExists(fixture), false);
+    });
+
+    await test('a comment approved again during a dead run gets no -1', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        await seedRun(fixture, { patch: { watcherPid: watcher }, lockWatcherPid: watcher });
+        answerLookup(fixture, { eyes: false, rocketAt: FRESH_PLUS1 });
+        await reconcile(fixture.deps, fixture.session);
+        assert.equal(thumbsDownAdds(fixture).length, 0);
+        assert.equal(runExists(fixture), false);
+    });
+
+    await test('a failed lookup of a dead run removes EYES only', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        await seedRun(fixture, { patch: { watcherPid: watcher }, lockWatcherPid: watcher });
+        fixture.fake.respond('gh', 'PrwcLookup', { code: 1, stderr: 'gh: failed\n' });
+        await reconcile(fixture.deps, fixture.session);
+        assert.equal(eyesRemovals(fixture).length, 1);
+        assert.equal(thumbsDownAdds(fixture).length, 0);
+        assert.ok(fixture.deps.logLines.some((line) => line.includes('none was marked as failed')));
+        assert.equal(runExists(fixture), false);
+    });
+
+    await test('a dead run without EYES and a failed lookup only looks up', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        await seedRun(fixture, {
+            patch: { comments: [baseComment({ eyesAdded: false })], watcherPid: watcher },
+            lockWatcherPid: watcher,
+        });
         const result = await reconcile(fixture.deps, fixture.session);
         assert.equal(result.inflightRunId, undefined);
-        assert.equal(fixture.fake.calls('gh').length, 0);
+        assert.deepEqual(
+            fixture.fake.calls('gh').map((call) => call.key),
+            ['PrwcLookup']
+        );
         assert.equal(runExists(fixture), false);
         assert.equal(lockExists(fixture, SESSION_KEY), false);
     });
 
-    await test('a preparing run without a worker is cleared with no gh call', async (t) => {
+    await test('a preparing run without a worker is cleared after one lookup', async (t) => {
         const fixture = await newRunFixture(t);
         const watcher = await deadPid(fixture.env);
         await seedRun(fixture, {
-            patch: { state: 'preparing', eyesAdded: false, paneId: '', panePid: undefined, watcherPid: watcher },
+            patch: {
+                state: 'preparing',
+                comments: [baseComment({ eyesAdded: false })],
+                paneId: '',
+                panePid: undefined,
+                watcherPid: watcher,
+            },
             decision: 'none',
             lockWatcherPid: watcher,
         });
         const result = await reconcile(fixture.deps, fixture.session);
         assert.equal(result.inflightRunId, undefined);
-        assert.equal(fixture.fake.calls('gh').length, 0);
+        assert.deepEqual(
+            fixture.fake.calls('gh').map((call) => call.key),
+            ['PrwcLookup']
+        );
         assert.equal(runExists(fixture), false);
         assert.equal(lockExists(fixture, SESSION_KEY), false);
         assertNoRocketAdded(fixture);
@@ -285,7 +341,7 @@ await describe('reconcile', async () => {
         const fixture = await newRunFixture(t);
         const watcher = await deadPid(fixture.env);
         await seedRun(fixture, {
-            patch: { state: 'preparing', eyesAdded: false, watcherPid: watcher },
+            patch: { state: 'preparing', comments: [baseComment({ eyesAdded: false })], watcherPid: watcher },
             lockWatcherPid: watcher,
         });
         failLockRenames(t);
@@ -315,7 +371,7 @@ await describe('reconcile', async () => {
         assert.equal(result.inflightRunId, undefined);
         assert.equal(eyesRemovals(fixture).length, 1);
         assert.ok(runExists(fixture));
-        assert.equal(recordOf(fixture).eyesAdded, true);
+        assert.equal(recordOf(fixture).comments[0]?.eyesAdded, true);
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
     });
 

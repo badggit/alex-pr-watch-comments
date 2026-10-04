@@ -4,7 +4,7 @@
     "reason": "clone busy",
     "hint": "commit or stash first",
     "runId": "",
-    "comment": "101",
+    "comments": "101,102",
     "since": 0,
     "updatedAt": 0,
     "lastError": "HTTP 502: Bad Gateway"
