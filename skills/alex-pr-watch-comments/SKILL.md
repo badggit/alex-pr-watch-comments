@@ -1,14 +1,14 @@
 ---
-name: pr-watch-comments
-description: Starts, lists or stops the pr-watch-comments watcher, which turns rocket-approved inline review comments on a GitHub pull request into commits made by Claude Code in tmux panes. Use only when the user runs this skill with a PR URL, list, or stop and a PR URL.
+name: alex-pr-watch-comments
+description: Starts, lists or stops the alex-pr-watch-comments watcher, which turns rocket-approved inline review comments on a GitHub pull request into commits made by Claude Code in tmux panes. Use only when the user runs this skill with a PR URL, list, or stop and a PR URL.
 argument-hint: PR_URL | list | stop PR_URL
-allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/bin/pr-watch-comments *)
+allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments *)
 disable-model-invocation: true
 ---
 
-# pr-watch-comments
+# alex-pr-watch-comments
 
-This skill is a thin wrapper around the standalone `pr-watch-comments` command. It runs exactly one command and relays its output. The command does every check itself.
+This skill is a thin wrapper around the standalone `alex-pr-watch-comments` command. It runs exactly one command and relays its output. The command does every check itself.
 
 Arguments: `$ARGUMENTS`
 
@@ -17,15 +17,15 @@ Arguments: `$ARGUMENTS`
 Run the command from the current project directory, as a single Bash call, with no other options, pipes, redirections or chaining:
 
 - A pull request URL (`https://github.com/OWNER/REPO/pull/NUMBER`):
-  `"${CLAUDE_PLUGIN_ROOT}/bin/pr-watch-comments" PR_URL --background`
+  `"${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments" PR_URL --background`
 - `list`:
-  `"${CLAUDE_PLUGIN_ROOT}/bin/pr-watch-comments" --list`
+  `"${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments" --list`
 - `stop` followed by a pull request URL:
-  `"${CLAUDE_PLUGIN_ROOT}/bin/pr-watch-comments" --stop PR_URL`
+  `"${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments" --stop PR_URL`
 
 Put the URL from the arguments in place of `PR_URL`, as one argument, exactly as given.
 
-If the arguments match none of these forms (empty, several URLs, an unknown word), do not run anything. Reply with the usage line `/pr-watch-comments:pr-watch-comments PR_URL | list | stop PR_URL` and stop.
+If the arguments match none of these forms (empty, several URLs, an unknown word), do not run anything. Reply with the usage line `/alex-pr-watch-comments:alex-pr-watch-comments PR_URL | list | stop PR_URL` and stop.
 
 ## Rules
 

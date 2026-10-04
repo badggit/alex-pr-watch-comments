@@ -9,7 +9,7 @@ import { stubCallCount, stubRespond } from '../support/stubQueue.ts';
 import { createTestEnv, type ObservedResult, type TestEnv } from '../support/testEnv.ts';
 
 const ROOT = fs.realpathSync.native(path.resolve(import.meta.dirname, '..', '..'));
-const LAUNCHER = path.join(ROOT, 'bin', 'pr-watch-comments');
+const LAUNCHER = path.join(ROOT, 'bin', 'alex-pr-watch-comments');
 const MAIN_TS = path.join(ROOT, 'src', 'main.ts');
 const FIXTURES = path.join(ROOT, 'tests', 'fixtures');
 const TIMEOUT = 'timeout';

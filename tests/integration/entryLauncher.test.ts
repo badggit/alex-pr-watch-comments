@@ -14,7 +14,7 @@ interface Outcome {
 }
 
 const ROOT = fs.realpathSync.native(path.resolve(import.meta.dirname, '..', '..'));
-const LAUNCHER = path.join(ROOT, 'bin', 'pr-watch-comments');
+const LAUNCHER = path.join(ROOT, 'bin', 'alex-pr-watch-comments');
 const FAKE_NODE = path.join(ROOT, 'tests', 'fixtures', 'core', 'fakeNode.sh');
 const MAIN_TS = path.join(ROOT, 'src', 'main.ts');
 const NODE_PATH = `${path.dirname(process.execPath)}:/usr/bin:/bin`;

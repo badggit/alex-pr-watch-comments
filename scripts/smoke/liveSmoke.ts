@@ -129,7 +129,7 @@ interface Target {
 type PrTarget = Pick<Target, 'repo' | 'pr' | 'headSha'>;
 
 const ROOT = path.resolve(import.meta.dirname, '..', '..');
-const BIN = path.join(ROOT, 'bin', 'pr-watch-comments');
+const BIN = path.join(ROOT, 'bin', 'alex-pr-watch-comments');
 const STUB_CLAUDE = path.join(ROOT, 'scripts', 'smoke', 'stubClaude.sh');
 const SMOKE_CACHE = path.join(ROOT, '.cache', 'smoke');
 const CLAUDE_PATH_FILE = path.join(SMOKE_CACHE, 'last-claude-path.txt');
@@ -141,10 +141,10 @@ const HOST_REFUSAL = 'refusing: GH_HOST must be unset or github.com';
 const IDENTITY_REFUSAL =
     'refusing: this repository has no local git user.name and user.email; set both with git config --local, the scratch commits are pushed to the remote';
 const MODES: ReadonlySet<string> = new Set(['stub', 'real']);
-const PR_TITLE = 'Scratch PR for pr-watch-comments smoke test';
+const PR_TITLE = 'Scratch PR for alex-pr-watch-comments smoke test';
 const PR_BODY =
-    'Temporary draft pull request opened by the pr-watch-comments live smoke test. The test closes it and deletes its branch when it passes.';
-const COMMIT_MESSAGE = 'Add a scratch file for the pr-watch-comments smoke test';
+    'Temporary draft pull request opened by the alex-pr-watch-comments live smoke test. The test closes it and deletes its branch when it passes.';
+const COMMIT_MESSAGE = 'Add a scratch file for the alex-pr-watch-comments smoke test';
 const SCRATCH_FILE = 'smoke/scratch.txt';
 const SCRATCH_TEXT = ['1 one', '2 alpha', '3 three', '4 four', '5 five', ''].join('\n');
 const LINE_A = 2;

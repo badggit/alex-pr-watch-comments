@@ -245,7 +245,7 @@ await describe('decideRun', async () => {
         assert.ok(hint.length > 0);
         assert.equal(safeText(hint), hint);
         // The longest run id: a 14-digit timestamp, a dash and a 15-digit comment database id.
-        const notice = `pr-watch-comments: run 20261002233613-${'9'.repeat(15)} needs attention: claude-did-not-start, ${hint}`;
+        const notice = `alex-pr-watch-comments: run 20261002233613-${'9'.repeat(15)} needs attention: claude-did-not-start, ${hint}`;
         assert.equal(safeText(notice), notice, 'the whole notice must survive safeText without being cut');
         assert.ok(hint.includes('worker pane'));
         assert.ok(hint.includes('trust'));

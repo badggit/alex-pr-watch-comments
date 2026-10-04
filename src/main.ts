@@ -94,7 +94,7 @@ switch (parsed.kind) {
         break;
     }
     case 'error': {
-        await writeText(process.stderr, `pr-watch-comments: ${parsed.message}\n\n${usageText()}`);
+        await writeText(process.stderr, `alex-pr-watch-comments: ${parsed.message}\n\n${usageText()}`);
         process.exitCode = 2;
         break;
     }
@@ -103,7 +103,7 @@ switch (parsed.kind) {
             process.exitCode = await runMode(parsed.options, callerEnv, callerCwd);
         } catch (error) {
             const message = error instanceof Error ? error.message : 'unknown error';
-            await writeText(process.stderr, `pr-watch-comments: ${safeText(message)}\n`);
+            await writeText(process.stderr, `alex-pr-watch-comments: ${safeText(message)}\n`);
             process.exitCode = 1;
         }
         break;

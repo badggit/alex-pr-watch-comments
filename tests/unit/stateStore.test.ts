@@ -128,7 +128,7 @@ await describe('initState', async () => {
     await test('refuses a group-writable ancestor and accepts it once it is owner-only', async (t) => {
         const env = await newEnv(t);
         const ancestor = makeDir(path.join(env.root, 'local'), 0o775);
-        const stateDir = path.join(ancestor, 'state', 'pr-watch-comments');
+        const stateDir = path.join(ancestor, 'state', 'alex-pr-watch-comments');
         const reason = unsafeReason(stateDir);
         assert.ok(reason.includes(ancestor), reason);
         assert.ok(reason.includes(`chmod go-w ${ancestor}`), reason);
@@ -239,15 +239,15 @@ await describe('keys and paths', async () => {
         assert.equal(resolveStateDir({ PRWC_STATE_DIR: '/abs/state' }, '/path/to/project'), '/abs/state');
     });
 
-    await test('resolveStateDir defaults to HOME/.local/state/pr-watch-comments', () => {
+    await test('resolveStateDir defaults to HOME/.local/state/alex-pr-watch-comments', () => {
         assert.equal(
             resolveStateDir({ HOME: '/path/to/user' }, '/path/to/project'),
-            '/path/to/user/.local/state/pr-watch-comments'
+            '/path/to/user/.local/state/alex-pr-watch-comments'
         );
     });
 
     await test('resolveStateDir treats an empty HOME as unset', () => {
-        const expected = path.join(os.homedir(), '.local', 'state', 'pr-watch-comments');
+        const expected = path.join(os.homedir(), '.local', 'state', 'alex-pr-watch-comments');
         assert.equal(resolveStateDir({ HOME: '' }, '/path/to/project'), expected);
         assert.equal(resolveStateDir({ HOME: '', PRWC_STATE_DIR: '' }, '/path/to/project'), expected);
         assert.ok(path.isAbsolute(expected));

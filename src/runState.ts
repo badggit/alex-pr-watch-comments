@@ -169,7 +169,7 @@ function logNewEvents(deps: Deps, stateDir: string, runId: string, events: Event
 }
 
 export async function notifyOwner(deps: Deps, session: Session, text: string): Promise<void> {
-    await tmuxMessage(deps, session.tools.tmux, session.tmux, `pr-watch-comments: ${text}`);
+    await tmuxMessage(deps, session.tools.tmux, session.tmux, `alex-pr-watch-comments: ${text}`);
 }
 
 // A comment to mark as failed: neither done nor deleted, and not approved again (a new rocket of the viewer puts it

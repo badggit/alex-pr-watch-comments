@@ -118,7 +118,7 @@ function runConveyor(line: string, allow: ReadonlySet<string>, runDir: string): 
 function resolveComment(comment: CommentInfo, allow: ReadonlySet<string>, runDir: string): boolean {
     fs.writeFileSync(
         comment.replyFile,
-        `Stub reply from the pr-watch-comments smoke test for comment ${comment.dbId}: no change was needed.\n${REPLY_TAG}\n`
+        `Stub reply from the alex-pr-watch-comments smoke test for comment ${comment.dbId}: no change was needed.\n${REPLY_TAG}\n`
     );
     const steps: ConveyorStep[] = [
         { name: 'reply', line: comment.reply, optional: false },

@@ -44,7 +44,7 @@ export function resolveStateDir(env: Env, cwd: string): string {
         return path.resolve(cwd, configured);
     }
     const home = env.HOME !== undefined && env.HOME.length > 0 ? env.HOME : os.homedir();
-    return path.join(home, '.local', 'state', 'pr-watch-comments');
+    return path.join(home, '.local', 'state', 'alex-pr-watch-comments');
 }
 
 export function watcherDir(stateDir: string, prKey: string): string {

@@ -44,7 +44,7 @@ interface Identity {
 }
 
 const ROOT = fs.realpathSync.native(path.resolve(import.meta.dirname, '..', '..'));
-const LAUNCHER = path.join(ROOT, 'bin', 'pr-watch-comments');
+const LAUNCHER = path.join(ROOT, 'bin', 'alex-pr-watch-comments');
 const FIXTURES = path.join(ROOT, 'tests', 'fixtures');
 const TIMEOUT = 'timeout';
 const PR_URL = 'https://github.com/o/r/pull/12';

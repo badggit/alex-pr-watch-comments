@@ -2,7 +2,7 @@
 # Entry launcher: checks the Node.js version and hands off to src/main.ts. Must run under macOS /bin/sh
 # (bash 3.2 in POSIX mode) and dash, so it uses only POSIX features and no external command on the normal path.
 
-PROG=pr-watch-comments
+PROG=alex-pr-watch-comments
 
 # A plain decimal number without leading zeros, of any length.
 is_count() {

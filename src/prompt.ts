@@ -282,7 +282,7 @@ export function buildPrompt(record: RunRecord, rd: string): string | undefined {
     const what = count === 1 ? 'one approved inline review comment' : `${count} approved inline review comments`;
     const sections = [
         [
-            `This is an unattended run started by pr-watch-comments to resolve ${what} on a GitHub pull request. Nobody is watching this session. Do not ask clarifying questions. Resolve every comment, or take the failure path described at the end for it.`,
+            `This is an unattended run started by alex-pr-watch-comments to resolve ${what} on a GitHub pull request. Nobody is watching this session. Do not ask clarifying questions. Resolve every comment, or take the failure path described at the end for it.`,
         ],
         detailLines(record, runFiles(rd)),
         ...record.comments.map((comment, index) => commentLines(record, rd, comment, index)),

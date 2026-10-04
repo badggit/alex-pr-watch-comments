@@ -56,7 +56,7 @@ type WorkerStart = { started: true } | { started: false; keptRunId: string | und
 const LAUNCHER_FILE = 'launcher.sh';
 const NOT_DIGIT = /\D/gu;
 const STAMP_LENGTH = 14;
-const MESSAGE_PREFIX = 'pr-watch-comments:';
+const MESSAGE_PREFIX = 'alex-pr-watch-comments:';
 const LOCK_KEPT_REASON = 'lock-release-failed';
 const NOT_RESUMABLE_REASON = 'not-resumable';
 const STALE_REACTIONS = ['THUMBS_UP', 'THUMBS_DOWN'] as const;
@@ -92,7 +92,7 @@ function idList(comments: readonly { dbId: number }[]): string {
 function buildSnapshot(record: RunRecord, comment: RunComment, entry: LookupEntry, context: string): string {
     const line = entry.line === undefined ? 'without a line' : `line ${entry.line}`;
     const header = [
-        `pr-watch-comments snapshot of run ${record.runId}`,
+        `alex-pr-watch-comments snapshot of run ${record.runId}`,
         `PR: ${record.prUrl}`,
         `Comment URL: ${inlineUntrusted(comment.url)}`,
         `Comment node id: ${comment.nodeId}`,

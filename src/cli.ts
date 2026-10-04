@@ -258,11 +258,11 @@ export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
 export function usageText(): string {
     return [
         'Usage:',
-        '  pr-watch-comments <PR URL> [options]               watch in the foreground of the current tmux pane',
-        '  pr-watch-comments <PR URL> --background [options]  watch in a detached tmux window',
-        '  pr-watch-comments --list                           list watchers and runs',
-        '  pr-watch-comments --stop <PR URL>                  stop the watcher for a PR (a running worker is kept)',
-        '  pr-watch-comments --help                           show this help',
+        '  alex-pr-watch-comments <PR URL> [options]               watch in the foreground of the current tmux pane',
+        '  alex-pr-watch-comments <PR URL> --background [options]  watch in a detached tmux window',
+        '  alex-pr-watch-comments --list                           list watchers and runs',
+        '  alex-pr-watch-comments --stop <PR URL>                  stop the watcher for a PR (a running worker is kept)',
+        '  alex-pr-watch-comments --help                           show this help',
         '',
         'Options:',
         '  --dir <path>          project directory (default: current directory)',

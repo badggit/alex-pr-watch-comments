@@ -218,7 +218,9 @@ function sameTools(left: ToolPaths, right: ToolPaths): boolean {
 async function checkGh(deps: PreflightDeps, ghPath: string, cwd: string): Promise<Checked<string[]>> {
     const host = nonEmpty(deps.env.GH_HOST);
     if (host !== undefined && host.toLowerCase() !== GITHUB_HOST) {
-        return refuse('GH_HOST is set to another host; pr-watch-comments works only with github.com (unset GH_HOST)');
+        return refuse(
+            'GH_HOST is set to another host; alex-pr-watch-comments works only with github.com (unset GH_HOST)'
+        );
     }
     const configDir = effectiveGhConfigDir(deps.env, cwd);
     if (configDir === undefined || !isSafeAbsPath(configDir)) {
@@ -229,13 +231,13 @@ async function checkGh(deps: PreflightDeps, ghPath: string, cwd: string): Promis
     if (auth.kind !== 'ok') {
         const ignored =
             tokens.length > 0
-                ? `; ${tokens.join(', ')} is set but ignored: pr-watch-comments uses only the gh login stored for github.com`
+                ? `; ${tokens.join(', ')} is set but ignored: alex-pr-watch-comments uses only the gh login stored for github.com`
                 : '';
         return refuse(`gh is not authenticated for github.com (run: gh auth login)${ignored}`);
     }
     for (const name of tokens) {
         deps.log.warn(
-            `${name} is set: pr-watch-comments ignores it; the watcher and worker panes use the gh login stored for github.com`
+            `${name} is set: alex-pr-watch-comments ignores it; the watcher and worker panes use the gh login stored for github.com`
         );
     }
     return { ok: true, value: [`GH_CONFIG_DIR=${configDir}`, `GH_HOST=${GITHUB_HOST}`] };

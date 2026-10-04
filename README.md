@@ -1,4 +1,4 @@
-# pr-watch-comments
+# alex-pr-watch-comments
 
 Turn inline review comments on a GitHub pull request into commits, hands-free.
 
@@ -56,14 +56,14 @@ If your Claude Code settings define their own Stop hooks, a hook that runs longe
 The repository is a Claude Code plugin marketplace with a single plugin. In Claude Code:
 
 ```text
-/plugin marketplace add badggit/pr-watch-comments
-/plugin install pr-watch-comments@pr-watch-comments
+/plugin marketplace add badggit/alex-pr-watch-comments
+/plugin install alex-pr-watch-comments@alex-pr-watch-comments
 ```
 
 For console use, clone this repository anywhere:
 
 ```sh
-git clone https://github.com/badggit/pr-watch-comments.git /path/to/pr-watch-comments
+git clone https://github.com/badggit/alex-pr-watch-comments.git /path/to/alex-pr-watch-comments
 ```
 
 ## Usage
@@ -73,16 +73,16 @@ git clone https://github.com/badggit/pr-watch-comments.git /path/to/pr-watch-com
 Run Claude Code inside tmux, in the project directory, and use the skill:
 
 ```text
-/pr-watch-comments:pr-watch-comments https://github.com/OWNER/REPO/pull/123
-/pr-watch-comments:pr-watch-comments list
-/pr-watch-comments:pr-watch-comments stop https://github.com/OWNER/REPO/pull/123
+/alex-pr-watch-comments:alex-pr-watch-comments https://github.com/OWNER/REPO/pull/123
+/alex-pr-watch-comments:alex-pr-watch-comments list
+/alex-pr-watch-comments:alex-pr-watch-comments stop https://github.com/OWNER/REPO/pull/123
 ```
 
 The skill is a thin wrapper. It runs exactly one command and shows its output:
 
-- a PR URL runs `pr-watch-comments PR_URL --background` from the current project directory;
-- `list` runs `pr-watch-comments --list`;
-- `stop PR_URL` runs `pr-watch-comments --stop PR_URL`.
+- a PR URL runs `alex-pr-watch-comments PR_URL --background` from the current project directory;
+- `list` runs `alex-pr-watch-comments --list`;
+- `stop PR_URL` runs `alex-pr-watch-comments --stop PR_URL`.
 
 The skill has no `--dir`: the watcher uses the directory Claude Code runs in, so for a [dedicated clone](#shared-clone) start Claude Code there.
 
@@ -91,35 +91,35 @@ The skill has no `--dir`: the watcher uses the directory Claude Code runs in, so
 The same command works directly from a shell, without the skill. Use the launcher from a clone of this repository:
 
 ```sh
-/path/to/pr-watch-comments/bin/pr-watch-comments https://github.com/OWNER/REPO/pull/123 --dir /path/to/project
+/path/to/alex-pr-watch-comments/bin/alex-pr-watch-comments https://github.com/OWNER/REPO/pull/123 --dir /path/to/project
 ```
 
-Do not call the copy in the Claude Code plugin cache: its path contains the plugin version and changes with every plugin update. A symlink to `bin/pr-watch-comments` from a directory on your `PATH` works; the launcher follows it.
+Do not call the copy in the Claude Code plugin cache: its path contains the plugin version and changes with every plugin update. A symlink to `bin/alex-pr-watch-comments` from a directory on your `PATH` works; the launcher follows it.
 
 Common forms, with the symlink from above:
 
 ```sh
 # Watch in the foreground of the current tmux pane; Ctrl-C stops the watcher.
-pr-watch-comments https://github.com/OWNER/REPO/pull/123
+alex-pr-watch-comments https://github.com/OWNER/REPO/pull/123
 
 # Watch in a detached window of the current tmux session.
-pr-watch-comments https://github.com/OWNER/REPO/pull/123 --background --dir /path/to/project
+alex-pr-watch-comments https://github.com/OWNER/REPO/pull/123 --background --dir /path/to/project
 
 # Show every watcher and run.
-pr-watch-comments --list
+alex-pr-watch-comments --list
 
 # Stop the watcher of one PR.
-pr-watch-comments --stop https://github.com/OWNER/REPO/pull/123
+alex-pr-watch-comments --stop https://github.com/OWNER/REPO/pull/123
 ```
 
 ## Options
 
 ```text
-pr-watch-comments <PR URL> [options]               watch in the foreground of the current tmux pane
-pr-watch-comments <PR URL> --background [options]  watch in a detached tmux window
-pr-watch-comments --list                           list watchers and runs
-pr-watch-comments --stop <PR URL>                  stop the watcher for a PR (a running worker is kept)
-pr-watch-comments --help                           show this help
+alex-pr-watch-comments <PR URL> [options]               watch in the foreground of the current tmux pane
+alex-pr-watch-comments <PR URL> --background [options]  watch in a detached tmux window
+alex-pr-watch-comments --list                           list watchers and runs
+alex-pr-watch-comments --stop <PR URL>                  stop the watcher for a PR (a running worker is kept)
+alex-pr-watch-comments --help                           show this help
 ```
 
 | Option               | Meaning                                                                                                                                                                                       |
@@ -141,7 +141,7 @@ The PR URL has the form `https://github.com/OWNER/REPO/pull/NUMBER`. Owner and r
 Example with claude arguments:
 
 ```sh
-pr-watch-comments https://github.com/OWNER/REPO/pull/123 --claude-arg --model --claude-arg sonnet
+alex-pr-watch-comments https://github.com/OWNER/REPO/pull/123 --claude-arg --model --claude-arg sonnet
 ```
 
 ### Environment variables
@@ -150,7 +150,7 @@ All values are whole seconds unless noted. A value that is not a positive whole 
 
 | Variable             | Default                            | Meaning                                                                                                                 |
 | -------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `PRWC_STATE_DIR`     | `~/.local/state/pr-watch-comments` | State directory, see [State and logs](#state-and-logs).                                                                 |
+| `PRWC_STATE_DIR`     | `~/.local/state/alex-pr-watch-comments` | State directory, see [State and logs](#state-and-logs).                                                                 |
 | `PRWC_STOP_QUIET`    | 10                                 | Quiet period after claude stopped before a run counts as done.                                                          |
 | `PRWC_RUN_CHECK`     | 15                                 | How often a run in flight is checked (or `--interval`, when that is shorter).                                           |
 | `PRWC_START_TIMEOUT` | 120                                | Time from the pane start until claude's first prompt must be recorded; after that the run shows `claude-did-not-start`. |
@@ -177,8 +177,8 @@ All values are whole seconds unless noted. A value that is not a positive whole 
 | foreground watcher | `already watched by pid PID (window @N)`                                                                                                                                                                                                                                                                                               | 0                                                                                                                                                       |
 | foreground watcher | a start-up refusal or a state directory refusal                                                                                                                                                                                                                                                                                        | 1                                                                                                                                                       |
 | foreground watcher | log lines in the pane                                                                                                                                                                                                                                                                                                                  | 0 when the PR is closed or merged or the watcher is stopped, 1 on a fatal error; with `--once`, 0 after a good pass and 1 after a failed GitHub request |
-| any                | `pr-watch-comments: MESSAGE` plus the usage text for a wrong option or argument                                                                                                                                                                                                                                                        | 2                                                                                                                                                       |
-| any                | `pr-watch-comments: MESSAGE` for an unexpected error                                                                                                                                                                                                                                                                                   | 1                                                                                                                                                       |
+| any                | `alex-pr-watch-comments: MESSAGE` plus the usage text for a wrong option or argument                                                                                                                                                                                                                                                        | 2                                                                                                                                                       |
+| any                | `alex-pr-watch-comments: MESSAGE` for an unexpected error                                                                                                                                                                                                                                                                                   | 1                                                                                                                                                       |
 
 When a `--background` start fails after the window was created, the window stays open so you can read why.
 
@@ -206,8 +206,8 @@ The worker runs your normal `claude`, with your settings and your permission rul
 
 ## GitHub host and authentication
 
-- pr-watch-comments works only with github.com. Every GitHub call of the watcher and of the worker passes `--hostname github.com`, and a `GH_HOST` set to any other host is refused at start.
-- pr-watch-comments never uses `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. They are removed from every process the watcher starts and from the worker's environment, including any that a tmux server still holds from earlier; a `--background` window gets them as empty values, and the watcher drops those at start. So the watcher and the worker panes always use the gh login stored for github.com (`gh auth login`). `GH_REPO` is removed the same way.
+- alex-pr-watch-comments works only with github.com. Every GitHub call of the watcher and of the worker passes `--hostname github.com`, and a `GH_HOST` set to any other host is refused at start.
+- alex-pr-watch-comments never uses `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. They are removed from every process the watcher starts and from the worker's environment, including any that a tmux server still holds from earlier; a `--background` window gets them as empty values, and the watcher drops those at start. So the watcher and the worker panes always use the gh login stored for github.com (`gh auth login`). `GH_REPO` is removed the same way.
 - When one of these variables is set, a foreground or a background start only warns, naming the variable, that it is ignored. A token variable never blocks a start. When gh is not logged in, the start-up refusal names the ignored variable too, so the fix is `gh auth login`.
 - Your effective gh config directory (`GH_CONFIG_DIR`, else `XDG_CONFIG_HOME/gh`, else `~/.config/gh`) is passed to the watcher window and to every worker pane, together with `GH_HOST=github.com`.
 
@@ -251,7 +251,7 @@ Every run starts an agent that edits code and pushes it to your branch, so the t
 
 ## State and logs
 
-The watcher keeps locks, run records and the per-run files in the state directory: `~/.local/state/pr-watch-comments`, or `PRWC_STATE_DIR` when set (made absolute against the current directory). The path may contain only letters, digits and `_ . / + -`.
+The watcher keeps locks, run records and the per-run files in the state directory: `~/.local/state/alex-pr-watch-comments`, or `PRWC_STATE_DIR` when set (made absolute against the current directory). The path may contain only letters, digits and `_ . / + -`.
 
 The state directory must be owned by you with mode 700, with no group- or world-writable parent (the sticky `/tmp` is fine); otherwise every command refuses with `unsafe state directory` and a fix hint. On Linux systems with user-private groups, `~/.local` is often mode 775; fix it with `chmod go-w ~/.local`, or set `PRWC_STATE_DIR` to a directory elsewhere.
 
@@ -304,7 +304,7 @@ For the reasons above `run-missing`, once claude in the worker pane has exited, 
 
 Manual recovery is needed only when the watcher cannot clear the run itself, for example when it cannot prove the worker has exited: a `record-unreadable` run whose pane or claude is still there or whose claude pid cannot be read, or a `claude-pid-mismatch` run. Such a run keeps the clone until you clear it:
 
-1. Stop the watcher: `pr-watch-comments --stop PR_URL`.
+1. Stop the watcher: `alex-pr-watch-comments --stop PR_URL`.
 2. Make sure no claude is running in the clone (quit it in the worker pane).
 3. Delete `runs/RUN_ID` under the state directory (`RUN_ID` is shown by `--list` and in the notice).
 4. Start the watcher again, and remove leftover `eyes` reactions from its comments by hand.
