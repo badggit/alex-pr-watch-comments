@@ -520,7 +520,12 @@ async function addRocket(ctx: Ctx, tools: Tools, repo: Repo, comment: ReviewComm
 // watcher's PrwcPoll query uses.
 async function viewerReactions(ctx: Ctx, tools: Tools, repo: Repo, pr: Pr): Promise<Map<number, Set<string>>> {
     const variables = { owner: repo.owner, repo: repo.repo, number: pr.number };
-    const result = await ghGraphql({ runner: ctx.runner }, tools.gh, THREADS_QUERY, variables);
+    const result = await ghGraphql(
+        { runner: ctx.runner },
+        { path: tools.gh, host: GITHUB_HOST },
+        THREADS_QUERY,
+        variables
+    );
     if (result.kind !== 'ok') {
         throw new Error(`the reactions query failed: ${safeText(result.message)}`);
     }

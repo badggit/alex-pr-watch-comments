@@ -5,6 +5,11 @@ const BRANCH = /^[\w./-]+$/u;
 const NODE_ID = /^[\w=-]+$/u;
 const SHA = /^[\da-f]{40}$/u;
 const UINT = /^\d{1,15}$/u;
+const HOST_LABEL = String.raw`[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?`;
+// A lowercase DNS name with at least two labels: github.com or a GitHub Enterprise Server host. No port, no user.
+export const HOST_PATTERN = String.raw`${HOST_LABEL}(?:\.${HOST_LABEL})+`;
+const HOST = new RegExp(`^${HOST_PATTERN}$`, 'u');
+const URL_HOST = new RegExp(`^https://(${HOST_PATTERN})/`, 'u');
 const RUN_PATH = /^\/[\w./+-]*$/u;
 const SOCKET_PATH = /^\/[\w./-]*$/u;
 const UNSAFE_TEXT = /[^\w .,:/+()=-]/gu;
@@ -17,6 +22,15 @@ const MAX_ENV_SECONDS = 2_147_483;
 // Owner, repository and remote names.
 export function isValidName(value: string): boolean {
     return NAME.test(value) && !value.startsWith('-') && !value.startsWith('.');
+}
+
+export function isValidHost(value: string): boolean {
+    return HOST.test(value);
+}
+
+// The host of an https:// URL already in canonical (lowercase) form, else undefined.
+export function urlHost(url: string): string | undefined {
+    return URL_HOST.exec(url)?.[1];
 }
 
 export function isValidBranch(value: string): boolean {

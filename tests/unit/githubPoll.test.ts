@@ -9,8 +9,9 @@ import type { PollComment, PrRef } from '../../src/types.ts';
 import { createFakeRunner, type FakeRunner, type RecordedCall } from '../support/fakeRunner.ts';
 
 const FIXTURES = path.join(import.meta.dirname, '..', 'fixtures', 'poll');
-const GH = '/opt/fake/bin/gh';
+const GH = { path: '/opt/fake/bin/gh', host: 'github.com' };
 const PR: PrRef = {
+    host: 'github.com',
     owner: 'owner',
     repo: 'repo',
     number: 7,
@@ -88,7 +89,7 @@ await describe('fetchPrInfo', async () => {
         });
         const [call] = ghCalls(fake, 'PrwcPrInfo');
         assert.ok(call);
-        assert.equal(call.file, GH);
+        assert.equal(call.file, GH.path);
         const body = requestBody(call);
         assert.deepEqual(body.variables, { owner: 'owner', repo: 'repo', number: 7 });
         assert.ok(body.query.includes('rateLimit { remaining resetAt }'));

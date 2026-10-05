@@ -23,7 +23,14 @@ import { createTestEnv, type TestDeps, type TestEnv } from '../support/testEnv.t
 
 const FIXTURES = path.join(import.meta.dirname, '..', 'fixtures', 'preflight');
 const BRANCH = 'feature';
-const PR: PrRef = { owner: 'o', repo: 'r', number: 12, prUrl: 'https://github.com/o/r/pull/12', prKey: 'o+r+12' };
+const PR: PrRef = {
+    host: 'github.com',
+    owner: 'o',
+    repo: 'r',
+    number: 12,
+    prUrl: 'https://github.com/o/r/pull/12',
+    prKey: 'o+r+12',
+};
 const STOP_HOOK = { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'true' }] }] } };
 const AUTH_FAILURE = { code: 1, stderr: 'You are not logged into any GitHub hosts. To log in, run: gh auth login\n' };
 const TOKEN_VALUE = 'tok-value';
@@ -44,6 +51,7 @@ interface SetupOptions {
 }
 
 interface RunOptions {
+    pr?: PrRef;
     env?: Env;
     dir?: string;
     claude?: string;
@@ -80,13 +88,13 @@ async function setUp(t: TestContext, opts?: SetupOptions): Promise<Setup> {
     return { testEnv, fake, gitRoot, clone };
 }
 
-function cliOptions(dir: string, claude?: string): CliOptions {
-    return { mode: 'watch', pr: PR, dir, interval: 15, claude, claudeArgs: [], keepPanes: 5, batchMax: 5, once: false };
+function cliOptions(dir: string, claude?: string, pr = PR): CliOptions {
+    return { mode: 'watch', pr, dir, interval: 15, claude, claudeArgs: [], keepPanes: 5, batchMax: 5, once: false };
 }
 
 async function runPreflight(setup: Setup, opts?: RunOptions): Promise<Run> {
     const deps: TestDeps = { ...setup.testEnv.deps(setup.fake.runner), env: opts?.env ?? setup.testEnv.env };
-    const options = cliOptions(opts?.dir ?? setup.clone, opts?.claude);
+    const options = cliOptions(opts?.dir ?? setup.clone, opts?.claude, opts?.pr);
     const cwd = opts?.cwd ?? setup.testEnv.root;
     const nodePath = opts?.nodePath ?? process.execPath;
     const result =
@@ -342,12 +350,40 @@ await describe('preflight', async () => {
         assert.ok(deps.logLines.every((line) => !line.includes(TOKEN_VALUE)));
     });
 
+    await test('a GitHub Enterprise Server PR uses its own host for gh, the remote and the worker panes', async (t) => {
+        const setup = await setUp(t);
+        const host = 'git.example.com';
+        const pr: PrRef = { ...PR, host, prUrl: `https://${host}/o/r/pull/12`, prKey: `${host}+o+r+12` };
+        gitSync(setup.testEnv.env, ['-C', setup.clone, 'remote', 'set-url', 'origin', `git@${host}:o/r.git`]);
+        const session = await sessionFrom(setup, { pr, env: { ...setup.testEnv.env, GH_HOST: host } });
+        assert.deepEqual(session.pr, pr);
+        assert.equal(session.remote, 'origin');
+        assert.deepEqual(session.ghEnv[1], `GH_HOST=${host}`);
+        const calls = setup.fake.calls('gh');
+        assert.deepEqual(calls.find((call) => call.key === 'auth_status')?.args, [
+            'auth',
+            'status',
+            '--hostname',
+            host,
+        ]);
+        const args = calls.find((call) => call.key === 'PrwcPrInfo')?.args ?? [];
+        assert.equal(args[args.indexOf('--hostname') + 1], host);
+    });
+
+    await test('a github.com remote does not satisfy a GitHub Enterprise Server PR', async (t) => {
+        const setup = await setUp(t);
+        const host = 'git.example.com';
+        const pr: PrRef = { ...PR, host, prUrl: `https://${host}/o/r/pull/12`, prKey: `${host}+o+r+12` };
+        const reason = await refusalOf(setup, { pr });
+        assert.ok(reason.includes(`git remote add NAME https://${host}/o/r.git`), reason);
+    });
+
     await test('another GH_HOST is refused before any gh call and never printed', async (t) => {
         const setup = await setUp(t);
         const host = 'ghe.example.invalid';
         const { result, deps } = await runPreflight(setup, { env: { ...setup.testEnv.env, GH_HOST: host } });
         const reason = reasonOf(result);
-        assert.ok(reason.includes('only with github.com'), reason);
+        assert.ok(reason.includes('another host than the PR host github.com'), reason);
         assert.ok(!reason.includes(host));
         assert.equal(setup.fake.calls('gh').length, 0);
         assert.ok(deps.logLines.every((line) => !line.includes(host)));

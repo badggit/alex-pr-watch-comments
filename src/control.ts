@@ -32,7 +32,7 @@ import {
 } from './tmuxControl.ts';
 import type { CliOptions, CommandRunner, Deps, Env, LaunchResult, PrLockOwner, Session } from './types.ts';
 import { visibleText } from './untrustedText.ts';
-import { isSafeSocketPath, isUintString, isValidName, readEnvSeconds, safeText } from './validate.ts';
+import { isSafeSocketPath, isUintString, isValidHost, isValidName, readEnvSeconds, safeText } from './validate.ts';
 
 export interface BackgroundEntry {
     node: string;
@@ -284,10 +284,14 @@ function lockPresent(stateDir: string, prKey: string): boolean {
     return entryPresent(path.join(watcherDir(stateDir, prKey), LOCK_NAME));
 }
 
+// A github.com key has three parts; a key of any other host starts with the host.
 function prLabel(prKey: string): string {
-    const [owner = '', repo = '', number = '', ...rest] = prKey.split('+');
-    if (rest.length === 0 && isValidName(owner) && isValidName(repo) && isUintString(number)) {
-        return `${owner}/${repo} pull ${number}`;
+    const parts = prKey.split('+');
+    const host = parts.length === 4 ? parts.shift() : undefined;
+    const [owner = '', repo = '', number = '', ...rest] = parts;
+    const hostValid = host === undefined || isValidHost(host);
+    if (rest.length === 0 && hostValid && isValidName(owner) && isValidName(repo) && isUintString(number)) {
+        return `${host === undefined ? '' : `${host}/`}${owner}/${repo} pull ${number}`;
     }
     return `watcher ${safeText(prKey)}`;
 }

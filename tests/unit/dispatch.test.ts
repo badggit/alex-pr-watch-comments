@@ -170,6 +170,7 @@ function candidateFor(comment: PollComment, plus1At?: number): Candidate {
 function sessionFor(testEnv: TestEnv, clone: string, stateDir: string, prNumber = 12): Session {
     return {
         pr: {
+            host: 'github.com',
             owner: 'o',
             repo: 'r',
             number: prNumber,

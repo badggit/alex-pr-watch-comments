@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { DEFAULT_STOP_QUIET, ENV_NAMES, GH_TOKEN_VARS, GITHUB_HOST, PS_PATH } from './constants.ts';
-import { ghCommand } from './gh.ts';
+import { ghCommand, type GhCli } from './gh.ts';
 import { fetchPrInfo } from './githubPoll.ts';
 import { currentBranch, findRemote, gitIn } from './guards.ts';
 import { getArray, getRecord } from './json.ts';
@@ -210,41 +210,43 @@ function resolveTools(
     return { ok: true, value: tools };
 }
 
+function loginCommand(host: string): string {
+    return host === GITHUB_HOST ? 'gh auth login' : `gh auth login --hostname ${host}`;
+}
+
 function sameTools(left: ToolPaths, right: ToolPaths): boolean {
     return TOOL_NAMES.every((name) => left[name] === right[name]);
 }
 
 // Token variables never authenticate anything (the runner strips them); they are only named, never printed.
-async function checkGh(deps: PreflightDeps, ghPath: string, cwd: string): Promise<Checked<string[]>> {
-    const host = nonEmpty(deps.env.GH_HOST);
-    if (host !== undefined && host.toLowerCase() !== GITHUB_HOST) {
-        return refuse(
-            'GH_HOST is set to another host; alex-pr-watch-comments works only with github.com (unset GH_HOST)'
-        );
+async function checkGh(deps: PreflightDeps, gh: GhCli, cwd: string): Promise<Checked<string[]>> {
+    const envHost = nonEmpty(deps.env.GH_HOST);
+    if (envHost !== undefined && envHost.toLowerCase() !== gh.host) {
+        return refuse(`GH_HOST is set to another host than the PR host ${gh.host} (unset GH_HOST)`);
     }
     const configDir = effectiveGhConfigDir(deps.env, cwd);
     if (configDir === undefined || !isSafeAbsPath(configDir)) {
         return refuse('cannot determine the gh config directory (set GH_CONFIG_DIR)');
     }
     const tokens = GH_TOKEN_VARS.filter((name) => nonEmpty(deps.env[name]) !== undefined);
-    const auth = await ghCommand(deps, ghPath, ['auth', 'status', '--hostname', GITHUB_HOST]);
+    const auth = await ghCommand(deps, gh, ['auth', 'status', '--hostname', gh.host]);
     if (auth.kind !== 'ok') {
         const ignored =
             tokens.length > 0
-                ? `; ${tokens.join(', ')} is set but ignored: alex-pr-watch-comments uses only the gh login stored for github.com`
+                ? `; ${tokens.join(', ')} is set but ignored: alex-pr-watch-comments uses only the gh login stored for ${gh.host}`
                 : '';
-        return refuse(`gh is not authenticated for github.com (run: gh auth login)${ignored}`);
+        return refuse(`gh is not authenticated for ${gh.host} (run: ${loginCommand(gh.host)})${ignored}`);
     }
     for (const name of tokens) {
         deps.log.warn(
-            `${name} is set: alex-pr-watch-comments ignores it; the watcher and worker panes use the gh login stored for github.com`
+            `${name} is set: alex-pr-watch-comments ignores it; the watcher and worker panes use the gh login stored for ${gh.host}`
         );
     }
-    return { ok: true, value: [`GH_CONFIG_DIR=${configDir}`, `GH_HOST=${GITHUB_HOST}`] };
+    return { ok: true, value: [`GH_CONFIG_DIR=${configDir}`, `GH_HOST=${gh.host}`] };
 }
 
-async function checkPr(deps: PreflightDeps, ghPath: string, pr: PrRef): Promise<Checked<PrInfo>> {
-    const fetched = await fetchPrInfo(deps, ghPath, pr);
+async function checkPr(deps: PreflightDeps, gh: GhCli, pr: PrRef): Promise<Checked<PrInfo>> {
+    const fetched = await fetchPrInfo(deps, gh, pr);
     if (fetched.kind !== 'ok') {
         return refuse(`cannot read the pull request: ${safeText(fetched.message)}`);
     }
@@ -281,7 +283,11 @@ async function checkCheckout(
     if (toplevel === undefined) {
         return refuse(`not a git repository: ${safeText(dirCanon)}`);
     }
-    const found = await findRemote(deps, gitPath, dirCanon, info.headOwner, info.headRepo);
+    const found = await findRemote(deps, gitPath, dirCanon, {
+        host: pr.host,
+        owner: info.headOwner,
+        repo: info.headRepo,
+    });
     if (!found.ok) {
         return found;
     }
@@ -334,11 +340,12 @@ export async function preflight(
     if (!tools.ok) {
         return tools;
     }
-    const ghEnv = await checkGh(deps, tools.value.gh, cwd);
+    const gh: GhCli = { path: tools.value.gh, host: pr.host };
+    const ghEnv = await checkGh(deps, gh, cwd);
     if (!ghEnv.ok) {
         return ghEnv;
     }
-    const info = await checkPr(deps, tools.value.gh, pr);
+    const info = await checkPr(deps, gh, pr);
     if (!info.ok) {
         return info;
     }

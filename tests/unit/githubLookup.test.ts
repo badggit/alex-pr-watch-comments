@@ -16,7 +16,7 @@ import {
 } from '../fixtures/lookup/reactionPages.ts';
 import { createFakeRunner, type RecordedCall } from '../support/fakeRunner.ts';
 
-const GH = '/opt/fake/bin/gh';
+const GH = { path: '/opt/fake/bin/gh', host: 'github.com' };
 const FIXTURES = path.join(import.meta.dirname, '..', 'fixtures', 'lookup');
 const GONE_STDERR = "gh: Could not resolve to a node with the global id of 'PRRC_gone'\n";
 const TRANSIENT_STDERR = 'HTTP 502: Bad Gateway (https://api.github.com/graphql)\n';

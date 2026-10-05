@@ -73,7 +73,14 @@ export function projectDir(env: TestEnv): string {
 function buildSession(env: TestEnv, stateDir: string): Session {
     const project = projectDir(env);
     return {
-        pr: { owner: 'o', repo: 'r', number: 12, prUrl: 'https://github.com/o/r/pull/12', prKey: PR_KEY },
+        pr: {
+            host: 'github.com',
+            owner: 'o',
+            repo: 'r',
+            number: 12,
+            prUrl: 'https://github.com/o/r/pull/12',
+            prKey: PR_KEY,
+        },
         viewer: 'me',
         headRef: 'feature-x',
         headOwner: 'o',

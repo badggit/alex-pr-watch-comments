@@ -1,5 +1,5 @@
 import { GRAPHQL_OPS, PAGE_SIZE } from './constants.ts';
-import { ghGraphql, type GhDeps } from './gh.ts';
+import { ghGraphql, type GhCli, type GhDeps } from './gh.ts';
 import { getArray, getBoolean, getNumber, getPath, getRecord, getString, isoToEpoch, isRecord } from './json.ts';
 import type { GhFailure, GhResult, LookupEntry, LookupResult, RateInfo } from './types.ts';
 import { quoteUntrusted, visibleText } from './untrustedText.ts';
@@ -114,8 +114,8 @@ function viewerHasReacted(node: unknown, content: ReactionContent): boolean {
 }
 
 // Retries a chunk once without the ids a gone failure named; a second gone failure is transient.
-async function queryChunk(deps: GhDeps, ghPath: string, ids: readonly string[]): Promise<ChunkOutcome> {
-    const first = await ghGraphql(deps, ghPath, LOOKUP_QUERY, { ids });
+async function queryChunk(deps: GhDeps, gh: GhCli, ids: readonly string[]): Promise<ChunkOutcome> {
+    const first = await ghGraphql(deps, gh, LOOKUP_QUERY, { ids });
     if (first.kind === 'ok') {
         return { kind: 'ok', data: first.data, gone: [] };
     }
@@ -131,7 +131,7 @@ async function queryChunk(deps: GhDeps, ghPath: string, ids: readonly string[]):
     if (rest.length === 0) {
         return { kind: 'ok', data: undefined, gone };
     }
-    const retry = await ghGraphql(deps, ghPath, LOOKUP_QUERY, { ids: rest });
+    const retry = await ghGraphql(deps, gh, LOOKUP_QUERY, { ids: rest });
     if (retry.kind === 'ok') {
         return { kind: 'ok', data: retry.data, gone };
     }
@@ -199,7 +199,7 @@ function decodeComment(node: unknown): Omit<LookupEntry, 'rocketAt' | 'plus1At'>
 
 export async function fetchReactionTime(
     deps: GhDeps,
-    ghPath: string,
+    gh: GhCli,
     nodeId: string,
     content: PagedReaction,
     startCursor: string,
@@ -209,7 +209,7 @@ export async function fetchReactionTime(
     const seenCursors = new Set([startCursor]);
     let rate: RateInfo | undefined;
     for (;;) {
-        const result = await ghGraphql(deps, ghPath, REACTIONS_QUERY, { id: nodeId, content, endCursor: cursor });
+        const result = await ghGraphql(deps, gh, REACTIONS_QUERY, { id: nodeId, content, endCursor: cursor });
         if (result.kind !== 'ok') {
             return withRate(result, rate);
         }
@@ -237,7 +237,7 @@ export async function fetchReactionTime(
 // not among the first page's reactions and more pages exist.
 async function viewerReactionTime(
     deps: GhDeps,
-    ghPath: string,
+    gh: GhCli,
     node: unknown,
     nodeId: string,
     content: PagedReaction,
@@ -257,13 +257,13 @@ async function viewerReactionTime(
     if (connection.endCursor === undefined) {
         return transient(`${GRAPHQL_OPS.lookup} returned no reaction cursor`);
     }
-    const followUp = await fetchReactionTime(deps, ghPath, nodeId, content, connection.endCursor, viewer);
+    const followUp = await fetchReactionTime(deps, gh, nodeId, content, connection.endCursor, viewer);
     return followUp;
 }
 
 async function decodeEntry(
     deps: GhDeps,
-    ghPath: string,
+    gh: GhCli,
     node: unknown,
     viewer: string,
     lastRate: RateInfo
@@ -272,12 +272,12 @@ async function decodeEntry(
     if (comment === undefined) {
         return { kind: 'ok', entry: undefined, rate: undefined };
     }
-    const rocket = await viewerReactionTime(deps, ghPath, node, comment.nodeId, 'ROCKET', viewer);
+    const rocket = await viewerReactionTime(deps, gh, node, comment.nodeId, 'ROCKET', viewer);
     if (rocket.kind !== 'ok') {
         return withRate(rocket, rocket.rate ?? lastRate);
     }
     const rateAfterRocket = rocket.rate ?? lastRate;
-    const plus = await viewerReactionTime(deps, ghPath, node, comment.nodeId, 'THUMBS_UP', viewer);
+    const plus = await viewerReactionTime(deps, gh, node, comment.nodeId, 'THUMBS_UP', viewer);
     if (plus.kind !== 'ok') {
         return withRate(plus, plus.rate ?? rateAfterRocket);
     }
@@ -292,13 +292,13 @@ function followUpFailure(failure: GhFailure): GhFailure {
     return failure.kind === 'gone' ? withRate({ kind: 'transient', message: failure.message }, failure.rate) : failure;
 }
 
-export async function lookupComments(deps: GhDeps, ghPath: string, ids: readonly string[]): Promise<LookupOutcome> {
+export async function lookupComments(deps: GhDeps, gh: GhCli, ids: readonly string[]): Promise<LookupOutcome> {
     const unique = [...new Set(ids.filter((id) => isValidNodeId(id)))];
     const entries: LookupEntry[] = [];
     const gone: string[] = [];
     let rate: RateInfo | undefined;
     for (const chunk of chunked(unique)) {
-        const result = await queryChunk(deps, ghPath, chunk);
+        const result = await queryChunk(deps, gh, chunk);
         if (result.kind !== 'ok') {
             return withRate(result, rate);
         }
@@ -310,7 +310,7 @@ export async function lookupComments(deps: GhDeps, ghPath: string, ids: readonly
             }
             rate = page.rate;
             for (const node of page.nodes) {
-                const decoded = await decodeEntry(deps, ghPath, node, page.viewer, rate);
+                const decoded = await decodeEntry(deps, gh, node, page.viewer, rate);
                 if (decoded.kind !== 'ok') {
                     return followUpFailure(decoded);
                 }
@@ -335,12 +335,12 @@ function contextSection(node: unknown): string {
 
 // Earlier thread comments in the given order, each under an UNTRUSTED CONTEXT header with its body quoted; one call
 // per chunk of 100 ids, and a failure carries the rate of the last call that succeeded.
-export async function fetchContext(deps: GhDeps, ghPath: string, nodeIds: readonly string[]): Promise<ContextOutcome> {
+export async function fetchContext(deps: GhDeps, gh: GhCli, nodeIds: readonly string[]): Promise<ContextOutcome> {
     const ids = nodeIds.filter((id) => isValidNodeId(id));
     const byId = new Map<string, unknown>();
     let rate: RateInfo | undefined;
     for (const chunk of chunked(ids)) {
-        const result = await ghGraphql(deps, ghPath, CONTEXT_QUERY, { ids: chunk });
+        const result = await ghGraphql(deps, gh, CONTEXT_QUERY, { ids: chunk });
         if (result.kind !== 'ok') {
             return withRate(result, rate);
         }
@@ -362,7 +362,7 @@ export async function fetchContext(deps: GhDeps, ghPath: string, nodeIds: readon
 
 export async function react(
     deps: GhDeps,
-    ghPath: string,
+    gh: GhCli,
     action: ReactionAction,
     nodeId: string,
     content: ReactionContent
@@ -371,6 +371,6 @@ export async function react(
         return { kind: 'invalid' };
     }
     const mutation = action === 'add' ? ADD_REACTION_MUTATION : REMOVE_REACTION_MUTATION;
-    const result = await ghGraphql(deps, ghPath, mutation, { id: nodeId, content });
+    const result = await ghGraphql(deps, gh, mutation, { id: nodeId, content });
     return result;
 }

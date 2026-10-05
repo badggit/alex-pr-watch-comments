@@ -402,6 +402,23 @@ await describe('conveyorCommands', async () => {
         assert.ok(mustCommands(kitRecord()).every((line) => !line.includes('GH_HOST')));
     });
 
+    await test('a GitHub Enterprise Server run pins its own host on every gh line', () => {
+        const host = 'git.example.com';
+        const base = kitRecord();
+        const comments = base.comments.map((comment) => ({ ...comment, url: comment.url.replace('github.com', host) }));
+        const record = kitRecord({ prUrl: `https://${host}/o/r/pull/12`, comments });
+        const ghLines = mustCommands(record).filter((line) => line.startsWith('gh '));
+        assert.ok(ghLines.length > 0);
+        for (const line of ghLines) {
+            assert.ok(line.includes(` --hostname ${host} `), line);
+        }
+    });
+
+    await test('a comment URL on another host than the PR is refused', () => {
+        const record = kitRecord({ prUrl: 'https://git.example.com/o/r/pull/12' });
+        assert.equal(conveyorCommands(record, RD), undefined);
+    });
+
     await test('allows no free-form option, no delete, no reactions endpoint', () => {
         const commands = mustCommands(kitRecord());
         for (const forbidden of ['git diff *', 'git log *', 'git status *', 'git rev-parse *']) {

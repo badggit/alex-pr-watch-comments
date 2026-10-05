@@ -46,7 +46,7 @@ If your Claude Code settings define their own Stop hooks, a hook that runs longe
 - Node.js 22.18 or newer. On the 23 line, 23.6 or newer is needed. The plugin runs its TypeScript directly with Node's built-in type stripping: there is no build step and no `npm install`. The launcher accepts only release versions (`MAJOR.MINOR.PATCH`, no pre-release strings).
 - [tmux](https://github.com/tmux/tmux) 3.0 or newer. The watcher runs inside a tmux session, because it opens new panes there.
 - `git`, and a local clone of the repository with the PR branch checked out.
-- [GitHub CLI](https://cli.github.com/) (`gh`), logged in to github.com with `gh auth login` and with push access to the PR branch.
+- [GitHub CLI](https://cli.github.com/) (`gh`), logged in to the PR's host with `gh auth login` (for GitHub Enterprise Server: `gh auth login --hostname HOST`) and with push access to the PR branch.
 - [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) (`claude`) on your `PATH`, or given with `--claude`.
 - The project directory trusted in Claude Code, see [Trust and permissions](#trust-and-permissions).
 - macOS is the main target. Linux works too.
@@ -136,7 +136,7 @@ alex-pr-watch-comments --help                           show this help
 | `--once`             | One polling pass, then exit. Not with `--background`.                                                                                                                                         |
 | `--help`             | Show the usage text.                                                                                                                                                                          |
 
-The PR URL has the form `https://github.com/OWNER/REPO/pull/NUMBER`. Owner and repository names are case-insensitive, so two spellings of one URL name the same PR.
+The PR URL has the form `https://HOST/OWNER/REPO/pull/NUMBER`, where `HOST` is `github.com` or the host of a GitHub Enterprise Server. Host, owner and repository names are case-insensitive, so two spellings of one URL name the same PR. A host with a port is not supported.
 
 Example with claude arguments:
 
@@ -188,7 +188,7 @@ When a `--background` start fails after the window was created, the window stays
 
 The watcher and its runs work in your clone, the one given by `--dir`:
 
-- The clone must have the PR head branch checked out (`gh pr checkout NUMBER`), and it needs a remote for the PR head repository. The fetch and push destinations of that remote, after any `insteadOf` or `pushInsteadOf` rewrite, must all name that same repository (`https://github.com/OWNER/REPO.git`, `ssh://git@github.com/OWNER/REPO.git` or `git@github.com:OWNER/REPO.git`). Anything else is refused.
+- The clone must have the PR head branch checked out (`gh pr checkout NUMBER`), and it needs a remote for the PR head repository. The fetch and push destinations of that remote, after any `insteadOf` or `pushInsteadOf` rewrite, must all name that same repository on the PR's host (`https://HOST/OWNER/REPO.git`, `ssh://git@HOST/OWNER/REPO.git` or `git@HOST:OWNER/REPO.git`). Anything else is refused.
 - Before each run the watcher checks the remote and the branch, that tracked files have no uncommitted changes, fetches the branch and checks that the local branch is not ahead of the remote. If a check fails, the watcher is holding: it shows the reason and a hint in `--list` and tries again on the next poll. Nothing on GitHub changes while it is holding.
 - One clone runs one batch at a time. Watchers for other PRs on the same clone wait (`holding` with `clone busy`).
 - While a run is in flight, do not change tracked files, the index or the checked-out branch in that clone. The run commits and pushes from there.
@@ -206,10 +206,10 @@ The worker runs your normal `claude`, with your settings and your permission rul
 
 ## GitHub host and authentication
 
-- alex-pr-watch-comments works only with github.com. Every GitHub call of the watcher and of the worker passes `--hostname github.com`, and a `GH_HOST` set to any other host is refused at start.
-- alex-pr-watch-comments never uses `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. They are removed from every process the watcher starts and from the worker's environment, including any that a tmux server still holds from earlier; a `--background` window gets them as empty values, and the watcher drops those at start. So the watcher and the worker panes always use the gh login stored for github.com (`gh auth login`). `GH_REPO` is removed the same way.
-- When one of these variables is set, a foreground or a background start only warns, naming the variable, that it is ignored. A token variable never blocks a start. When gh is not logged in, the start-up refusal names the ignored variable too, so the fix is `gh auth login`.
-- Your effective gh config directory (`GH_CONFIG_DIR`, else `XDG_CONFIG_HOME/gh`, else `~/.config/gh`) is passed to the watcher window and to every worker pane, together with `GH_HOST=github.com`.
+- alex-pr-watch-comments works with github.com and with GitHub Enterprise Server. The host comes from the PR URL: every GitHub call of the watcher and of the worker passes `--hostname HOST`, and a `GH_HOST` set to any other host is refused at start.
+- alex-pr-watch-comments never uses `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. They are removed from every process the watcher starts and from the worker's environment, including any that a tmux server still holds from earlier; a `--background` window gets them as empty values, and the watcher drops those at start. So the watcher and the worker panes always use the gh login stored for the PR's host (`gh auth login`, or `gh auth login --hostname HOST` for GitHub Enterprise Server). `GH_REPO` is removed the same way.
+- When one of these variables is set, a foreground or a background start only warns, naming the variable, that it is ignored. A token variable never blocks a start. When gh is not logged in, the start-up refusal names the ignored variable too, so the fix is `gh auth login` for that host.
+- Your effective gh config directory (`GH_CONFIG_DIR`, else `XDG_CONFIG_HOME/gh`, else `~/.config/gh`) is passed to the watcher window and to every worker pane, together with `GH_HOST=HOST` of the PR.
 
 ## Safety
 
@@ -236,12 +236,12 @@ Every run starts an agent that edits code and pushes it to your branch, so the t
     git add -- *
     git commit -F RUN_DIR/commit-msg.txt -- *
     git push REMOTE HEAD:refs/heads/BRANCH
-    gh api repos/OWNER/REPO/pulls/NUMBER/comments/REPLY_TO_ID/replies --hostname github.com -F body=@RUN_DIR/reply-ID.md
-    gh api graphql --hostname github.com -F query=@RUN_DIR/gql/removeEyes-ID.graphql
-    gh api graphql --hostname github.com -F query=@RUN_DIR/gql/removePlus1-ID.graphql
-    gh api graphql --hostname github.com -F query=@RUN_DIR/gql/addPlus1-ID.graphql
-    gh api repos/OWNER/REPO/pulls/NUMBER --hostname github.com --jq .body
-    gh api -X PATCH repos/OWNER/REPO/pulls/NUMBER --hostname github.com -F body=@RUN_DIR/pr-body.md
+    gh api repos/OWNER/REPO/pulls/NUMBER/comments/REPLY_TO_ID/replies --hostname HOST -F body=@RUN_DIR/reply-ID.md
+    gh api graphql --hostname HOST -F query=@RUN_DIR/gql/removeEyes-ID.graphql
+    gh api graphql --hostname HOST -F query=@RUN_DIR/gql/removePlus1-ID.graphql
+    gh api graphql --hostname HOST -F query=@RUN_DIR/gql/addPlus1-ID.graphql
+    gh api repos/OWNER/REPO/pulls/NUMBER --hostname HOST --jq .body
+    gh api -X PATCH repos/OWNER/REPO/pulls/NUMBER --hostname HOST -F body=@RUN_DIR/pr-body.md
     ```
 
     There is no wildcard `git diff`: with a path wildcard, `git diff` could read any file outside the repository. The reaction files are written per comment and name only that approved comment. The worker never adds a `-1`: only the watcher does. The push goes only to the PR branch: no force push, no amend, no rebase.

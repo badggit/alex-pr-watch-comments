@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { GH_STRIP_VARS, GITHUB_HOST } from './constants.ts';
+import { GH_STRIP_VARS } from './constants.ts';
 import { identityFunction } from './proc.ts';
-import { buildPrompt, commentFiles, conveyorCommands, kitInputsValid, runFiles } from './prompt.ts';
+import { buildPrompt, commentFiles, conveyorCommands, kitInputsValid, recordHost, runFiles } from './prompt.ts';
 import { writeTextAtomic } from './stateStore.ts';
 import type { RunRecord } from './types.ts';
 import { isValidNodeId, shQuote } from './validate.ts';
@@ -213,7 +213,7 @@ function launcherMain(record: RunRecord): string[] {
         'await_go',
         `unset ${GH_STRIP_VARS.join(' ')}`,
         `unset ${GIT_REDIRECT_VARS.join(' ')}`,
-        `GH_HOST=${GITHUB_HOST}`,
+        `GH_HOST=${recordHost(record)}`,
         'export GH_HOST',
         'prompt=$(cat "$prompt_file")',
         'prompt_status=$?',

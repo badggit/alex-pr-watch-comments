@@ -82,7 +82,14 @@ interface SeedOptions {
 const FIXTURES = path.resolve(import.meta.dirname, '..', 'fixtures');
 const TIMEOUT = 'timeout';
 const PR_KEY = 'o+r+12';
-const PR: PrRef = { owner: 'o', repo: 'r', number: 12, prUrl: 'https://github.com/o/r/pull/12', prKey: PR_KEY };
+const PR: PrRef = {
+    host: 'github.com',
+    owner: 'o',
+    repo: 'r',
+    number: 12,
+    prUrl: 'https://github.com/o/r/pull/12',
+    prKey: PR_KEY,
+};
 const TOKEN = '123-456';
 const THREAD = 'PRRT_t1';
 const VIEWER = 'reviewer';

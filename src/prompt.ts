@@ -2,7 +2,15 @@ import path from 'node:path';
 
 import { GITHUB_HOST, MAX_BATCH, REPLY_TAG } from './constants.ts';
 import type { RunComment, RunRecord } from './types.ts';
-import { isSafeAbsPath, isSafeRunPath, isValidBranch, isValidName, isValidNodeId, isValidSha } from './validate.ts';
+import {
+    isSafeAbsPath,
+    isSafeRunPath,
+    isValidBranch,
+    isValidName,
+    isValidNodeId,
+    isValidSha,
+    urlHost,
+} from './validate.ts';
 
 export interface RunFiles {
     commitMsg: string;
@@ -54,10 +62,20 @@ const READ_ONLY_GIT: readonly string[] = [
     STAGED_DIFF,
     STAGED_NAMES,
 ];
-const HOST = `--hostname ${GITHUB_HOST}`;
 const TAG_RULE = `End the reply body with the tag ${REPLY_TAG} on its own last line, exactly as written, with nothing after it.`;
-// Only https://github.com/ URLs whose characters can neither break a prompt line nor a frame.
-const GITHUB_URL = /^https:\/\/github\.com\/[\w./#-]+$/u;
+// The URL path after https://HOST/: characters that can neither break a prompt line nor a frame.
+const URL_PATH = /^[\w./#-]+$/u;
+
+// The PR host is taken from the record's prUrl, so a run record needs no host field of its own.
+export function recordHost(record: RunRecord): string {
+    return urlHost(record.prUrl) ?? GITHUB_HOST;
+}
+
+// Only https:// URLs on the given host whose characters can neither break a prompt line nor a frame.
+function isHostUrl(url: string, host: string): boolean {
+    const prefix = `https://${host}/`;
+    return url.startsWith(prefix) && URL_PATH.test(url.slice(prefix.length));
+}
 
 function isPositiveId(value: number): boolean {
     return Number.isSafeInteger(value) && value > 0;
@@ -67,33 +85,35 @@ function isSafePathList(value: string): boolean {
     return value.split(':').every((entry) => isSafeAbsPath(entry));
 }
 
-function commentIdsValid(comment: RunComment): boolean {
+function commentIdsValid(comment: RunComment, host: string): boolean {
     return (
         isValidNodeId(comment.nodeId) &&
         isValidNodeId(comment.threadId) &&
         isPositiveId(comment.dbId) &&
         isPositiveId(comment.topDbId) &&
-        GITHUB_URL.test(comment.url)
+        isHostUrl(comment.url, host)
     );
 }
 
 // The database ids name the per-comment files, so they must be unique within the run.
-function commentsValid(comments: readonly RunComment[]): boolean {
+function commentsValid(comments: readonly RunComment[], host: string): boolean {
     const ids = new Set(comments.map((comment) => comment.dbId));
     return (
         comments.length > 0 &&
         comments.length <= MAX_BATCH &&
         ids.size === comments.length &&
-        comments.every((comment) => commentIdsValid(comment))
+        comments.every((comment) => commentIdsValid(comment, host))
     );
 }
 
 function recordIdsValid(record: RunRecord): boolean {
+    const host = urlHost(record.prUrl);
     return (
         isPositiveId(record.number) &&
         isValidSha(record.headSha) &&
-        GITHUB_URL.test(record.prUrl) &&
-        commentsValid(record.comments)
+        host !== undefined &&
+        isHostUrl(record.prUrl, host) &&
+        commentsValid(record.comments, host)
     );
 }
 
@@ -147,8 +167,13 @@ function pullPath(record: RunRecord): string {
     return `repos/${record.owner}/${record.repo}/pulls/${record.number}`;
 }
 
+function hostFlag(record: RunRecord): string {
+    return `--hostname ${recordHost(record)}`;
+}
+
 function buildConveyor(record: RunRecord, rd: string): Conveyor {
     const files = runFiles(rd);
+    const host = hostFlag(record);
     const pull = pullPath(record);
     const ref = `refs/heads/${record.branch}`;
     return {
@@ -157,18 +182,19 @@ function buildConveyor(record: RunRecord, rd: string): Conveyor {
         add: 'git add -- *',
         commit: `git commit -F ${files.commitMsg} -- *`,
         push: `git push ${record.remote} HEAD:${ref}`,
-        readBody: `gh api ${pull} ${HOST} --jq .body`,
-        patchBody: `gh api -X PATCH ${pull} ${HOST} -F body=@${files.prBody}`,
+        readBody: `gh api ${pull} ${host} --jq .body`,
+        patchBody: `gh api -X PATCH ${pull} ${host} -F body=@${files.prBody}`,
     };
 }
 
 function buildCommentConveyor(record: RunRecord, comment: RunComment, rd: string): CommentConveyor {
     const files = commentFiles(rd, comment.dbId);
+    const host = hostFlag(record);
     return {
-        reply: `gh api ${pullPath(record)}/comments/${comment.topDbId}/replies ${HOST} -F body=@${files.reply}`,
-        removeEyes: `gh api graphql ${HOST} -F query=@${files.removeEyes}`,
-        removePlus1: `gh api graphql ${HOST} -F query=@${files.removePlus1}`,
-        addPlus1: `gh api graphql ${HOST} -F query=@${files.addPlus1}`,
+        reply: `gh api ${pullPath(record)}/comments/${comment.topDbId}/replies ${host} -F body=@${files.reply}`,
+        removeEyes: `gh api graphql ${host} -F query=@${files.removeEyes}`,
+        removePlus1: `gh api graphql ${host} -F query=@${files.removePlus1}`,
+        addPlus1: `gh api graphql ${host} -F query=@${files.addPlus1}`,
     };
 }
 

@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 import { DEFAULT_LAUNCH_WAIT, ENV_NAMES } from './constants.ts';
+import { sessionGh } from './gh.ts';
 import { fetchContext, react, type ReactOutcome } from './githubLookup.ts';
 import { runGuards } from './guards.ts';
 import { acquireWorktreeLock, releaseWorktreeLock, worktreeLockHolder } from './locks.ts';
@@ -185,7 +186,7 @@ async function removeRockets(
     let removedAll = true;
     for (const comment of comments) {
         if (present(comment.nodeId)) {
-            const removed = await react(deps, session.tools.gh, 'remove', comment.nodeId, 'ROCKET');
+            const removed = await react(deps, sessionGh(session), 'remove', comment.nodeId, 'ROCKET');
             if (removed.kind !== 'ok') {
                 deps.log.warn(
                     `comment ${comment.dbId}: rocket removal failed, retrying next tick: ${reactFailure(removed)}`
@@ -202,7 +203,7 @@ async function removeRockets(
 // Step 5 for one comment: a stale +1 and a stale -1 of the viewer go, EYES comes; failures are logged and do not stop
 // the dispatch.
 async function markOneInProgress(deps: Deps, session: Session, comment: RunComment, entry: LookupEntry | undefined) {
-    const gh = session.tools.gh;
+    const gh = sessionGh(session);
     const stale = STALE_REACTIONS.filter((content) =>
         content === 'THUMBS_UP' ? entry?.plus1At !== undefined : entry?.minus1 === true
     );
@@ -385,7 +386,7 @@ async function writeSnapshots(
         if (comment === undefined) {
             throw new Error('the record does not match the candidates');
         }
-        const context = await fetchContext(deps, session.tools.gh, earlierCommentIds(poll, candidate.poll));
+        const context = await fetchContext(deps, sessionGh(session), earlierCommentIds(poll, candidate.poll));
         if (context.kind !== 'ok') {
             deps.log.warn(`comment ${comment.dbId}: context fetch failed: ${safeText(context.message)}`);
             return false;
