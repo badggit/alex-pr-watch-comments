@@ -1,14 +1,24 @@
 import type { CommandResult, Deps, GuardResult, Session } from './types.ts';
-import { isValidName, isValidSha, safeText } from './validate.ts';
+import { HOST_PATTERN, isValidName, isValidSha, safeText } from './validate.ts';
 
 export type GitDeps = Pick<Deps, 'runner'>;
+
+// The host is lowercase; owner and repo are compared case-insensitively.
+export interface RepoRef {
+    host: string;
+    owner: string;
+    repo: string;
+}
 
 export type RemoteCheck = { ok: true } | { ok: false; reason: string };
 
 export type RemoteFound = { ok: true; remote: string } | { ok: false; reason: string };
 
-const GITHUB_REMOTE_URL =
-    /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/u;
+// Exactly one of the three host groups matches, one per URL form.
+const GITHUB_REMOTE_URL = new RegExp(
+    String.raw`^(?:https://(${HOST_PATTERN})/|ssh://git@(${HOST_PATTERN})/|git@(${HOST_PATTERN}):)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$`,
+    'iu'
+);
 const COUNTS = /^(\d+)\t(\d+)$/u;
 const REMOTE_HINT = "fix the remote's URLs";
 const DIVERGE_HINT = 'push or reset the branch manually';
@@ -28,22 +38,27 @@ function outputLines(text: string): string[] {
     return (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n');
 }
 
-// Strict syntax check of a GitHub remote URL; whether it names the right repository is up to the caller.
-export function parseGithubRemoteUrl(url: string): { owner: string; repo: string } | undefined {
+// Strict syntax check of a GitHub remote URL; whether it names the right host and repository is up to the caller.
+export function parseGithubRemoteUrl(url: string): RepoRef | undefined {
     const match = GITHUB_REMOTE_URL.exec(url);
     if (match === null) {
         return;
     }
-    const [, owner = '', repo = ''] = match;
+    const [, httpsHost, sshHost, scpHost, owner = '', repo = ''] = match;
+    const host = httpsHost ?? sshHost ?? scpHost ?? '';
     if (!isValidName(owner) || !isValidName(repo)) {
         return;
     }
-    return { owner: owner.toLowerCase(), repo: repo.toLowerCase() };
+    return { host: host.toLowerCase(), owner: owner.toLowerCase(), repo: repo.toLowerCase() };
 }
 
-function pointsTo(url: string, owner: string, repo: string): boolean {
+function pointsTo(url: string, target: RepoRef): boolean {
     const parsed = parseGithubRemoteUrl(url);
-    return parsed?.owner === owner.toLowerCase() && parsed.repo === repo.toLowerCase();
+    return (
+        parsed?.host === target.host.toLowerCase() &&
+        parsed.owner === target.owner.toLowerCase() &&
+        parsed.repo === target.repo.toLowerCase()
+    );
 }
 
 // The values of a multi-valued git config key, empty values included: no items only when git reports the key as
@@ -68,17 +83,16 @@ async function effectiveUrls(
 }
 
 // Every destination of the remote (raw url, every pushurl, effective fetch and push URL after insteadOf and
-// pushInsteadOf rewrites) must be OWNER/REPO, so neither a fetch nor a push can reach another repository.
+// pushInsteadOf rewrites) must be HOST/OWNER/REPO, so neither a fetch nor a push can reach another repository.
 export async function verifyRemote(
     deps: GitDeps,
     gitPath: string,
     dir: string,
     remote: string,
-    owner: string,
-    repo: string
+    repoRef: RepoRef
 ): Promise<RemoteCheck> {
     const shown = safeText(remote);
-    const target = safeText(`${owner}/${repo}`);
+    const target = safeText(`${repoRef.owner}/${repoRef.repo}`);
     const urls = isValidName(remote) ? await configValues(deps, gitPath, dir, `remote.${remote}.url`) : [];
     if (urls === undefined) {
         return { ok: false, reason: `cannot read the URLs of remote ${shown}` };
@@ -87,7 +101,7 @@ export async function verifyRemote(
     if (url === undefined) {
         return { ok: false, reason: `remote ${shown} not found` };
     }
-    if (urls.length !== 1 || !pointsTo(url, owner, repo)) {
+    if (urls.length !== 1 || !pointsTo(url, repoRef)) {
         return { ok: false, reason: `remote ${shown} does not point to ${target}` };
     }
     const pushUrls = await configValues(deps, gitPath, dir, `remote.${remote}.pushurl`);
@@ -97,33 +111,28 @@ export async function verifyRemote(
         pushUrls !== undefined &&
         fetchTargets?.length === 1 &&
         pushTargets?.length === 1 &&
-        [...pushUrls, ...fetchTargets, ...pushTargets].every((item) => pointsTo(item, owner, repo));
+        [...pushUrls, ...fetchTargets, ...pushTargets].every((item) => pointsTo(item, repoRef));
     return verified ? { ok: true } : { ok: false, reason: `push target of remote ${shown} is not ${target}` };
 }
 
-// The first remote, in git's order, whose raw URL names OWNER/REPO, verified with verifyRemote.
-export async function findRemote(
-    deps: GitDeps,
-    gitPath: string,
-    dir: string,
-    owner: string,
-    repo: string
-): Promise<RemoteFound> {
+// The first remote, in git's order, whose raw URL names HOST/OWNER/REPO, verified with verifyRemote.
+export async function findRemote(deps: GitDeps, gitPath: string, dir: string, repoRef: RepoRef): Promise<RemoteFound> {
     const listed = await gitIn(deps, gitPath, dir, ['remote']);
     if (listed.code !== 0) {
         return { ok: false, reason: 'cannot list the git remotes' };
     }
     for (const name of outputLines(listed.stdout)) {
         const urls = isValidName(name) ? await configValues(deps, gitPath, dir, `remote.${name}.url`) : undefined;
-        if (urls?.some((url) => pointsTo(url, owner, repo))) {
-            const verified = await verifyRemote(deps, gitPath, dir, name, owner, repo);
+        if (urls?.some((url) => pointsTo(url, repoRef))) {
+            const verified = await verifyRemote(deps, gitPath, dir, name, repoRef);
             return verified.ok ? { ok: true, remote: name } : verified;
         }
     }
-    const target = safeText(`${owner}/${repo}`);
+    const target = safeText(`${repoRef.owner}/${repoRef.repo}`);
+    const host = safeText(repoRef.host);
     return {
         ok: false,
-        reason: `no git remote points to ${target} (add one: git remote add NAME https://github.com/${target}.git)`,
+        reason: `no git remote points to ${target} (add one: git remote add NAME https://${host}/${target}.git)`,
     };
 }
 
@@ -167,7 +176,11 @@ async function divergence(
 export async function runGuards(deps: GitDeps, session: Session): Promise<GuardResult> {
     const { dirCanon: dir, remote, headRef: branch } = session;
     const gitPath = session.tools.git;
-    const remoteCheck = await verifyRemote(deps, gitPath, dir, remote, session.headOwner, session.headRepo);
+    const remoteCheck = await verifyRemote(deps, gitPath, dir, remote, {
+        host: session.pr.host,
+        owner: session.headOwner,
+        repo: session.headRepo,
+    });
     if (!remoteCheck.ok) {
         return hold(remoteCheck.reason, REMOTE_HINT);
     }

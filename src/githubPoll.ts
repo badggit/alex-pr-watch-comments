@@ -1,5 +1,5 @@
 import { GRAPHQL_OPS, PAGE_SIZE } from './constants.ts';
-import { ghGraphql, type GhDeps } from './gh.ts';
+import { ghGraphql, type GhCli, type GhDeps } from './gh.ts';
 import { getArray, getBoolean, getNumber, getPath, getRecord, getString, isoToEpoch } from './json.ts';
 import type { GhFailure, PollComment, PollResult, PrInfo, PrRef, PrState, RateInfo } from './types.ts';
 import { isValidNodeId } from './validate.ts';
@@ -240,13 +240,13 @@ function decodePrInfo(data: unknown): PrInfo | undefined {
 
 async function fetchDecoded<T>(
     deps: GhDeps,
-    ghPath: string,
+    gh: GhCli,
     operation: string,
     query: string,
     variables: Readonly<Record<string, unknown>>,
     decode: (_data: unknown) => T | undefined
 ): Promise<Fetched<T>> {
-    const response = await ghGraphql(deps, ghPath, query, variables);
+    const response = await ghGraphql(deps, gh, query, variables);
     if (response.kind !== 'ok') {
         return response;
     }
@@ -303,7 +303,7 @@ function positioned(threadId: string, nodes: readonly CommentNode[]): PollCommen
 // Continues a thread whose first comment page is not its last, starting after that page's endCursor.
 async function collectThread(
     deps: GhDeps,
-    ghPath: string,
+    gh: GhCli,
     thread: ThreadNode,
     rate: RateInfo
 ): Promise<{ kind: 'ok'; comments: PollComment[]; rate: RateInfo } | GhFailure> {
@@ -315,7 +315,7 @@ async function collectThread(
         const { cursor } = step;
         const page = await fetchDecoded(
             deps,
-            ghPath,
+            gh,
             GRAPHQL_OPS.threadComments,
             THREAD_COMMENTS_QUERY,
             { id: thread.id, endCursor: cursor },
@@ -336,11 +336,11 @@ async function collectThread(
 
 export async function fetchPrInfo(
     deps: GhDeps,
-    ghPath: string,
+    gh: GhCli,
     pr: PrRef
 ): Promise<{ kind: 'ok'; info: PrInfo } | GhFailure> {
     const variables = { owner: pr.owner, repo: pr.repo, number: pr.number };
-    const response = await ghGraphql(deps, ghPath, PR_INFO_QUERY, variables);
+    const response = await ghGraphql(deps, gh, PR_INFO_QUERY, variables);
     if (response.kind !== 'ok') {
         return response;
     }
@@ -357,7 +357,7 @@ export async function fetchPrInfo(
 // successful call's, whichever query it was.
 export async function pollPr(
     deps: GhDeps,
-    ghPath: string,
+    gh: GhCli,
     pr: PrRef
 ): Promise<{ kind: 'ok'; result: PollResult } | GhFailure> {
     const baseVariables = { owner: pr.owner, repo: pr.repo, number: pr.number };
@@ -367,7 +367,7 @@ export async function pollPr(
     const seen = new Set<string>();
     for (;;) {
         const variables = cursor === undefined ? baseVariables : { ...baseVariables, endCursor: cursor };
-        const page = await fetchDecoded(deps, ghPath, GRAPHQL_OPS.poll, POLL_QUERY, variables, (data) =>
+        const page = await fetchDecoded(deps, gh, GRAPHQL_OPS.poll, POLL_QUERY, variables, (data) =>
             decodePollPage(data)
         );
         if (page.kind !== 'ok') {
@@ -375,7 +375,7 @@ export async function pollPr(
         }
         let latestRate = page.rate;
         for (const thread of page.value.threads) {
-            const collected = await collectThread(deps, ghPath, thread, latestRate);
+            const collected = await collectThread(deps, gh, thread, latestRate);
             if (collected.kind !== 'ok') {
                 return collected;
             }

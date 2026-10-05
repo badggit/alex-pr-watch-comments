@@ -16,7 +16,7 @@ Arguments: `$ARGUMENTS`
 
 Run the command from the current project directory, as a single Bash call, with no other options, pipes, redirections or chaining:
 
-- A pull request URL (`https://github.com/OWNER/REPO/pull/NUMBER`):
+- A pull request URL (`https://HOST/OWNER/REPO/pull/NUMBER`, where HOST is github.com or a GitHub Enterprise Server host):
   `"${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments" PR_URL --background`
 - `list`:
   `"${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments" --list`

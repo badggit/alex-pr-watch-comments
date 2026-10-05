@@ -283,6 +283,12 @@ await describe('buildLauncherScript', async () => {
         assert.ok(script.includes(`${shQuote('a b')} ${shQuote('$(echo pwned)')} ${shQuote("it's")}`));
         assert.ok(script.includes('unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_REPO'));
         assert.ok(script.includes('GH_HOST=github.com'));
+        const host = 'git.example.com';
+        const enterprise = kitRecord({
+            prUrl: `https://${host}/o/r/pull/12`,
+            comments: record.comments.map((comment) => ({ ...comment, url: comment.url.replace('github.com', host) })),
+        });
+        assert.ok(buildLauncherScript(enterprise, RD, 60)?.includes(`GH_HOST=${host}\n`));
         assert.ok(
             script.includes(
                 'unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_NAMESPACE GIT_COMMON_DIR'

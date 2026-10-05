@@ -1,3 +1,4 @@
+import { sessionGh } from './gh.ts';
 import { react, type ReactOutcome } from './githubLookup.ts';
 import type { Deps, Session } from './types.ts';
 import { safeText } from './validate.ts';
@@ -22,7 +23,7 @@ function failureText(outcome: ReactOutcome): string {
 }
 
 export async function removeEyes(deps: Deps, session: Session, target: ReactTarget): Promise<void> {
-    const result = await react(deps, session.tools.gh, 'remove', target.nodeId, 'EYES');
+    const result = await react(deps, sessionGh(session), 'remove', target.nodeId, 'EYES');
     if (result.kind !== 'ok') {
         deps.log.warn(`could not remove EYES from comment ${target.dbId}: ${failureText(result)}`);
     }
@@ -47,7 +48,7 @@ export async function markFailed(
                 return;
             }
         }
-        const added = await react(deps, session.tools.gh, 'add', target.nodeId, 'THUMBS_DOWN');
+        const added = await react(deps, sessionGh(session), 'add', target.nodeId, 'THUMBS_DOWN');
         if (added.kind === 'ok') {
             deps.log.info(`comment ${target.dbId} marked as failed`);
         } else {

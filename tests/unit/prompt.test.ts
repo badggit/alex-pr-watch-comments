@@ -177,6 +177,37 @@ await describe('buildPrompt', async () => {
         assert.ok(step.includes(TAG_RULE), step);
     });
 
+    await test('the first step checks the PR head branch by name before anything else', () => {
+        const lines = mustPrompt(kitRecord()).split('\n');
+        const step = lines.find((line) => line.startsWith('1. Before anything else'));
+        assert.ok(step !== undefined, 'missing step 1');
+        assert.ok(step.includes('git branch --show-current and confirm it prints exactly feature-x'), step);
+        assert.ok(step.includes('Never switch branches yourself'), step);
+    });
+
+    await test('asks to read all four project instruction files and keeps the prompt above them', () => {
+        const prompt = mustPrompt(kitRecord());
+        const section = indexAfter(prompt, 'Project instructions:', 0);
+        assert.ok(section < indexAfter(prompt, 'Steps:', 0));
+        for (const name of ['CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.md', 'AGENTS.local.md']) {
+            assert.ok(prompt.slice(section).includes(name), name);
+        }
+        assert.ok(prompt.includes('This prompt always wins'));
+        assert.ok(prompt.includes('This run is the explicit request to commit and push your fixes'));
+        assert.ok(prompt.includes('never widen the command list'));
+    });
+
+    await test('the last step makes sure every commit is pushed without forcing', () => {
+        const lines = mustPrompt(kitRecord()).split('\n');
+        const step = lines.find((line) =>
+            line.startsWith('14. Finally, make sure all your work is committed and pushed')
+        );
+        assert.ok(step !== undefined, 'missing step 14');
+        assert.ok(step.includes('git push origin HEAD:refs/heads/feature-x once more'), step);
+        assert.ok(step.includes('do not commit them'), step);
+        assert.ok(step.includes('never force it'), step);
+    });
+
     await test('the failure path reply asks for the reply tag on its own last line', () => {
         const lines = mustPrompt(kitRecord()).split('\n');
         const header = lines.indexOf('Failure path for one comment:');
@@ -400,6 +431,23 @@ await describe('conveyorCommands', async () => {
             assert.ok(line.includes(' --hostname github.com '), line);
         }
         assert.ok(mustCommands(kitRecord()).every((line) => !line.includes('GH_HOST')));
+    });
+
+    await test('a GitHub Enterprise Server run pins its own host on every gh line', () => {
+        const host = 'git.example.com';
+        const base = kitRecord();
+        const comments = base.comments.map((comment) => ({ ...comment, url: comment.url.replace('github.com', host) }));
+        const record = kitRecord({ prUrl: `https://${host}/o/r/pull/12`, comments });
+        const ghLines = mustCommands(record).filter((line) => line.startsWith('gh '));
+        assert.ok(ghLines.length > 0);
+        for (const line of ghLines) {
+            assert.ok(line.includes(` --hostname ${host} `), line);
+        }
+    });
+
+    await test('a comment URL on another host than the PR is refused', () => {
+        const record = kitRecord({ prUrl: 'https://git.example.com/o/r/pull/12' });
+        assert.equal(conveyorCommands(record, RD), undefined);
     });
 
     await test('allows no free-form option, no delete, no reactions endpoint', () => {

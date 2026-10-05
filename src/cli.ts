@@ -1,8 +1,8 @@
 import path from 'node:path';
 
-import { DEFAULT_BATCH_MAX, DEFAULT_INTERVAL, DEFAULT_KEEP_PANES, MAX_BATCH } from './constants.ts';
+import { DEFAULT_BATCH_MAX, DEFAULT_INTERVAL, DEFAULT_KEEP_PANES, GITHUB_HOST, MAX_BATCH } from './constants.ts';
 import type { CliMode, CliOptions, PrRef } from './types.ts';
-import { isUintString, isValidName, safeText } from './validate.ts';
+import { HOST_PATTERN, isUintString, isValidName, safeText } from './validate.ts';
 
 export type ParseResult = { kind: 'ok'; options: CliOptions } | { kind: 'help' } | { kind: 'error'; message: string };
 
@@ -20,7 +20,10 @@ interface Draft {
     claudeArgs: string[];
 }
 
-const PR_URL = /^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/pull\/([1-9]\d{0,9})(?:[/?#].*)?$/u;
+const PR_URL = new RegExp(
+    String.raw`^https://(${HOST_PATTERN})/([^/?#]+)/([^/?#]+)/pull/([1-9]\d{0,9})(?:[/?#].*)?$`,
+    'iu'
+);
 const LINE_BREAK = /[\n\r]/u;
 const FLAG_OPTIONS: ReadonlySet<string> = new Set(['--background', '--list', '--once']);
 const VALUE_OPTIONS: ReadonlySet<string> = new Set([
@@ -35,25 +38,29 @@ const VALUE_OPTIONS: ReadonlySet<string> = new Set([
 // One day; also keeps the sleep far below the 2^31-1 ms limit above which Node timers fire at once.
 const MAX_INTERVAL = 86_400;
 
-// Accepts https://github.com/OWNER/REPO/pull/NUMBER plus an optional suffix starting with /, ? or #.
+// Accepts https://HOST/OWNER/REPO/pull/NUMBER plus an optional suffix starting with /, ? or #, where HOST is
+// github.com or a GitHub Enterprise Server host.
 export function parsePrUrl(url: string): PrRef | undefined {
     const match = PR_URL.exec(url);
     if (match === null) {
         return;
     }
-    const [, rawOwner = '', rawRepo = '', digits = ''] = match;
+    const [, rawHost = '', rawOwner = '', rawRepo = '', digits = ''] = match;
     if (!isValidName(rawOwner) || !isValidName(rawRepo)) {
         return;
     }
+    const host = rawHost.toLowerCase();
     const owner = rawOwner.toLowerCase();
     const repo = rawRepo.toLowerCase();
     const number = Number.parseInt(digits, 10);
+    const key = `${owner}+${repo}+${number}`;
     return {
+        host,
         owner,
         repo,
         number,
-        prUrl: `https://github.com/${owner}/${repo}/pull/${number}`,
-        prKey: `${owner}+${repo}+${number}`,
+        prUrl: `https://${host}/${owner}/${repo}/pull/${number}`,
+        prKey: host === GITHUB_HOST ? key : `${host}+${key}`,
     };
 }
 
@@ -211,7 +218,7 @@ function finish(draft: Draft): ParseResult {
     }
     const pr = parsePrUrl(url);
     if (pr === undefined) {
-        return failure(`invalid PR URL: ${safeText(url)} (expected https://github.com/OWNER/REPO/pull/NUMBER)`);
+        return failure(`invalid PR URL: ${safeText(url)} (expected https://HOST/OWNER/REPO/pull/NUMBER)`);
     }
     return toResult(draft, mode, pr);
 }

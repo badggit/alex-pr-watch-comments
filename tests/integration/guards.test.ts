@@ -3,7 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 
-import { currentBranch, findRemote, parseGithubRemoteUrl, runGuards, verifyRemote } from '../../src/guards.ts';
+import {
+    currentBranch,
+    findRemote,
+    parseGithubRemoteUrl,
+    runGuards,
+    verifyRemote,
+    type RepoRef,
+} from '../../src/guards.ts';
 import { createProcessRunner } from '../../src/proc.ts';
 import { worktreeKey } from '../../src/stateStore.ts';
 import type { CommandRunner, PrRef, Session } from '../../src/types.ts';
@@ -12,7 +19,15 @@ import { gitSync, makePrClone, offlineGitRunner, pushRemoteCommit } from '../sup
 import { createTestEnv, type TestEnv } from '../support/testEnv.ts';
 
 const BRANCH = 'feature';
-const PR: PrRef = { owner: 'o', repo: 'r', number: 12, prUrl: 'https://github.com/o/r/pull/12', prKey: 'o+r+12' };
+const PR: PrRef = {
+    host: 'github.com',
+    owner: 'o',
+    repo: 'r',
+    number: 12,
+    prUrl: 'https://github.com/o/r/pull/12',
+    prKey: 'o+r+12',
+};
+const REPO: RepoRef = { host: 'github.com', owner: 'o', repo: 'r' };
 const PUSH_REFUSAL = 'push target of remote origin is not o/r';
 const URL_REFUSAL = 'remote origin does not point to o/r';
 const SHA = /^[\da-f]{40}$/u;
@@ -99,24 +114,29 @@ function commitLocal(setup: GitSetup): void {
 }
 
 await describe('parseGithubRemoteUrl', async () => {
-    await test('accepts the three GitHub URL forms and lowercases owner and repo', () => {
-        const accepted: readonly [string, string, string][] = [
-            ['git@github.com:Owner/Repo.git', 'owner', 'repo'],
-            ['https://github.com/owner/repo', 'owner', 'repo'],
-            ['https://github.com/owner/repo.git/', 'owner', 'repo'],
-            ['ssh://git@github.com/owner/repo', 'owner', 'repo'],
-            ['https://github.com/owner/repo-evil.git', 'owner', 'repo-evil'],
-            ['https://github.com/xowner/repo', 'xowner', 'repo'],
+    await test('accepts the three GitHub URL forms and lowercases host, owner and repo', () => {
+        const accepted: readonly [string, string, string, string][] = [
+            ['git@github.com:Owner/Repo.git', 'github.com', 'owner', 'repo'],
+            ['https://github.com/owner/repo', 'github.com', 'owner', 'repo'],
+            ['https://github.com/owner/repo.git/', 'github.com', 'owner', 'repo'],
+            ['ssh://git@github.com/owner/repo', 'github.com', 'owner', 'repo'],
+            ['https://github.com/owner/repo-evil.git', 'github.com', 'owner', 'repo-evil'],
+            ['https://github.com/xowner/repo', 'github.com', 'xowner', 'repo'],
+            ['git@GIT.Example.com:owner/repo.git', 'git.example.com', 'owner', 'repo'],
+            ['https://git.example.com/owner/repo.git', 'git.example.com', 'owner', 'repo'],
+            ['ssh://git@git.example.com/owner/repo', 'git.example.com', 'owner', 'repo'],
         ];
-        for (const [url, owner, repo] of accepted) {
-            assert.deepEqual(parseGithubRemoteUrl(url), { owner, repo }, url);
+        for (const [url, host, owner, repo] of accepted) {
+            assert.deepEqual(parseGithubRemoteUrl(url), { host, owner, repo }, url);
         }
     });
 
-    await test('rejects other hosts, extra segments and credentials', () => {
+    await test('rejects malformed hosts, ports, extra segments and credentials', () => {
         const rejected = [
-            'https://evilgithub.com/owner/repo',
-            'https://github.com.evil.com/owner/repo',
+            'https://localhost/owner/repo',
+            'https://git.example.com:8443/owner/repo',
+            'git@git.example.com/owner/repo.git',
+            'https://-git.example.com/owner/repo',
             'https://github.com/owner/repo/extra',
             'https://user:pw@github.com/owner/repo',
             'https://github.com/owner',
@@ -137,19 +157,47 @@ await describe('findRemote', async () => {
         for (const [index, url] of ['https://github.com/o/r-evil.git', 'https://github.com/xo/r'].entries()) {
             const setup = gitSetup(testEnv, `other-${index}`);
             git(setup, ['remote', 'set-url', 'origin', url]);
-            const found = await findRemote({ runner: setup.runner }, setup.git, setup.clone, 'o', 'r');
+            const found = await findRemote({ runner: setup.runner }, setup.git, setup.clone, REPO);
             assert.ok(!found.ok);
             assert.ok(found.reason.includes('git remote add NAME https://github.com/o/r.git'), found.reason);
             git(setup, ['remote', 'add', 'upstream', 'https://github.com/o/r.git']);
-            const upstream = await findRemote({ runner: setup.runner }, setup.git, setup.clone, 'o', 'r');
+            const upstream = await findRemote({ runner: setup.runner }, setup.git, setup.clone, REPO);
             assert.deepEqual(upstream, { ok: true, remote: 'upstream' });
         }
+    });
+
+    await test('a remote on another host does not match', async (t) => {
+        const testEnv = await makeEnv(t);
+        for (const [index, url] of [
+            'https://evilgithub.com/o/r.git',
+            'https://github.com.evil.com/o/r.git',
+            'https://git.example.com/o/r.git',
+        ].entries()) {
+            const setup = gitSetup(testEnv, `host-${index}`);
+            git(setup, ['remote', 'set-url', 'origin', url]);
+            const found = await findRemote({ runner: setup.runner }, setup.git, setup.clone, REPO);
+            assert.ok(!found.ok, url);
+        }
+    });
+
+    await test('a GitHub Enterprise Server remote matches its own host only', async (t) => {
+        const setup = gitSetup(await makeEnv(t), 'git');
+        git(setup, ['remote', 'set-url', 'origin', 'git@git.example.com:o/r.git']);
+        const enterprise = { ...REPO, host: 'git.example.com' };
+        const found = await findRemote({ runner: setup.runner }, setup.git, setup.clone, enterprise);
+        assert.deepEqual(found, { ok: true, remote: 'origin' });
+        const missing = await findRemote({ runner: setup.runner }, setup.git, setup.clone, REPO);
+        assert.ok(!missing.ok);
+        git(setup, ['remote', 'set-url', 'origin', 'https://github.com/o/r.git']);
+        const other = await findRemote({ runner: setup.runner }, setup.git, setup.clone, enterprise);
+        assert.ok(!other.ok);
+        assert.ok(other.reason.includes('git remote add NAME https://git.example.com/o/r.git'), other.reason);
     });
 
     await test('a matching remote with a foreign push target is refused', async (t) => {
         const setup = gitSetup(await makeEnv(t), 'git');
         git(setup, ['remote', 'set-url', '--push', 'origin', 'https://github.com/o/other.git']);
-        const found = await findRemote({ runner: setup.runner }, setup.git, setup.clone, 'o', 'r');
+        const found = await findRemote({ runner: setup.runner }, setup.git, setup.clone, REPO);
         assert.deepEqual(found, { ok: false, reason: PUSH_REFUSAL });
     });
 });
@@ -157,7 +205,7 @@ await describe('findRemote', async () => {
 await describe('verifyRemote', async () => {
     await test('the plain clone verifies', async (t) => {
         const setup = gitSetup(await makeEnv(t), 'git');
-        assert.deepEqual(await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', 'o', 'r'), {
+        assert.deepEqual(await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', REPO), {
             ok: true,
         });
     });
@@ -178,7 +226,7 @@ await describe('verifyRemote', async () => {
             for (const args of commands) {
                 git(setup, args);
             }
-            const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', 'o', 'r');
+            const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', REPO);
             assert.deepEqual(verified, { ok: false, reason: PUSH_REFUSAL }, JSON.stringify(commands));
         }
     });
@@ -187,7 +235,7 @@ await describe('verifyRemote', async () => {
         const setup = gitSetup(await makeEnv(t), 'git');
         git(setup, ['config', 'url.git@github.com:.insteadOf', 'https://github.com/']);
         assert.equal(git(setup, ['remote', 'get-url', '--push', 'origin']), 'git@github.com:o/r.git');
-        const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', 'o', 'r');
+        const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', REPO);
         assert.deepEqual(verified, { ok: true });
     });
 
@@ -204,7 +252,7 @@ await describe('verifyRemote', async () => {
             for (const args of commands) {
                 git(setup, args);
             }
-            const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', 'o', 'r');
+            const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', REPO);
             assert.deepEqual(verified, { ok: false, reason: URL_REFUSAL }, JSON.stringify(commands));
         }
     });
@@ -213,13 +261,13 @@ await describe('verifyRemote', async () => {
         const setup = gitSetup(await makeEnv(t), 'git');
         git(setup, ['config', '--add', 'remote.origin.pushurl', '']);
         git(setup, ['config', '--add', 'remote.origin.pushurl', 'https://github.com/o/r.git']);
-        const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', 'o', 'r');
+        const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'origin', REPO);
         assert.deepEqual(verified, { ok: false, reason: PUSH_REFUSAL });
     });
 
     await test('a missing remote is not found', async (t) => {
         const setup = gitSetup(await makeEnv(t), 'git');
-        const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'upstream', 'o', 'r');
+        const verified = await verifyRemote({ runner: setup.runner }, setup.git, setup.clone, 'upstream', REPO);
         assert.deepEqual(verified, { ok: false, reason: 'remote upstream not found' });
     });
 });

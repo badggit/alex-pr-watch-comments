@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { sessionGh } from './gh.ts';
 import { lookupComments } from './githubLookup.ts';
 import { getNumber } from './json.ts';
 import { adoptWorktreeLock, worktreeLockHolder } from './locks.ts';
@@ -53,7 +54,7 @@ async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promis
 async function closeComments(deps: Deps, session: Session, record: RunRecord, stop?: AbortSignal): Promise<void> {
     const looked = await lookupComments(
         deps,
-        session.tools.gh,
+        sessionGh(session),
         record.comments.map((comment) => comment.nodeId)
     );
     if (looked.kind !== 'ok') {

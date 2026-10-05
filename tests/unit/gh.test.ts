@@ -5,7 +5,7 @@ import { classifyGhFailure, ghCommand, ghGraphql } from '../../src/gh.ts';
 import { getRecord, parseJson } from '../../src/json.ts';
 import type { CommandRequest, CommandResult, CommandRunner } from '../../src/types.ts';
 
-const GH = '/opt/fake/bin/gh';
+const GH = { path: '/opt/fake/bin/gh', host: 'github.com' };
 
 interface FakeRunner {
     runner: CommandRunner;
@@ -40,7 +40,7 @@ await describe('ghGraphql', async () => {
             number: 12,
         });
         const request = onlyRequest(fake);
-        assert.equal(request.file, GH);
+        assert.equal(request.file, GH.path);
         assert.deepEqual(request.args, ['api', 'graphql', '--hostname', 'github.com', '--input', '-']);
         const body = parseJson(request.input ?? '');
         assert.deepEqual(body, { query: 'query PrwcPoll { viewer { login } }', variables: { owner: 'o', number: 12 } });
@@ -105,7 +105,7 @@ await describe('ghCommand', async () => {
         const args = ['auth', 'status', '--hostname', 'github.com'];
         const result = await ghCommand({ runner: fake.runner }, GH, args);
         const request = onlyRequest(fake);
-        assert.equal(request.file, GH);
+        assert.equal(request.file, GH.path);
         assert.deepEqual(request.args, args);
         assert.deepEqual(result, { kind: 'ok', data: undefined });
     });

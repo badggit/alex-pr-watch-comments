@@ -39,8 +39,10 @@ export interface Deps {
     sleep(_ms: number, _signal?: AbortSignal): Promise<void>;
 }
 
-// owner and repo are lowercased; prUrl is https://github.com/OWNER/REPO/pull/N; prKey is OWNER+REPO+N.
+// host, owner and repo are lowercased; prUrl is https://HOST/OWNER/REPO/pull/N. prKey is OWNER+REPO+N on
+// github.com (the key state written before other hosts were supported) and HOST+OWNER+REPO+N on any other host.
 export interface PrRef {
+    host: string;
     owner: string;
     repo: string;
     number: number;
@@ -153,7 +155,7 @@ export interface TmuxContext {
     windowId: string;
 }
 
-// ghEnv holds exactly two NAME=VALUE items in this order: GH_CONFIG_DIR=EFFECTIVE and GH_HOST=github.com.
+// ghEnv holds exactly two NAME=VALUE items in this order: GH_CONFIG_DIR=EFFECTIVE and GH_HOST=PR_HOST.
 // stateDir is the canonical state directory once initState accepted it.
 export interface Session {
     pr: PrRef;

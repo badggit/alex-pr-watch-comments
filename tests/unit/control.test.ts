@@ -47,7 +47,14 @@ const FIXTURES = path.resolve(import.meta.dirname, '..', 'fixtures');
 const MAIN_TS = path.resolve(import.meta.dirname, '..', '..', 'src', 'main.ts');
 const ENTRY = { node: process.execPath, mainTs: MAIN_TS };
 const PR_KEY = 'o+r+12';
-const PR: PrRef = { owner: 'o', repo: 'r', number: 12, prUrl: 'https://github.com/o/r/pull/12', prKey: PR_KEY };
+const PR: PrRef = {
+    host: 'github.com',
+    owner: 'o',
+    repo: 'r',
+    number: 12,
+    prUrl: 'https://github.com/o/r/pull/12',
+    prKey: PR_KEY,
+};
 const BRANCH = 'feature';
 const TMUX_FORMAT = '#{session_id} #{window_id}';
 const LOCK_SOCKET = '/tmp/tmux_dir/default';
@@ -522,7 +529,7 @@ await describe('background start', async () => {
     await test('another GH_HOST is refused before any gh call', async (t) => {
         const setup = await makeSetup(t, { env: { GH_HOST: 'ghe.example.invalid' } });
         assert.equal(await startBackground(setup), 1);
-        assert.ok(setup.deps.outText().includes('only with github.com'), printed(setup));
+        assert.ok(setup.deps.outText().includes('another host than the PR host github.com'), printed(setup));
         assert.equal(newWindows(setup).length, 0);
         assert.equal(setup.fake.calls('gh').length, 0);
     });

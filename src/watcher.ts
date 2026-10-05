@@ -1,5 +1,6 @@
 import { DEFAULT_RATE_RESERVE, DEFAULT_READY_WAIT, DEFAULT_RUN_CHECK, ENV_NAMES } from './constants.ts';
 import { dispatch, resumeDispatch, retryLockRelease, type DispatchResult } from './dispatch.ts';
+import { sessionGh } from './gh.ts';
 import { lookupComments, react } from './githubLookup.ts';
 import { pollPr } from './githubPoll.ts';
 import { launchReady, readLaunchResult, writeLaunchResult } from './launchChannel.ts';
@@ -253,7 +254,7 @@ function retryPendingLock(deps: Deps, session: Session, rt: WatcherRuntime): voi
 }
 
 async function refuseEdited(deps: Deps, session: Session, entry: LookupEntry): Promise<void> {
-    const removed = await react(deps, session.tools.gh, 'remove', entry.nodeId, 'ROCKET');
+    const removed = await react(deps, sessionGh(session), 'remove', entry.nodeId, 'ROCKET');
     if (removed.kind === 'ok') {
         deps.log.info(`comment ${entry.dbId} was edited after approval; add the rocket again to approve the new text`);
         return;
@@ -396,7 +397,7 @@ async function checkInflight(
 ): Promise<CheckResult> {
     let lookup = emptyLookup();
     if (inflight.nodeIds.length > 0) {
-        const looked = await lookupComments(deps, session.tools.gh, inflight.nodeIds);
+        const looked = await lookupComments(deps, sessionGh(session), inflight.nodeIds);
         if (looked.kind !== 'ok') {
             return { kind: 'ended', outcome: failedFetch(deps, session, rt, ctx.stop, looked, ctx.suspended) };
         }
@@ -421,10 +422,11 @@ async function pollTick(
     next: { inflight: Inflight | undefined; idleReason: string },
     ctx: TickContext
 ): Promise<TickOutcome> {
-    const { stateDir, pr, tools } = session;
+    const { stateDir, pr } = session;
+    const gh = sessionGh(session);
     const { inflight } = next;
     const { stop } = ctx;
-    const polled = await pollPr(deps, tools.gh, pr);
+    const polled = await pollPr(deps, gh, pr);
     if (polled.kind !== 'ok') {
         return failedFetch(deps, session, rt, stop, polled, ctx.suspended);
     }
@@ -443,7 +445,7 @@ async function pollTick(
     const ids = lookupIds(poll, inflight?.kind === 'preparing' ? inflightIds : []);
     let lookup = emptyLookup();
     if (ids.length > 0) {
-        const looked = await lookupComments(deps, tools.gh, ids);
+        const looked = await lookupComments(deps, gh, ids);
         if (looked.kind !== 'ok') {
             return failedFetch(deps, session, rt, stop, looked, ctx.suspended);
         }

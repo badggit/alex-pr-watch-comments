@@ -26,7 +26,7 @@ function errorMessage(argv: readonly string[]): string {
 
 await describe('parsePrUrl', async () => {
     await test('URL variants parse to the same PrRef', () => {
-        const expected = { owner: 'o', repo: 'r', number: 12, prUrl: PR_URL, prKey: 'o+r+12' };
+        const expected = { host: 'github.com', owner: 'o', repo: 'r', number: 12, prUrl: PR_URL, prKey: 'o+r+12' };
         for (const variant of [PR_URL, `${PR_URL}/files`, `${PR_URL}#discussion_r99`, `${PR_URL}?x=1`]) {
             assert.deepEqual(parsePrUrl(variant), expected, variant);
         }
@@ -43,9 +43,24 @@ await describe('parsePrUrl', async () => {
         assert.equal(upper.repo, 'repo');
     });
 
-    await test('foreign hosts, bad numbers and bad names are rejected', () => {
+    await test('a GitHub Enterprise Server URL keeps its host in the identity', () => {
+        const pr = parsePrUrl('https://Git.Example.com/Owner/Repo/pull/7/files');
+        assert.deepEqual(pr, {
+            host: 'git.example.com',
+            owner: 'owner',
+            repo: 'repo',
+            number: 7,
+            prUrl: 'https://git.example.com/owner/repo/pull/7',
+            prKey: 'git.example.com+owner+repo+7',
+        });
+    });
+
+    await test('malformed hosts, bad numbers and bad names are rejected', () => {
         for (const bad of [
-            'https://gitlab.com/o/r/pull/1',
+            'https://localhost/o/r/pull/1',
+            'https://git.example.com:8443/o/r/pull/1',
+            'https://user@github.com/o/r/pull/1',
+            'https://-git.example.com/o/r/pull/1',
             'https://github.com/o/r/pull/x',
             'https://github.com/o/re%20po/pull/1',
             'https://github.com/o/r/pull/0',
@@ -145,7 +160,7 @@ await describe('parseArgs', async () => {
         assert.equal(errorMessage([PR_URL, '--background', '--once']), '--once cannot be combined with --background');
         assert.match(errorMessage([]), /PR URL/u);
         assert.match(errorMessage(['--background']), /PR URL/u);
-        assert.match(errorMessage(['https://gitlab.com/o/r/pull/1']), /invalid PR URL/u);
+        assert.match(errorMessage(['https://localhost/o/r/pull/1']), /invalid PR URL/u);
         assert.match(errorMessage(['--stop', 'https://github.com/o/r/pull/x']), /invalid PR URL/u);
         assert.match(errorMessage([PR_URL, 'https://github.com/o/r/pull/13']), /unexpected argument/u);
     });

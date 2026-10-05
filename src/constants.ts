@@ -6,6 +6,7 @@ export const STATE_FORMAT = 1;
 // Format 2 holds a batch of comments per run; a format 1 record (one comment) reads as unreadable.
 export const RECORD_FORMAT = 2;
 
+// The public GitHub host; GitHub Enterprise Server hosts come from the PR URL.
 export const GITHUB_HOST = 'github.com';
 
 // Marks every inline reply the worker posts, on its own last line.

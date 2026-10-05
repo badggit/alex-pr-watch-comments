@@ -1,15 +1,19 @@
-import { GITHUB_HOST } from './constants.ts';
 import { isRecord, parseJson } from './json.ts';
-import type { CommandResult, Deps, GhFailure, GhResult } from './types.ts';
+import type { CommandResult, Deps, GhFailure, GhResult, Session } from './types.ts';
 import { isValidNodeId } from './validate.ts';
 
 export type GhDeps = Pick<Deps, 'runner'>;
+
+// The gh executable plus the host every call goes to: github.com or the GitHub Enterprise Server host of the PR.
+export interface GhCli {
+    path: string;
+    host: string;
+}
 
 const MESSAGE_LIMIT = 500;
 const AUTH_MARKERS: readonly string[] = ['HTTP 401', 'Bad credentials', 'gh auth login'];
 const GONE_MARKER = 'Could not resolve to a node with the global id of';
 const GONE_ID = /global id of '([^']*)'/gu;
-const GRAPHQL_ARGS: readonly string[] = ['api', 'graphql', '--hostname', GITHUB_HOST, '--input', '-'];
 
 // The message is the trimmed, truncated stderr and is not sanitized: callers that display it use safeText.
 export function classifyGhFailure(stderr: string): GhFailure {
@@ -38,14 +42,19 @@ function commandFailure(result: CommandResult): GhFailure {
     return { ...failure, message };
 }
 
+export function sessionGh(session: Session): GhCli {
+    return { path: session.tools.gh, host: session.pr.host };
+}
+
 export async function ghGraphql(
     deps: GhDeps,
-    ghPath: string,
+    gh: GhCli,
     query: string,
     variables: Readonly<Record<string, unknown>>
 ): Promise<GhResult> {
     const input = JSON.stringify({ query, variables });
-    const result = await deps.runner.run({ file: ghPath, args: GRAPHQL_ARGS, input });
+    const args = ['api', 'graphql', '--hostname', gh.host, '--input', '-'];
+    const result = await deps.runner.run({ file: gh.path, args, input });
     if (result.code !== 0) {
         return commandFailure(result);
     }
@@ -56,9 +65,9 @@ export async function ghGraphql(
     return { kind: 'ok', data: parsed.data };
 }
 
-// For non-graphql calls; the caller passes the full argument list, including --hostname github.com.
-export async function ghCommand(deps: GhDeps, ghPath: string, args: readonly string[]): Promise<GhResult> {
-    const result = await deps.runner.run({ file: ghPath, args });
+// For non-graphql calls; the caller passes the full argument list, including --hostname with gh.host.
+export async function ghCommand(deps: GhDeps, gh: GhCli, args: readonly string[]): Promise<GhResult> {
+    const result = await deps.runner.run({ file: gh.path, args });
     if (result.code !== 0) {
         return commandFailure(result);
     }
