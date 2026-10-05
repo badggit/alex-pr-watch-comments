@@ -5,11 +5,13 @@ import { DEFAULT_STOP_QUIET, ENV_NAMES, GH_TOKEN_VARS, GITHUB_HOST, PS_PATH } fr
 import { ghCommand, type GhCli } from './gh.ts';
 import { fetchPrInfo } from './githubPoll.ts';
 import { currentBranch, findRemote, gitIn } from './guards.ts';
+import { syncIgnoredLinks } from './ignoredLinks.ts';
 import { getArray, getRecord } from './json.ts';
 import { readJsonFile, resolveStateDir, worktreeKey } from './stateStore.ts';
 import { parseTmuxEnv, tmuxInit } from './tmuxControl.ts';
-import type { CliOptions, Deps, Env, PrInfo, PrRef, Session, TmuxContext, ToolPaths } from './types.ts';
+import type { CliOptions, Deps, Env, PrInfo, PrRef, Session, TmuxContext, ToolPaths, WatchWorktree } from './types.ts';
 import { isSafeAbsPath, isSafeRunPath, isValidBranch, isValidName, readEnvSeconds, safeText } from './validate.ts';
+import { prepareWatchWorktree } from './watchWorktree.ts';
 
 export type PreflightDeps = Pick<Deps, 'runner' | 'env' | 'log'>;
 
@@ -266,7 +268,8 @@ async function checkPr(deps: PreflightDeps, gh: GhCli, pr: PrRef): Promise<Check
     return { ok: true, value: info };
 }
 
-async function checkCheckout(
+// The clone the watcher was started for: a git working tree with a verified remote for the PR head repository.
+async function checkClone(
     deps: PreflightDeps,
     gitPath: string,
     dir: string,
@@ -291,12 +294,63 @@ async function checkCheckout(
     if (!found.ok) {
         return found;
     }
-    const branch = await currentBranch(deps, gitPath, dirCanon);
+    return { ok: true, value: { dirCanon, toplevel, remote: found.remote } };
+}
+
+async function checkCheckout(
+    deps: PreflightDeps,
+    gitPath: string,
+    dir: string,
+    pr: PrRef,
+    info: PrInfo
+): Promise<Checked<Checkout>> {
+    const clone = await checkClone(deps, gitPath, dir, pr, info);
+    if (!clone.ok) {
+        return clone;
+    }
+    const branch = await currentBranch(deps, gitPath, clone.value.dirCanon);
     if (branch !== info.headRef) {
         const shown = branch === undefined ? 'a detached HEAD' : safeText(branch);
         return refuse(`${shown} is checked out, not ${info.headRef} (switch with: gh pr checkout ${pr.number})`);
     }
-    return { ok: true, value: { dirCanon, toplevel, remote: found.remote } };
+    return clone;
+}
+
+// The watch worktree next to the clone, created when missing, checked like an in-place clone and with the clone's
+// ignored paths linked into it.
+async function checkWorktree(
+    deps: PreflightDeps,
+    gitPath: string,
+    dir: string,
+    pr: PrRef,
+    info: PrInfo
+): Promise<Checked<{ checkout: Checkout; worktree: WatchWorktree }>> {
+    const clone = await checkClone(deps, gitPath, dir, pr, info);
+    if (!clone.ok) {
+        return clone;
+    }
+    const prepared = await prepareWatchWorktree(deps, {
+        gitPath,
+        sourceToplevel: clone.value.toplevel,
+        prNumber: pr.number,
+        remote: clone.value.remote,
+        branch: info.headRef,
+    });
+    if (!prepared.ok) {
+        return prepared;
+    }
+    const { worktree } = prepared;
+    if (prepared.created) {
+        deps.log.warn(
+            `created the watch worktree ${safeText(worktree.path)}: if Claude Code has not trusted it yet, run claude there once and accept the folder trust dialog`
+        );
+    }
+    const checkout = await checkCheckout(deps, gitPath, worktree.path, pr, info);
+    if (!checkout.ok) {
+        return checkout;
+    }
+    await syncIgnoredLinks(deps, gitPath, worktree.source, worktree.path);
+    return { ok: true, value: { checkout: checkout.value, worktree } };
 }
 
 function warnStopHooks(deps: PreflightDeps, toplevel: string): void {
@@ -311,7 +365,8 @@ function warnStopHooks(deps: PreflightDeps, toplevel: string): void {
     );
 }
 
-// Start-up checks in a fixed order, first failure wins; nothing here changes anything on GitHub or in the clone.
+// Start-up checks in a fixed order, first failure wins. Nothing here changes anything on GitHub or in the owner's
+// working tree; outside --in-place mode it creates or reuses the watch worktree and links ignored paths into it.
 export async function preflight(
     deps: PreflightDeps,
     options: CliOptions,
@@ -349,11 +404,22 @@ export async function preflight(
     if (!info.ok) {
         return info;
     }
-    const checkout = await checkCheckout(deps, tools.value.git, dir, pr, info.value);
-    if (!checkout.ok) {
-        return checkout;
+    let checkout: Checkout;
+    let worktree: WatchWorktree | undefined;
+    if (options.inPlace) {
+        const inPlace = await checkCheckout(deps, tools.value.git, dir, pr, info.value);
+        if (!inPlace.ok) {
+            return inPlace;
+        }
+        checkout = inPlace.value;
+    } else {
+        const prepared = await checkWorktree(deps, tools.value.git, dir, pr, info.value);
+        if (!prepared.ok) {
+            return prepared;
+        }
+        ({ checkout, worktree } = prepared.value);
     }
-    const { dirCanon, toplevel, remote } = checkout.value;
+    const { dirCanon, toplevel, remote } = checkout;
     const workerPath = normalizeCallerPath(callerPath, [toplevel]);
     if (workerPath !== callerPath) {
         const recheck = resolveTools(options, cwd, workerPath, nodePath, psPath);
@@ -385,6 +451,7 @@ export async function preflight(
             batchMax: options.batchMax,
             claudeArgs: options.claudeArgs,
             once: options.once,
+            ...(worktree === undefined ? {} : { worktree }),
         },
     };
 }

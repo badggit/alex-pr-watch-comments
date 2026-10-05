@@ -408,7 +408,7 @@ function printed(setup: Setup): string {
     return `${setup.deps.outText()}\n${setup.deps.logLines.join('\n')}`;
 }
 
-function cliOptions(setup: Setup, once: boolean): CliOptions {
+function cliOptions(setup: Setup, once: boolean, inPlace = true): CliOptions {
     return {
         mode: 'watch',
         pr: PR,
@@ -419,11 +419,12 @@ function cliOptions(setup: Setup, once: boolean): CliOptions {
         keepPanes: 5,
         batchMax: 5,
         once,
+        inPlace,
     };
 }
 
-function startWatch(setup: Setup, once: boolean, stop = NEVER): Promise<number> {
-    return runWatch(setup.deps, cliOptions(setup, once), setup.testEnv.root, process.execPath, stop);
+function startWatch(setup: Setup, once: boolean, stop = NEVER, inPlace = true): Promise<number> {
+    return runWatch(setup.deps, cliOptions(setup, once, inPlace), setup.testEnv.root, process.execPath, stop);
 }
 
 async function within<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMEOUT> {
@@ -837,6 +838,18 @@ await describe('runWatch', async () => {
         assert.equal(await startWatch(setup, true), 0);
         assert.equal(statusOf(setup).state, 'exited');
         assert.equal(fs.existsSync(prLockDir(setup)), false);
+    });
+
+    await test('once: a merged pull request removes the clean watch worktree', async (t) => {
+        const setup = await makeSetup(t);
+        const clone = fs.realpathSync.native(setup.clone);
+        gitSync(setup.testEnv.env, ['-C', clone, 'checkout', '--quiet', 'main']);
+        respondPoll(setup, [], { state: 'MERGED', remaining: 100, resetAt: setup.now + 900 });
+        assert.equal(await startWatch(setup, true, NEVER, false), 0, printed(setup));
+        const worktree = path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12');
+        assert.ok(printed(setup).includes(`created the watch worktree ${worktree}`), printed(setup));
+        assert.ok(printed(setup).includes(`removed the watch worktree ${worktree}`), printed(setup));
+        assert.equal(fs.existsSync(worktree), false);
     });
 
     await test('a launch that is never confirmed is fatal without any gh call', async (t) => {

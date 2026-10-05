@@ -62,6 +62,7 @@ export interface CliOptions {
     keepPanes: number;
     batchMax: number;
     once: boolean;
+    inPlace: boolean;
 }
 
 // resetAt is in epoch seconds.
@@ -157,6 +158,15 @@ export interface TmuxContext {
 
 // ghEnv holds exactly two NAME=VALUE items in this order: GH_CONFIG_DIR=EFFECTIVE and GH_HOST=PR_HOST.
 // stateDir is the canonical state directory once initState accepted it.
+// The watcher's own linked worktree on the PR head branch. source is another working tree of the same repository:
+// the owner's clone, whose ignored paths are linked into the worktree; it equals path only when no other working
+// tree exists, and then nothing is linked.
+export interface WatchWorktree {
+    path: string;
+    source: string;
+}
+
+// worktree is undefined in --in-place mode, where the owner's clone is the working tree.
 export interface Session {
     pr: PrRef;
     viewer: string;
@@ -177,6 +187,7 @@ export interface Session {
     batchMax: number;
     claudeArgs: string[];
     once: boolean;
+    worktree?: WatchWorktree;
 }
 
 export type GuardResult = { ok: true; headSha: string } | { ok: false; reason: string; hint: string };

@@ -109,9 +109,13 @@ function respondPoll(setup: Setup, response: FakeResponse): void {
 }
 
 function startWatcher(setup: Setup, args: readonly string[], url = PR_URL, clone = setup.clone): ObservedProcess {
-    const watcher = setup.testEnv.spawnObserved(process.execPath, [DRIVER, url, '--dir', clone, ...args], {
-        cwd: setup.testEnv.root,
-    });
+    const watcher = setup.testEnv.spawnObserved(
+        process.execPath,
+        [DRIVER, url, '--in-place', '--dir', clone, ...args],
+        {
+            cwd: setup.testEnv.root,
+        }
+    );
     setup.watchers.push(watcher);
     return watcher;
 }

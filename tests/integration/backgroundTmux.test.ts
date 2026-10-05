@@ -240,7 +240,7 @@ async function runEntry(fixture: Fixture, args: readonly string[], env: Env): Pr
 }
 
 function startArgs(fixture: Fixture, url = PR_URL): string[] {
-    return [url, '--background', '--dir', fixture.clone, '--interval', '300'];
+    return [url, '--background', '--in-place', '--dir', fixture.clone, '--interval', '300'];
 }
 
 function both(result: ObservedResult): string {
@@ -449,7 +449,7 @@ await describe('background start on a real isolated tmux server', async () => {
         fs.renameSync(fixture.clone, dir);
         stubRespond(fixture.testEnv.stubDir, 'gh', 'PrwcPoll', { json: POLL_OPEN });
         const claudeArgs = ['value;', String.raw`a\;`, ';', 'value;'];
-        const args = [PR_URL, '--background', '--dir', dir, '--interval', '300'];
+        const args = [PR_URL, '--background', '--in-place', '--dir', dir, '--interval', '300'];
         const started = await runEntry(
             fixture,
             [...args, ...claudeArgs.flatMap((arg) => ['--claude-arg', arg])],

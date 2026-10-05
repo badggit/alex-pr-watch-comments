@@ -19,7 +19,7 @@ import {
     type Passthrough,
     type RecordedCall,
 } from '../support/fakeRunner.ts';
-import { makePrClone, offlineGitRunner } from '../support/gitRepo.ts';
+import { gitSync, makePrClone, offlineGitRunner } from '../support/gitRepo.ts';
 import { createTestEnv, waitUntil, type TestDeps, type TestEnv } from '../support/testEnv.ts';
 
 interface SetupOptions {
@@ -149,7 +149,7 @@ function slowCalls(
     };
 }
 
-function bgOptions(setup: Setup, claudeArgs: string[] = []): CliOptions {
+function bgOptions(setup: Setup, claudeArgs: string[] = [], inPlace = true): CliOptions {
     return {
         mode: 'background',
         pr: PR,
@@ -160,6 +160,7 @@ function bgOptions(setup: Setup, claudeArgs: string[] = []): CliOptions {
         keepPanes: 5,
         batchMax: 5,
         once: false,
+        inPlace,
     };
 }
 
@@ -174,11 +175,12 @@ function stopOptions(pr = PR): CliOptions {
         keepPanes: 5,
         batchMax: 5,
         once: false,
+        inPlace: true,
     };
 }
 
-function startBackground(setup: Setup, claudeArgs?: string[]): Promise<number> {
-    return runBackground(setup.deps, bgOptions(setup, claudeArgs), setup.testEnv.root, ENTRY);
+function startBackground(setup: Setup, claudeArgs?: string[], inPlace = true): Promise<number> {
+    return runBackground(setup.deps, bgOptions(setup, claudeArgs, inPlace), setup.testEnv.root, ENTRY);
 }
 
 function envItems(call: RecordedCall): string[] {
@@ -430,7 +432,23 @@ await describe('background start', async () => {
         const argIndex = call.args.indexOf('two words');
         assert.equal(call.args[argIndex - 1], '--claude-arg');
         assert.equal(call.args[call.args.indexOf('--model') - 1], '--claude-arg');
+        assert.equal(call.args[call.args.indexOf('--dir') + 1], fs.realpathSync.native(setup.clone));
+        assert.ok(call.args.includes('--in-place'));
         assert.deepEqual(launchFiles(setup), []);
+    });
+
+    await test('a worktree start passes the clone, not the worktree, and no --in-place', async (t) => {
+        const setup = await makeSetup(t);
+        gitSync(setup.testEnv.env, ['-C', setup.clone, 'checkout', '--quiet', 'main']);
+        answerAtOnce(setup, 'firstPoll');
+        assert.equal(await startBackground(setup, [], false), 0, printed(setup));
+        const call = onlyWindow(setup);
+        const clone = fs.realpathSync.native(setup.clone);
+        assert.equal(call.args[call.args.indexOf('--dir') + 1], clone);
+        assert.ok(!call.args.includes('--in-place'));
+        const worktree = path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12');
+        assert.equal(gitSync(setup.testEnv.env, ['-C', worktree, 'branch', '--show-current']).trim(), BRANCH);
+        assert.ok(printed(setup).includes(`created the watch worktree ${worktree}`), printed(setup));
     });
 
     await test('a failing remain-on-exit option exits 1 without a ready marker', async (t) => {

@@ -32,6 +32,7 @@ import type {
 } from './types.ts';
 import { visibleText } from './untrustedText.ts';
 import { readEnvSeconds, safeText } from './validate.ts';
+import { removeWatchWorktree } from './watchWorktree.ts';
 
 type TickOutcome = 'ok' | 'transient' | 'fatal' | 'prClosed' | 'stopped';
 
@@ -601,6 +602,7 @@ async function watchLoop(deps: Deps, session: Session, rt: WatcherRuntime, stop:
             }
             case 'prClosed': {
                 publishLaunch(deps.log, stateDir, pr.prKey, rt, 'fatal', rt.endMessage);
+                await removeWatchWorktree(deps, session);
                 return 0;
             }
             case 'stopped': {

@@ -145,7 +145,8 @@ function watcherCommand(session: Session, entry: BackgroundEntry): string[] {
         entry.mainTs,
         session.pr.prUrl,
         '--dir',
-        session.dirCanon,
+        session.worktree?.source ?? session.dirCanon,
+        ...(session.worktree === undefined ? ['--in-place'] : []),
         '--interval',
         String(session.interval),
         '--keep-panes',
@@ -309,6 +310,7 @@ function livenessSuffix(stateDir: string, prKey: string): string {
     return lockPresent(stateDir, prKey) ? ' lock=unreadable' : ' dead';
 }
 
+// dir is the working tree the watcher works in: the watch worktree, or the clone in --in-place mode.
 function watcherLine(stateDir: string, prKey: string, now: number): string {
     const label = prLabel(prKey);
     const suffix = livenessSuffix(stateDir, prKey);
@@ -316,6 +318,7 @@ function watcherLine(stateDir: string, prKey: string, now: number): string {
     if (status === undefined) {
         return `${label} state=unknown${suffix}\n`;
     }
+    const dir = readPrLockOwner(stateDir, prKey)?.dir;
     const fields = [
         `state=${status.state}`,
         `age=${ageText(now, status.since)}`,
@@ -323,6 +326,7 @@ function watcherLine(stateDir: string, prKey: string, now: number): string {
         `hint=${safeText(status.hint)}`,
         `comments=${safeText(status.comments)}`,
         `last_error=${safeText(status.lastError)}`,
+        ...(dir === undefined ? [] : [`dir=${safeText(dir)}`]),
     ];
     return `${label} ${fields.join(' ')}${suffix}\n`;
 }

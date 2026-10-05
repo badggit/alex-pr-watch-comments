@@ -6,10 +6,10 @@ Leave comments on lines of the PR diff, approve them with a `rocket` reaction, a
 
 ## How it works
 
-1. You start the watcher for one PR from a tmux session, for a local clone of the PR's repository with the PR branch checked out.
+1. You start the watcher for one PR from a tmux session, for a local clone of the PR's repository. The watcher works in its own git worktree next to that clone, on the PR branch, so your clone stays yours: keep working in it on any other branch. See [Watch worktree](#watch-worktree).
 2. Every 2 minutes (`--interval`, default 120 seconds) the watcher reads the PR's inline review threads with `gh`.
 3. A comment is picked up when it carries a `rocket` reaction added by you, the account `gh` is logged in as. Only inline review comments (comments on the diff) count; general PR comments (the "Conversation" tab) are ignored. All comments approved at that moment go into one run as a batch, oldest rocket first, at most `--batch-max` (default 5) of them; the rest wait for the next batch. One run at a time.
-4. The watcher checks the clone, saves the text of every approved comment, replaces each of your `rocket` reactions with `eyes`, opens a new pane in the watcher's window and starts `claude` there. The task is passed as claude's initial prompt on the command line; nothing is typed into the pane. Claude first checks that the clone is still on the PR head branch and reads the project instructions (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `AGENTS.local.md` in the project directory, where they exist; the run's own rules win over them). Then it works through the comments in order, one at a time:
+4. The watcher checks its worktree, saves the text of every approved comment, replaces each of your `rocket` reactions with `eyes`, opens a new pane in the watcher's window and starts `claude` there. The task is passed as claude's initial prompt on the command line; nothing is typed into the pane. Claude first checks that the worktree is still on the PR head branch and reads the project instructions (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `AGENTS.local.md` in the worktree, where they exist; the run's own rules win over them). Then it works through the comments in order, one at a time:
     - reads the comment and decides whether the code needs a change;
     - if it does, fixes the code, commits only that change and pushes to the PR branch, so every comment gets its own commit;
     - replies to the comment inline, in the same thread, ending the reply with the tag `#alex-pr-watch-comments` on its own last line;
@@ -49,10 +49,10 @@ If your Claude Code settings define their own Stop hooks, a hook that runs longe
 
 - Node.js 22.18 or newer. On the 23 line, 23.6 or newer is needed. The plugin runs its TypeScript directly with Node's built-in type stripping: there is no build step and no `npm install`. The launcher accepts only release versions (`MAJOR.MINOR.PATCH`, no pre-release strings).
 - [tmux](https://github.com/tmux/tmux) 3.0 or newer. The watcher runs inside a tmux session, because it opens new panes there.
-- `git`, and a local clone of the repository with the PR branch checked out.
+- `git` 2.29 or newer, and a local clone of the repository. Without `--in-place`, the PR branch must not be checked out in it, see [Watch worktree](#watch-worktree).
 - [GitHub CLI](https://cli.github.com/) (`gh`), logged in to the PR's host with `gh auth login` (for GitHub Enterprise Server: `gh auth login --hostname HOST`) and with push access to the PR branch.
 - [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) (`claude`) on your `PATH`, or given with `--claude`.
-- The project directory trusted in Claude Code, see [Trust and permissions](#trust-and-permissions).
+- The watch worktree trusted in Claude Code once, see [Trust and permissions](#trust-and-permissions).
 - macOS is the main target. Linux works too.
 
 ## Installation
@@ -88,7 +88,7 @@ The skill is a thin wrapper. It runs exactly one command and shows its output:
 - `list` runs `alex-pr-watch-comments --list`;
 - `stop PR_URL` runs `alex-pr-watch-comments --stop PR_URL`.
 
-The skill has no `--dir`: the watcher uses the directory Claude Code runs in, so for a [dedicated clone](#shared-clone) start Claude Code there.
+The skill has no `--dir` and no `--in-place`: the watcher uses the directory Claude Code runs in as the clone and always works in the [watch worktree](#watch-worktree).
 
 ### Console use
 
@@ -131,7 +131,8 @@ alex-pr-watch-comments --help                           show this help
 | `--background`       | Start the watcher in a detached window of the current tmux session and return once its first poll succeeded. Cannot be combined with `--list`, `--stop` or `--once`.                          |
 | `--list`             | List watchers and runs. Takes no PR URL. Needs no tmux.                                                                                                                                       |
 | `--stop PR_URL`      | Stop the watcher of a PR. Needs no tmux session of its own.                                                                                                                                   |
-| `--dir PATH`         | Project directory, default: the current directory.                                                                                                                                            |
+| `--dir PATH`         | Your clone of the repository, default: the current directory.                                                                                                                                 |
+| `--in-place`         | Work in the clone itself, on its checked-out PR branch, instead of the watch worktree. See [Working tree checks](#working-tree-checks).                                                       |
 | `--interval SECONDS` | How often the PR is read for new rockets, a whole number from 1 to 86400, default 120.                                                                                                        |
 | `--claude PATH`      | The claude executable, default: `claude` found on `PATH` at start.                                                                                                                            |
 | `--claude-arg ARG`   | One extra argument for claude, repeatable, passed literally as its own argument (never through a shell). A value cannot contain a newline. An argument ending in `;` is passed literally too. |
@@ -188,22 +189,32 @@ When a `--background` start fails after the window was created, the window stays
 
 `--stop` sends the watcher a TERM signal only after it checked that the recorded process is still the same one (its start time matches). It never signals a process it could not verify, never kills a running worker or its pane, and never touches the clone or a run record. If the stopped watcher ran in a background window, that window is closed once its pane has exited.
 
-## Shared clone
+## Watch worktree
 
-The watcher and its runs work in your clone, the one given by `--dir`:
+By default the watcher does not work in your clone. It works in its own git worktree next to it:
 
-- The clone must have the PR head branch checked out (`gh pr checkout NUMBER`), and it needs a remote for the PR head repository. The fetch and push destinations of that remote, after any `insteadOf` or `pushInsteadOf` rewrite, must all name that same repository on the PR's host (`https://HOST/OWNER/REPO.git`, `ssh://git@HOST/OWNER/REPO.git` or `git@HOST:OWNER/REPO.git`). Anything else is refused.
+- The worktree is `alex-pr-watch-comments-pr-NUMBER` in the directory that holds your clone (`--dir`, default: the current directory), on the PR head branch. The watcher creates it at start with `git worktree add`, or reuses it when it is already there. When your clone has no local branch for the PR yet, it is created from the remote branch, with tracking.
+- Your clone can be on any other branch, with any changes: the watcher never touches its working tree, its index or its `FETCH_HEAD`. Git allows a branch in one working tree only, so the start refuses while the PR branch is checked out in your clone or in another worktree. Switch that one to another branch first.
+- The start also refuses when something else already exists at the worktree path (for example the watch worktree of another clone in the same directory for a PR with the same number), or when the worktree there was switched to another branch. A worktree whose folder you deleted is registered again.
+- The files git ignores in your clone (for example `node_modules`, `.env`, `CLAUDE.local.md` or a `docs.local` folder) are linked into the worktree as symbolic links, so a run sees the same local instructions, notes and dependencies as in your clone. A file the run changes through such a link changes in your clone. Build and cache outputs are not linked, so the two branches never overwrite each other's outputs: `dist`, `build`, `out`, `.next`, `coverage`, `.turbo`, `.cache`, `.eslintcache` and `*.tsbuildinfo`. Links are added at start and before every run; an existing path in the worktree is never replaced. Each linked path is also added as an anchored pattern (for example `/node_modules`) to the repository's `.git/info/exclude`, which all its working trees share, so git never lists a link as untracked and a run cannot commit one by accident. In your clone these paths are ignored already, so nothing changes there.
+- When the PR is closed or merged, the watcher removes the worktree, but only when no run holds it, its tracked files have no changes, every commit is pushed, and it holds no untracked files and no ignored files besides the links and the build and cache outputs listed above. Otherwise it keeps the worktree and logs why. The local branch is always kept. `--stop` keeps the worktree, and the next start reuses it.
+- A new worktree is a new folder for Claude Code, so trust it once, see [Trust and permissions](#trust-and-permissions).
+
+## Working tree checks
+
+The watcher's working tree is the watch worktree, or with `--in-place` your clone itself:
+
+- The clone needs a remote for the PR head repository. The fetch and push destinations of that remote, after any `insteadOf` or `pushInsteadOf` rewrite, must all name that same repository on the PR's host (`https://HOST/OWNER/REPO.git`, `ssh://git@HOST/OWNER/REPO.git` or `git@HOST:OWNER/REPO.git`). Anything else is refused.
+- With `--in-place`, the clone must have the PR head branch checked out (`gh pr checkout NUMBER`), and the runs work in it, as before the watch worktree existed.
 - Before each run the watcher checks the remote and the branch, that tracked files have no uncommitted changes, fetches the branch and checks that the local branch is not ahead of the remote. If a check fails, the watcher is holding: it shows the reason and a hint in `--list` and tries again on the next poll. Nothing on GitHub changes while it is holding.
-- One clone runs one batch at a time. Watchers for other PRs on the same clone wait (`holding` with `clone busy`).
-- While a run is in flight, do not change tracked files, the index or the checked-out branch in that clone. The run commits and pushes from there.
-
-The easiest way to keep this contract is a dedicated clone for the watcher, given with `--dir`, while you keep working in your usual one.
+- One working tree runs one batch at a time. Watchers for other PRs on the same `--in-place` clone wait (`holding` with `clone busy`).
+- While a run is in flight, do not change tracked files, the index or the checked-out branch in that working tree. The run commits and pushes from there.
 
 ## Trust and permissions
 
 The worker runs your normal `claude`, with your settings and your permission rules.
 
-- Trust the project directory in Claude Code once before the first run: run `claude` in it and accept the folder trust dialog. Subdirectories inherit that decision. Otherwise claude waits at the trust dialog, and the run ends in needs attention with `claude-did-not-start` and the hint `see the worker pane: claude may wait at a dialog like folder trust - trust the dir`.
+- Trust the watcher's working tree in Claude Code once before its first run: run `claude` in it and accept the folder trust dialog. Claude Code asks for trust per git working tree, so the watch worktree needs it once even when your clone is already trusted; when the watcher creates a worktree, it prints a warning with the path. The watcher never trusts a folder for you. Otherwise claude waits at the trust dialog, and the run ends in needs attention with `claude-did-not-start` and the hint `see the worker pane: claude may wait at a dialog like folder trust - trust the dir`.
 - Every run adds one settings layer (`--settings` with a per-run file). It adds hooks that report claude's activity to the watcher, and allow rules for the conveyor's own commands: the exact git and gh commands listed under [Safety](#safety), `Read` of the run directory, and `Edit(path)` rules for the files claude writes there (one reply body per comment, the commit message and the PR body). It never removes your rules and never bypasses permissions.
 - Your own ask and deny rules still apply to the conveyor's commands. For example, a rule `Bash(git push *)` that asks makes the run stop at that prompt, and the run shows as needs attention. Any other prompt, for example for editing project files when your settings ask for that, shows as needs attention too. Answer it in the worker pane and the run goes on.
 - The allow rules do not cover editing the project's own files: your permission mode and rules decide that. To let runs edit without asking, allow it in your settings or pass a mode, for example `--claude-arg --permission-mode --claude-arg acceptEdits`.
@@ -250,7 +261,7 @@ Every run starts an agent that edits code and pushes it to your branch, so the t
 
     There is no wildcard `git diff`: with a path wildcard, `git diff` could read any file outside the repository. The reaction files are written per comment and name only that approved comment. The worker never adds a `-1`: only the watcher does. The push goes only to the PR branch: no force push, no amend, no rebase.
 
-- `PATH` entries inside the working tree are ignored when the watcher resolves `git`, `gh`, `tmux` and `claude`, and a tool that would resolve inside the working tree refuses the start. Before claude starts, the worker checks that `git` and `gh` still resolve to the same executables the watcher checked at start.
+- `PATH` entries inside your clone or the watch worktree are ignored when the watcher resolves `git`, `gh`, `tmux` and `claude`, and a tool that would resolve inside the working tree refuses the start. Before claude starts, the worker checks that `git` and `gh` still resolve to the same executables the watcher checked at start.
 - Accepted risk: the worker runs with your Claude Code permissions and your stored gh login. The comment text is still untrusted input, and the `rocket` is your approval to act on it, so read the comment before you add one.
 
 ## State and logs
@@ -266,11 +277,11 @@ The watcher logs to its own pane (the foreground pane or the background window),
 `--list` prints one line per watcher and one per run:
 
 ```text
-OWNER/REPO pull 123 state=running age=40s reason=working hint= comments=COMMENT_ID,COMMENT_ID last_error=
+OWNER/REPO pull 123 state=running age=40s reason=working hint= comments=COMMENT_ID,COMMENT_ID last_error= dir=/path/to/alex-pr-watch-comments-pr-123
 run 20261003120000-COMMENT_ID state=running comments=COMMENT_ID,COMMENT_ID age=38s
 ```
 
-A watcher line ends with ` dead` when its process is gone. Watcher states:
+`dir` is the working tree the watcher works in. A watcher line ends with ` dead` when its process is gone. Watcher states:
 
 | State             | Meaning                                                                                                                                                                                                                                                                                                                                                            |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -294,7 +305,7 @@ Needs-attention reasons:
 | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `waiting-for-permission`                     | Answer the permission prompt in the worker pane.                                                                                                                                                                              |
 | `idle-without-done-marker`                   | Claude stopped while a comment has neither `+1` nor a failure reply. Look at the worker pane; finish the task there or quit claude.                                                                                          |
-| `claude-did-not-start`                       | See the worker pane: claude may wait at a dialog like folder trust. Answer it there, or quit claude, trust the project directory and add the `rocket` again.                                                                  |
+| `claude-did-not-start`                       | See the worker pane: claude may wait at a dialog like folder trust. Answer it there, or quit claude, trust the working tree and add the `rocket` again.                                                                  |
 | `comment-deleted`                            | Every comment of the batch is gone. Quit claude in the worker pane.                                                                                                                                                           |
 | `claude-did-not-exit`                        | Claude did not exit after the run ended. Quit it in the worker pane.                                                                                                                                                          |
 | `claude-pid-reused`, `claude-pid-unreadable` | The recorded claude process could not be verified, so nothing was signalled. Quit claude in the worker pane.                                                                                                                  |
@@ -331,4 +342,4 @@ The live smoke is a maintainer tool. It needs an authenticated `gh`, tmux and a 
 PRWC_SMOKE_CONFIRMED=1 node scripts/smoke/liveSmoke.ts --mode stub
 ```
 
-Warning: the smoke pushes a scratch branch to this repository's GitHub remote and opens and closes a scratch PR there, so set `PRWC_SMOKE_CONFIRMED=1` only when that is intended. `--mode stub` uses a stand-in claude; `--mode real` runs the real claude unattended with your settings and gh login. `--keep` keeps the PR and the work area. The smoke clones into `.cache/smoke/clone`, so trust that directory in Claude Code once before a real run.
+Warning: the smoke pushes a scratch branch to this repository's GitHub remote and opens and closes a scratch PR there, so set `PRWC_SMOKE_CONFIRMED=1` only when that is intended. `--mode stub` uses a stand-in claude; `--mode real` runs the real claude unattended with your settings and gh login. `--keep` keeps the PR and the work area. The smoke clones into `.cache/smoke/clone` and runs the watcher there with `--in-place`, so trust that directory in Claude Code once before a real run.

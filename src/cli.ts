@@ -10,6 +10,7 @@ interface Draft {
     background: boolean;
     list: boolean;
     once: boolean;
+    inPlace: boolean;
     stop: string | undefined;
     positionals: string[];
     dir: string;
@@ -25,7 +26,7 @@ const PR_URL = new RegExp(
     'iu'
 );
 const LINE_BREAK = /[\n\r]/u;
-const FLAG_OPTIONS: ReadonlySet<string> = new Set(['--background', '--list', '--once']);
+const FLAG_OPTIONS: ReadonlySet<string> = new Set(['--background', '--list', '--once', '--in-place']);
 const VALUE_OPTIONS: ReadonlySet<string> = new Set([
     '--stop',
     '--dir',
@@ -151,6 +152,10 @@ function applyFlag(draft: Draft, name: string): void {
             draft.once = true;
             break;
         }
+        case '--in-place': {
+            draft.inPlace = true;
+            break;
+        }
     }
 }
 
@@ -194,6 +199,7 @@ function toResult(draft: Draft, mode: CliMode, pr?: PrRef): ParseResult {
             keepPanes: draft.keepPanes,
             batchMax: draft.batchMax,
             once: draft.once,
+            inPlace: draft.inPlace,
         },
     };
 }
@@ -228,6 +234,7 @@ export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
         background: false,
         list: false,
         once: false,
+        inPlace: false,
         stop: undefined,
         positionals: [],
         dir: cwd,
@@ -272,7 +279,8 @@ export function usageText(): string {
         '  alex-pr-watch-comments --help                           show this help',
         '',
         'Options:',
-        '  --dir <path>          project directory (default: current directory)',
+        '  --dir <path>          your clone of the repository (default: current directory)',
+        '  --in-place            work in the clone itself on the checked-out PR branch, not in the watch worktree',
         `  --interval <seconds>  how often to look for new rockets, 1 to ${MAX_INTERVAL} (default ${DEFAULT_INTERVAL})`,
         '  --claude <path>       claude executable (default: found on PATH at start)',
         '  --claude-arg <arg>    extra claude argument, repeatable, passed literally',
