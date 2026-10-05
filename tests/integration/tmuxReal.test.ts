@@ -5,7 +5,9 @@ import { describe, test, type TestContext } from 'node:test';
 
 import { createProcessRunner } from '../../src/proc.ts';
 import {
+    arrangeGrid,
     killDeadWatcherPane,
+    killPane,
     markPaneDone,
     newWatcherWindow,
     paneForRun,
@@ -15,6 +17,7 @@ import {
     tmuxInit,
     tmuxMessage,
     tmuxOn,
+    type WorkerPane,
 } from '../../src/tmuxControl.ts';
 import type { CommandRequest, CommandResult, Deps, Env, TmuxContext } from '../../src/types.ts';
 import { shQuote } from '../../src/validate.ts';
@@ -176,27 +179,67 @@ await describe('tmux control on a real isolated server', async () => {
 
     await test('a full window falls back to a new window', async (t) => {
         const fixture = await setUp(t, undefined, { width: 20, height: 6 });
-        for (const runId of ['R1', 'R2']) {
+        let overflow: WorkerPane | undefined;
+        let inWindow = 0;
+        for (let index = 1; index <= 12 && overflow === undefined; index += 1) {
+            const split = await splitWorker(
+                fixture.deps,
+                fixture.tmuxPath,
+                fixture.tmux,
+                sleeper(fixture, `R${index}`)
+            );
+            assert.ok(split, `R${index}`);
+            if ((await windowOf(fixture, split.paneId)) === fixture.tmux.windowId) {
+                inWindow += 1;
+            } else {
+                overflow = split;
+            }
+        }
+        assert.ok(inWindow >= 2, `${inWindow} panes fit the window`);
+        assert.ok(overflow);
+        assert.equal(await paneOption(fixture, overflow.paneId, '@prwc_overflow'), PR_KEY);
+        assert.equal(
+            await paneForRun(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, `R${inWindow + 1}`),
+            overflow.paneId
+        );
+    });
+
+    await test('worker panes fill the window as a grid in launch order', async (t) => {
+        const fixture = await setUp(t, undefined, { width: 200, height: 50 });
+        const geometry = async () => {
+            const result = await tmuxOn(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, [
+                'list-panes',
+                '-t',
+                fixture.tmux.pane,
+                '-F',
+                '#{pane_id} #{pane_left} #{pane_top} #{pane_width}',
+            ]);
+            assert.equal(result?.code, 0);
+            return (result?.stdout ?? '')
+                .trim()
+                .split('\n')
+                .map((line) => line.split(' '));
+        };
+        const panes = [fixture.tmux.pane];
+        for (const runId of ['R1', 'R2', 'R3']) {
             const split = await splitWorker(fixture.deps, fixture.tmuxPath, fixture.tmux, sleeper(fixture, runId));
             assert.ok(split, runId);
-            assert.equal(await windowOf(fixture, split.paneId), fixture.tmux.windowId);
+            panes.push(split.paneId);
         }
-        const full = await tmuxOn(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, [
-            'split-window',
-            '-d',
-            '-t',
-            fixture.tmux.pane,
-            '/bin/sh',
-            '-c',
-            'sleep 30',
-        ]);
-        assert.notEqual(full?.code, 0);
-        assert.match(full?.stderr ?? '', /no space for (?:a )?new pane/u);
-        const result = await splitWorker(fixture.deps, fixture.tmuxPath, fixture.tmux, sleeper(fixture, 'R3'));
-        assert.ok(result);
-        assert.notEqual(await windowOf(fixture, result.paneId), fixture.tmux.windowId);
-        assert.equal(await paneOption(fixture, result.paneId, '@prwc_overflow'), PR_KEY);
-        assert.equal(await paneForRun(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, 'R3'), result.paneId);
+        const four = await geometry();
+        assert.deepEqual(
+            four.map(([id, left, top]) => [id, left, top]),
+            [
+                [panes[0], '0', '0'],
+                [panes[1], '100', '0'],
+                [panes[2], '0', '25'],
+                [panes[3], '100', '25'],
+            ]
+        );
+        await killPane(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, panes[3] ?? '');
+        await arrangeGrid(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, fixture.tmux.pane);
+        const three = await geometry();
+        assert.deepEqual(three.at(-1), [panes[2], '0', '25', '200']);
     });
 
     await test('newWatcherWindow passes env items, keeps the pane and tags the window', async (t) => {

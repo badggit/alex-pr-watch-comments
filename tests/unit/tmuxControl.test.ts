@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
+import { gridLayout } from '../../src/paneGrid.ts';
 import {
+    arrangeGrid,
     capDonePanes,
     formatLiteral,
     killDeadWatcherPane,
@@ -246,12 +248,20 @@ await describe('splitWorker', async () => {
         const calls = fake.calls();
         assert.deepEqual(
             calls.map((call) => call.key),
-            ['split-window', 'set-option', 'set-option']
+            ['list-panes', 'split-window', 'set-option', 'set-option', 'list-panes']
         );
         assert.equal(fake.callCount('tmux', 'split-window'), 1);
         assert.deepEqual(tmuxArgs(calls[0]), [
+            'list-panes',
+            '-t',
+            '%1',
+            '-F',
+            '#{pane_id} #{pane_width} #{pane_height}',
+        ]);
+        assert.deepEqual(tmuxArgs(calls[1]), [
             'split-window',
             '-d',
+            '-h',
             '-P',
             '-F',
             SPLIT_FORMAT,
@@ -266,9 +276,10 @@ await describe('splitWorker', async () => {
             '/bin/sh',
             '/tmp/run dir/launcher.sh',
         ]);
-        assert.deepEqual(calls[0]?.env, { ...BASE_ENV, PATH: '/a:/b' });
-        assert.deepEqual(tmuxArgs(calls[1]), ['set-option', '-p', '-t', '%5', '@prwc_run', RUN_ID]);
-        assert.deepEqual(tmuxArgs(calls[2]), ['set-option', '-p', '-t', '%5', '@prwc_pr', PR_KEY]);
+        assert.deepEqual(calls[1]?.env, { ...BASE_ENV, PATH: '/a:/b' });
+        assert.deepEqual(tmuxArgs(calls[2]), ['set-option', '-p', '-t', '%5', '@prwc_run', RUN_ID]);
+        assert.deepEqual(tmuxArgs(calls[3]), ['set-option', '-p', '-t', '%5', '@prwc_pr', PR_KEY]);
+        assert.deepEqual(tmuxArgs(calls[4]), ['list-panes', '-t', '%5', '-F', '#{window_width} #{window_height}']);
         for (const call of calls) {
             assert.deepEqual(socketOf(call), ['-S', SOCKET]);
         }
@@ -278,7 +289,7 @@ await describe('splitWorker', async () => {
         const fake = createFakeRunner();
         fake.respond('tmux', 'split-window', { stdout: '%5 4242\n' });
         await splitWorker(depsOf(fake), TMUX, CONTEXT, splitOpts('/tmp/a#b'));
-        const args = tmuxArgs(fake.calls()[0]);
+        const args = tmuxArgs(fake.calls('tmux').find((call) => call.key === 'split-window'));
         assert.equal(args[args.indexOf('-c') + 1], '/tmp/a##b');
     });
 
@@ -300,11 +311,21 @@ await describe('splitWorker', async () => {
         const calls = fake.calls();
         assert.deepEqual(
             calls.map((call) => call.key),
-            ['split-window', 'select-layout', 'split-window', 'new-window', 'set-option', 'set-option', 'set-option']
+            [
+                'list-panes',
+                'split-window',
+                'select-layout',
+                'split-window',
+                'new-window',
+                'set-option',
+                'set-option',
+                'set-option',
+                'list-panes',
+            ]
         );
-        assert.deepEqual(tmuxArgs(calls[1]), ['select-layout', '-t', '@2', 'tiled']);
-        assert.deepEqual(tmuxArgs(calls[2]), tmuxArgs(calls[0]));
-        assert.deepEqual(tmuxArgs(calls[3]), [
+        assert.deepEqual(tmuxArgs(calls[2]), ['select-layout', '-t', '@2', 'tiled']);
+        assert.deepEqual(tmuxArgs(calls[3]), tmuxArgs(calls[1]));
+        assert.deepEqual(tmuxArgs(calls[4]), [
             'new-window',
             '-d',
             '-P',
@@ -319,10 +340,10 @@ await describe('splitWorker', async () => {
             '/bin/sh',
             '/tmp/run dir/launcher.sh',
         ]);
-        assert.deepEqual(calls[3]?.env, { ...BASE_ENV, PATH: '/a:/b' });
-        assert.deepEqual(tmuxArgs(calls[4]), ['set-option', '-w', '-t', '%9', '@prwc_overflow', PR_KEY]);
-        assert.deepEqual(tmuxArgs(calls[5]), ['set-option', '-p', '-t', '%9', '@prwc_run', RUN_ID]);
-        assert.deepEqual(tmuxArgs(calls[6]), ['set-option', '-p', '-t', '%9', '@prwc_pr', PR_KEY]);
+        assert.deepEqual(calls[4]?.env, { ...BASE_ENV, PATH: '/a:/b' });
+        assert.deepEqual(tmuxArgs(calls[5]), ['set-option', '-w', '-t', '%9', '@prwc_overflow', PR_KEY]);
+        assert.deepEqual(tmuxArgs(calls[6]), ['set-option', '-p', '-t', '%9', '@prwc_run', RUN_ID]);
+        assert.deepEqual(tmuxArgs(calls[7]), ['set-option', '-p', '-t', '%9', '@prwc_pr', PR_KEY]);
     });
 
     await test('no space once: the retry after the tiled layout succeeds', async () => {
@@ -363,7 +384,7 @@ await describe('splitWorker', async () => {
         assert.equal(result, undefined);
         assert.deepEqual(
             fake.calls().map((call) => call.key),
-            ['split-window']
+            ['list-panes', 'split-window']
         );
     });
 
@@ -372,7 +393,7 @@ await describe('splitWorker', async () => {
         fake.respond('tmux', 'split-window', { stdout: '%5 4242\n' });
         const opts = { ...splitOpts('/tmp/work'), envItems: ['GH_CONFIG_DIR=/cfg'] };
         await splitWorker(depsOf(fake), TMUX, CONTEXT, opts);
-        assert.equal(fake.calls()[0]?.env, undefined);
+        assert.equal(fake.calls('tmux').find((call) => call.key === 'split-window')?.env, undefined);
     });
 
     await test('a failing @prwc_run tag kills the new pane and gives undefined', async () => {
@@ -384,11 +405,11 @@ await describe('splitWorker', async () => {
         const calls = fake.calls();
         assert.deepEqual(
             calls.map((call) => call.key),
-            ['split-window', 'set-option', 'kill-pane']
+            ['list-panes', 'split-window', 'set-option', 'kill-pane']
         );
-        assert.deepEqual(tmuxArgs(calls[1]), ['set-option', '-p', '-t', '%5', '@prwc_run', RUN_ID]);
-        assert.deepEqual(tmuxArgs(calls[2]), ['kill-pane', '-t', '%5']);
-        assert.deepEqual(socketOf(calls[2]), ['-S', SOCKET]);
+        assert.deepEqual(tmuxArgs(calls[2]), ['set-option', '-p', '-t', '%5', '@prwc_run', RUN_ID]);
+        assert.deepEqual(tmuxArgs(calls[3]), ['kill-pane', '-t', '%5']);
+        assert.deepEqual(socketOf(calls[3]), ['-S', SOCKET]);
     });
 
     await test('a failing @prwc_pr tag kills the new pane and gives undefined', async () => {
@@ -401,10 +422,25 @@ await describe('splitWorker', async () => {
         const calls = fake.calls();
         assert.deepEqual(
             calls.map((call) => call.key),
-            ['split-window', 'set-option', 'set-option', 'kill-pane']
+            ['list-panes', 'split-window', 'set-option', 'set-option', 'kill-pane']
         );
-        assert.deepEqual(tmuxArgs(calls[2]), ['set-option', '-p', '-t', '%5', '@prwc_pr', PR_KEY]);
-        assert.deepEqual(tmuxArgs(calls[3]), ['kill-pane', '-t', '%5']);
+        assert.deepEqual(tmuxArgs(calls[3]), ['set-option', '-p', '-t', '%5', '@prwc_pr', PR_KEY]);
+        assert.deepEqual(tmuxArgs(calls[4]), ['kill-pane', '-t', '%5']);
+    });
+
+    await test('splits the last pane of the window, across a tall pane, then lays the window out as a grid', async () => {
+        const fake = createFakeRunner();
+        fake.respond('tmux', 'list-panes', { stdout: '%1 100 50\n%4 80 50\n' });
+        fake.respond('tmux', 'list-panes', { stdout: '200 50\n200 50\n200 50\n' });
+        fake.respond('tmux', 'split-window', { stdout: '%5 4242\n' });
+        await splitWorker(depsOf(fake), TMUX, CONTEXT, splitOpts('/tmp/work'));
+        const split = tmuxArgs(fake.calls('tmux').find((call) => call.key === 'split-window'));
+        assert.deepEqual(split.slice(0, 8), ['split-window', '-d', '-v', '-P', '-F', SPLIT_FORMAT, '-t', '%4']);
+        const layouts = fake.calls('tmux').filter((call) => call.key === 'select-layout');
+        assert.deepEqual(
+            layouts.map((call) => tmuxArgs(call)),
+            [['select-layout', '-t', '%5', gridLayout(3, 200, 50)]]
+        );
     });
 
     await test('an unsafe socket gives undefined with no call', async () => {
@@ -468,6 +504,29 @@ await describe('capDonePanes', async () => {
         }
     });
 
+    await test('lays each window that lost a pane out as a grid again', async () => {
+        const fake = createFakeRunner();
+        fake.respond('tmux', 'list-panes', {
+            stdout: [
+                `%2 ${PR_KEY} 400 @3`,
+                `%3 ${PR_KEY} 100 @3`,
+                `%5 ${PR_KEY} 300 @7`,
+                `%6 ${PR_KEY} 200 @7`,
+                '',
+            ].join('\n'),
+        });
+        fake.respond('tmux', 'list-panes', { stdout: '200 50\n200 50\n' });
+        await capDonePanes(depsOf(fake), TMUX, WORKER_SOCKET, PR_KEY, 1);
+        const layouts = fake.calls().filter((call) => call.key === 'select-layout');
+        assert.deepEqual(
+            layouts.map((call) => tmuxArgs(call)),
+            [
+                ['select-layout', '-t', '@3', gridLayout(2, 200, 50)],
+                ['select-layout', '-t', '@7', gridLayout(2, 200, 50)],
+            ]
+        );
+    });
+
     await test('nothing is killed within keep or when the listing fails', async () => {
         const fake = createFakeRunner();
         fake.respond('tmux', 'list-panes', { stdout: `%2 ${PR_KEY} 400\n%3 ${PR_KEY} 100\n` });
@@ -477,6 +536,35 @@ await describe('capDonePanes', async () => {
         failing.respond('tmux', 'list-panes', { code: 1, stdout: `%3 ${PR_KEY} 100\n` });
         await capDonePanes(depsOf(failing), TMUX, WORKER_SOCKET, PR_KEY, 0);
         assert.equal(failing.callCount('tmux', 'kill-pane'), 0);
+    });
+});
+
+await describe('arrangeGrid', async () => {
+    await test('applies the grid of the listed panes to the window', async () => {
+        const fake = createFakeRunner();
+        fake.respond('tmux', 'list-panes', { stdout: '120 40\n120 40\n' });
+        await arrangeGrid(depsOf(fake), TMUX, SOCKET, '@2');
+        assert.deepEqual(tmuxArgs(fake.calls()[0]), [
+            'list-panes',
+            '-t',
+            '@2',
+            '-F',
+            '#{window_width} #{window_height}',
+        ]);
+        assert.deepEqual(tmuxArgs(fake.calls()[1]), ['select-layout', '-t', '@2', gridLayout(2, 120, 40)]);
+    });
+
+    await test('a failed listing, a single pane or a tiny window keeps the layout', async () => {
+        for (const response of [
+            { code: 1, stdout: '120 40\n120 40\n' },
+            { stdout: '120 40\n' },
+            { stdout: '4 2\n4 2\n' },
+        ]) {
+            const fake = createFakeRunner();
+            fake.respond('tmux', 'list-panes', response);
+            await arrangeGrid(depsOf(fake), TMUX, SOCKET, '@2');
+            assert.equal(fake.callCount('tmux', 'select-layout'), 0);
+        }
     });
 });
 
@@ -519,7 +607,7 @@ await describe('newWatcherWindow', async () => {
         await newWatcherWindow(depsOf(fake), TMUX, CONTEXT, PR_KEY, [], watcherCommand);
         const args = tmuxArgs(fake.calls()[0]);
         assert.ok(!args.includes('-e'));
-        assert.equal(fake.calls()[0]?.env, undefined);
+        assert.equal(fake.calls('tmux').find((call) => call.key === 'split-window')?.env, undefined);
         assert.deepEqual(args, ['new-window', '-d', '-P', '-F', WINDOW_FORMAT, '-t', '$1:', ...watcherCommand]);
     });
 
