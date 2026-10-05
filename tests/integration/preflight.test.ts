@@ -58,6 +58,7 @@ interface RunOptions {
     cwd?: string;
     nodePath?: string;
     psPath?: string;
+    inPlace?: boolean;
 }
 
 interface Run {
@@ -88,13 +89,24 @@ async function setUp(t: TestContext, opts?: SetupOptions): Promise<Setup> {
     return { testEnv, fake, gitRoot, clone };
 }
 
-function cliOptions(dir: string, claude?: string, pr = PR): CliOptions {
-    return { mode: 'watch', pr, dir, interval: 15, claude, claudeArgs: [], keepPanes: 5, batchMax: 5, once: false };
+function cliOptions(dir: string, claude?: string, pr = PR, inPlace = true): CliOptions {
+    return {
+        mode: 'watch',
+        pr,
+        dir,
+        interval: 15,
+        claude,
+        claudeArgs: [],
+        keepPanes: 5,
+        batchMax: 5,
+        once: false,
+        inPlace,
+    };
 }
 
 async function runPreflight(setup: Setup, opts?: RunOptions): Promise<Run> {
     const deps: TestDeps = { ...setup.testEnv.deps(setup.fake.runner), env: opts?.env ?? setup.testEnv.env };
-    const options = cliOptions(opts?.dir ?? setup.clone, opts?.claude, opts?.pr);
+    const options = cliOptions(opts?.dir ?? setup.clone, opts?.claude, opts?.pr, opts?.inPlace);
     const cwd = opts?.cwd ?? setup.testEnv.root;
     const nodePath = opts?.nodePath ?? process.execPath;
     const result =
@@ -500,6 +512,38 @@ await describe('preflight', async () => {
         const reason = await refusalOf(setup);
         assert.ok(reason.startsWith('unsupported head branch name'), reason);
         assert.ok(!reason.includes(';'));
+    });
+
+    await test('outside --in-place works in the watch worktree next to the clone', async (t) => {
+        const setup = await setUp(t);
+        const { testEnv } = setup;
+        const clone = fs.realpathSync.native(setup.clone);
+        gitSync(testEnv.env, ['-C', clone, 'checkout', '--quiet', 'main']);
+        fs.writeFileSync(path.join(clone, '.git', 'info', 'exclude'), 'CLAUDE.local.md\n');
+        fs.writeFileSync(path.join(clone, 'CLAUDE.local.md'), 'notes\n');
+        const worktree = path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12');
+        const first = await runPreflight(setup, { inPlace: false });
+        const session = sessionOf(first.result);
+        assert.equal(session.dirCanon, worktree);
+        assert.equal(session.toplevel, worktree);
+        assert.equal(session.worktreeKey, worktreeKey(worktree));
+        assert.deepEqual(session.worktree, { path: worktree, source: clone });
+        assert.equal(fs.readlinkSync(path.join(worktree, 'CLAUDE.local.md')), path.join(clone, 'CLAUDE.local.md'));
+        assert.ok(warnings(first.deps).some((line) => line.includes(`created the watch worktree ${worktree}`)));
+        const second = await runPreflight(setup, { inPlace: false });
+        assert.equal(sessionOf(second.result).dirCanon, worktree);
+        assert.ok(!warnings(second.deps).some((line) => line.includes('created the watch worktree')));
+        const inPlaceRun = await runPreflight(setup, { dir: worktree });
+        const inPlace = sessionOf(inPlaceRun.result);
+        assert.equal(inPlace.worktree, undefined);
+        assert.equal(inPlace.dirCanon, worktree);
+    });
+
+    await test('outside --in-place refuses while the clone has the head branch checked out', async (t) => {
+        const setup = await setUp(t);
+        const reason = await refusalOf(setup, { inPlace: false });
+        assert.ok(reason.startsWith('feature is checked out in '), reason);
+        assert.ok(reason.endsWith('or start the watcher with --in-place)'), reason);
     });
 
     await test('refuses a directory that is not a git repository', async (t) => {

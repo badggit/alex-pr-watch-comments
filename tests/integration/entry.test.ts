@@ -55,7 +55,7 @@ await describe('entry wiring', async () => {
         stubRespond(testEnv.stubDir, 'tmux', 'display-message', { stdout: '$1 @1\n' });
         stubRespond(testEnv.stubDir, 'gh', 'PrwcPrInfo', { json: readFixture('preflight', 'prInfoOpen.json') });
         stubRespond(testEnv.stubDir, 'gh', 'PrwcPoll', { json: readFixture('watcher', 'pollOpen.json') });
-        const result = await runEntry(testEnv, [PR_URL, '--once', '--dir', clone]);
+        const result = await runEntry(testEnv, [PR_URL, '--once', '--in-place', '--dir', clone]);
         assert.equal(result.code, 0, `${result.stdout}${result.stderr}`);
         assert.equal(stubCallCount(testEnv.stubDir, 'gh', 'PrwcPoll'), 1);
     });

@@ -629,7 +629,16 @@ async function startWatcher(ctx: Ctx, target: Target): Promise<void> {
     const codeFile = path.join(workArea, 'background.code');
     const env = ['/usr/bin/env', `PATH=${target.callerPath}`, `PRWC_STATE_DIR=${target.stateDir}`];
     const shell = ['/bin/sh', '-c', PANE_SCRIPT, 'sh', out, codeFile];
-    const watch = ['--background', '--dir', target.clone, '--interval', WATCHER_INTERVAL, '--claude', tools.claude];
+    const watch = [
+        '--background',
+        '--in-place',
+        '--dir',
+        target.clone,
+        '--interval',
+        WATCHER_INTERVAL,
+        '--claude',
+        tools.claude,
+    ];
     const command = [...env, ...shell, BIN, target.pr.url, ...watch];
     ctx.trace.serverStarted = true;
     const session = ['-f', '/dev/null', 'new-session', '-d', '-s', SESSION, '-x', '200', '-y', '50'];

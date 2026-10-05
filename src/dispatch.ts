@@ -4,6 +4,7 @@ import { DEFAULT_LAUNCH_WAIT, ENV_NAMES } from './constants.ts';
 import { sessionGh } from './gh.ts';
 import { fetchContext, react, type ReactOutcome } from './githubLookup.ts';
 import { runGuards } from './guards.ts';
+import { syncIgnoredLinks } from './ignoredLinks.ts';
 import { acquireWorktreeLock, releaseWorktreeLock, worktreeLockHolder } from './locks.ts';
 import { commentFiles } from './prompt.ts';
 import { markFailed, type FailTarget } from './reactions.ts';
@@ -420,6 +421,9 @@ export async function dispatch(
         const comments = candidates.map((candidate) => runComment(candidate)).filter((item) => item !== undefined);
         if (comments.length !== candidates.length) {
             throw new Error('a comment has no rocket time');
+        }
+        if (session.worktree !== undefined) {
+            await syncIgnoredLinks(deps, session.tools.git, session.worktree.source, session.worktree.path);
         }
         const guard = await runGuards(deps, session);
         if (!guard.ok) {

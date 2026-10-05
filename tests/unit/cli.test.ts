@@ -87,6 +87,7 @@ await describe('parseArgs', async () => {
         assert.equal(options.claude, undefined);
         assert.deepEqual(options.claudeArgs, []);
         assert.equal(options.once, false);
+        assert.equal(options.inPlace, false);
     });
 
     await test('value options', () => {
@@ -128,6 +129,8 @@ await describe('parseArgs', async () => {
         assert.equal(stop.mode, 'stop');
         assert.equal(stop.pr?.prKey, 'o+r+12');
         assert.equal(okOptions([PR_URL, '--once']).once, true);
+        assert.equal(okOptions([PR_URL, '--in-place']).inPlace, true);
+        assert.equal(okOptions([PR_URL, '--background', '--in-place']).inPlace, true);
     });
 
     await test('--help', () => {
