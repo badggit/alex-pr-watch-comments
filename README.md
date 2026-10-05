@@ -9,7 +9,7 @@ Leave comments on lines of the PR diff, approve them with a `rocket` reaction, a
 1. You start the watcher for one PR from a tmux session, for a local clone of the PR's repository with the PR branch checked out.
 2. Every 2 minutes (`--interval`, default 120 seconds) the watcher reads the PR's inline review threads with `gh`.
 3. A comment is picked up when it carries a `rocket` reaction added by you, the account `gh` is logged in as. Only inline review comments (comments on the diff) count; general PR comments (the "Conversation" tab) are ignored. All comments approved at that moment go into one run as a batch, oldest rocket first, at most `--batch-max` (default 5) of them; the rest wait for the next batch. One run at a time.
-4. The watcher checks the clone, saves the text of every approved comment, replaces each of your `rocket` reactions with `eyes`, opens a new pane next to the watcher (when the window is full it retiles the window, and as a last resort opens a new one) and starts `claude` there. The task is passed as claude's initial prompt on the command line; nothing is typed into the pane. Claude first checks that the clone is still on the PR head branch and reads the project instructions (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `AGENTS.local.md` in the project directory, where they exist; the run's own rules win over them). Then it works through the comments in order, one at a time:
+4. The watcher checks the clone, saves the text of every approved comment, replaces each of your `rocket` reactions with `eyes`, opens a new pane in the watcher's window and starts `claude` there. The task is passed as claude's initial prompt on the command line; nothing is typed into the pane. Claude first checks that the clone is still on the PR head branch and reads the project instructions (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `AGENTS.local.md` in the project directory, where they exist; the run's own rules win over them). Then it works through the comments in order, one at a time:
     - reads the comment and decides whether the code needs a change;
     - if it does, fixes the code, commits only that change and pushes to the PR branch, so every comment gets its own commit;
     - replies to the comment inline, in the same thread, ending the reply with the tag `#alex-pr-watch-comments` on its own last line;
@@ -17,6 +17,10 @@ Leave comments on lines of the PR diff, approve them with a `rocket` reaction, a
 
     After the last comment it checks whether the PR description is still accurate and updates it if needed, then makes sure every commit of the run is pushed.
 5. While the run is in flight the watcher checks it every 15 seconds (`PRWC_RUN_CHECK`). Once claude has stopped and stayed idle for a short quiet period, and every comment of the batch has its fresh `+1` or a failure reply, the watcher ends that claude session and marks its pane as finished. Every comment without a fresh `+1` gets a `-1`. Then it reads the PR again right away, and the comments approved in the meantime become the next batch.
+
+### Pane layout
+
+The panes of the watcher's window are laid out as a grid in launch order, columns first: 2 panes sit side by side, 3 are two on top and one full-width below, 4 make a 2x2 grid, 5 are three on top and two below, and so on. The grid covers every pane of the window, so when the watcher runs in a window you also use, your own panes are rearranged too. When a window is too small for one more pane, the worker opens in a new window. When the finished panes beyond `--keep-panes` are closed, the grid is laid out again.
 
 ### Reactions
 

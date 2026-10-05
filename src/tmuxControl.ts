@@ -1,3 +1,4 @@
+import { gridLayout } from './paneGrid.ts';
 import type { CommandResult, Deps, Env, TmuxContext } from './types.ts';
 import { isSafeSocketPath, isUintString, safeText } from './validate.ts';
 
@@ -27,6 +28,8 @@ export type PaneState = 'alive' | 'dead' | 'missing';
 
 const PANE_PID_FORMAT = '#{pane_id} #{pane_pid}';
 const WINDOW_PANE_FORMAT = '#{window_id} #{pane_id}';
+const PANE_SIZE_FORMAT = '#{pane_id} #{pane_width} #{pane_height}';
+const WINDOW_SIZE_FORMAT = '#{window_width} #{window_height}';
 // tmux 3.4-3.6 says 'no space for new pane'; 3.7+ says 'no space for a new pane' (3.7 adds a 'size or position' prefix).
 const NO_SPACE = /no space for (?:a )?new pane/u;
 const PANE_ID = /^%\d+$/u;
@@ -153,8 +156,42 @@ function isNoSpace(result: CommandResult | undefined): boolean {
     return result !== undefined && result.code !== 0 && NO_SPACE.test(result.stderr);
 }
 
-// Creates the worker pane: a split of the watcher's pane, after a tiled relayout when the window is full, and as a
-// last resort a new window tagged @prwc_overflow. The pid comes from the creating call itself, never a lookup.
+// Lays the panes of the target's window out as the pane grid of paneGrid.ts. A window the grid does not fit, or a
+// window that is gone, keeps its layout.
+export async function arrangeGrid(deps: TmuxDeps, tmuxPath: string, socket: string, target: string): Promise<void> {
+    const panes = listing(await tmuxOn(deps, tmuxPath, socket, ['list-panes', '-t', target, '-F', WINDOW_SIZE_FORMAT]));
+    const [width = '', height = ''] = panes[0] ?? [];
+    if (!isUintString(width) || !isUintString(height)) {
+        return;
+    }
+    const layout = gridLayout(panes.length, Number.parseInt(width, 10), Number.parseInt(height, 10));
+    if (layout !== undefined) {
+        await tmuxOn(deps, tmuxPath, socket, ['select-layout', '-t', target, layout]);
+    }
+}
+
+// The last pane of the watcher's window, so new panes follow the old ones in pane index order and fill the grid in
+// launch order. It is split across its longer side (a cell is about twice as tall as wide) to make a no-space failure
+// less likely; the grid relayout decides the final shape anyway.
+async function splitTarget(
+    deps: TmuxDeps,
+    tmuxPath: string,
+    tmux: TmuxContext
+): Promise<{ pane: string; direction: '-h' | '-v' }> {
+    const panes = listing(
+        await tmuxOn(deps, tmuxPath, tmux.socket, ['list-panes', '-t', tmux.pane, '-F', PANE_SIZE_FORMAT])
+    );
+    const [pane = '', width = '', height = ''] = panes.at(-1) ?? [];
+    if (!PANE_ID.test(pane) || !isUintString(width) || !isUintString(height)) {
+        return { pane: tmux.pane, direction: '-h' };
+    }
+    const wide = Number.parseInt(width, 10) >= 2 * Number.parseInt(height, 10);
+    return { pane, direction: wide ? '-h' : '-v' };
+}
+
+// Creates the worker pane: a split of the last pane in the watcher's window, after a tiled relayout when the window is
+// full, and as a last resort a new window tagged @prwc_overflow. The pid comes from the creating call itself, never a
+// lookup.
 async function createWorkerPane(
     deps: TmuxDeps,
     tmuxPath: string,
@@ -163,14 +200,16 @@ async function createWorkerPane(
 ): Promise<{ pane: WorkerPane | undefined; overflow: boolean }> {
     const env = envArgs(opts.envItems);
     const clientEnv = clientEnvFor(deps.env, opts.envItems);
+    const target = await splitTarget(deps, tmuxPath, tmux);
     const splitArgs = [
         'split-window',
         '-d',
+        target.direction,
         '-P',
         '-F',
         PANE_PID_FORMAT,
         '-t',
-        tmux.pane,
+        target.pane,
         '-c',
         tmuxLiteral(opts.dir),
         ...env,
@@ -234,6 +273,7 @@ export async function splitWorker(
             return;
         }
     }
+    await arrangeGrid(deps, tmuxPath, tmux.socket, pane.paneId);
     return pane;
 }
 
@@ -272,7 +312,8 @@ export async function markPaneDone(
     return succeeded(result);
 }
 
-// Kills the finished panes of the PR beyond the newest keep, oldest @prwc_done first.
+// Kills the finished panes of the PR beyond the newest keep, oldest @prwc_done first, then lays the windows they
+// were in out as the grid again.
 export async function capDonePanes(
     deps: TmuxDeps,
     tmuxPath: string,
@@ -284,16 +325,24 @@ export async function capDonePanes(
         'list-panes',
         '-a',
         '-F',
-        '#{pane_id} #{@prwc_pr} #{@prwc_done}',
+        '#{pane_id} #{@prwc_pr} #{@prwc_done} #{window_id}',
     ]);
     const done = listing(result)
-        .map((fields) => ({ pane: fields[0] ?? '', pr: fields[1], epoch: fields[2] ?? '' }))
+        .map((fields) => ({ pane: fields[0] ?? '', pr: fields[1], epoch: fields[2] ?? '', window: fields[3] ?? '' }))
         .filter((entry) => entry.pr === prKey && isUintString(entry.epoch))
-        .map((entry) => ({ pane: entry.pane, epoch: Number.parseInt(entry.epoch, 10) }))
+        .map((entry) => ({ pane: entry.pane, epoch: Number.parseInt(entry.epoch, 10), window: entry.window }))
         .toSorted((a, b) => a.epoch - b.epoch);
     const excess = done.length - Math.max(keep, 0);
+    const windows = new Set<string>();
     for (const entry of done.slice(0, Math.max(excess, 0))) {
-        await tmuxOn(deps, tmuxPath, socket, ['kill-pane', '-t', entry.pane]);
+        if (succeeded(await tmuxOn(deps, tmuxPath, socket, ['kill-pane', '-t', entry.pane]))) {
+            windows.add(entry.window);
+        }
+    }
+    for (const window of windows) {
+        if (WINDOW_ID.test(window)) {
+            await arrangeGrid(deps, tmuxPath, socket, window);
+        }
     }
 }
 
