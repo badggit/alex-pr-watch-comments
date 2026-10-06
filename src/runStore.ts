@@ -314,11 +314,19 @@ export function launchDecision(stateDir: string, runId: string): LaunchDecision 
     return value === 'go' || value === 'cancel' ? value : 'claimed';
 }
 
-// A cancelled launcher may finish writing exit_status while its run directory is removed.
+// A cancelled launcher may write exit_status after the directory scan, so retry the entire removal.
 export function clearRun(stateDir: string, runId: string): void {
-    const cancelled = launchDecision(stateDir, runId) === 'cancel';
-    const retry = cancelled ? { maxRetries: 5, retryDelay: 20 } : {};
-    fs.rmSync(runDir(stateDir, runId), { recursive: true, force: true, ...retry });
+    const retries = launchDecision(stateDir, runId) === 'cancel' ? 5 : 0;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+        try {
+            fs.rmSync(runDir(stateDir, runId), { recursive: true, force: true });
+            return;
+        } catch (error) {
+            if (attempt === retries || !(error instanceof Error && 'code' in error && error.code === 'ENOTEMPTY')) {
+                throw error;
+            }
+        }
+    }
 }
 
 function statusPath(stateDir: string, prKey: string): string {
