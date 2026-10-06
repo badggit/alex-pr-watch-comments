@@ -222,10 +222,6 @@ export function runIdsForPr(stateDir: string, prKey: string): string[] {
     });
 }
 
-export function clearRun(stateDir: string, runId: string): void {
-    fs.rmSync(runDir(stateDir, runId), { recursive: true, force: true });
-}
-
 // Only newline-terminated lines count; a line that is not KIND EPOCH with a known kind is listed as unknown.
 function parseEvents(text: string): EventsSnapshot {
     const lines = text.split('\n').slice(0, -1);
@@ -316,6 +312,13 @@ export function launchDecision(stateDir: string, runId: string): LaunchDecision 
     }
     const value = readTextFile(path.join(decisionDir, DECISION_VALUE))?.trim();
     return value === 'go' || value === 'cancel' ? value : 'claimed';
+}
+
+// A cancelled launcher may finish writing exit_status while its run directory is removed.
+export function clearRun(stateDir: string, runId: string): void {
+    const cancelled = launchDecision(stateDir, runId) === 'cancel';
+    const retry = cancelled ? { maxRetries: 5, retryDelay: 20 } : {};
+    fs.rmSync(runDir(stateDir, runId), { recursive: true, force: true, ...retry });
 }
 
 function statusPath(stateDir: string, prKey: string): string {
