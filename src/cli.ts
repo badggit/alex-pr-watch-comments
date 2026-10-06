@@ -11,6 +11,8 @@ interface Draft {
     list: boolean;
     once: boolean;
     inPlace: boolean;
+    inPlaceExplicit: boolean;
+    worktreeExplicit: boolean;
     stop: string | undefined;
     positionals: string[];
     dir: string;
@@ -26,7 +28,7 @@ const PR_URL = new RegExp(
     'iu'
 );
 const LINE_BREAK = /[\n\r]/u;
-const FLAG_OPTIONS: ReadonlySet<string> = new Set(['--background', '--list', '--once', '--in-place']);
+const FLAG_OPTIONS: ReadonlySet<string> = new Set(['--background', '--list', '--once', '--in-place', '--worktree']);
 const VALUE_OPTIONS: ReadonlySet<string> = new Set([
     '--stop',
     '--dir',
@@ -154,6 +156,12 @@ function applyFlag(draft: Draft, name: string): void {
         }
         case '--in-place': {
             draft.inPlace = true;
+            draft.inPlaceExplicit = true;
+            break;
+        }
+        case '--worktree': {
+            draft.inPlace = false;
+            draft.worktreeExplicit = true;
             break;
         }
     }
@@ -161,6 +169,9 @@ function applyFlag(draft: Draft, name: string): void {
 
 function findConflict(draft: Draft): string | undefined {
     const stop = draft.stop !== undefined;
+    if (draft.inPlaceExplicit && draft.worktreeExplicit) {
+        return '--in-place cannot be combined with --worktree';
+    }
     if (draft.list && stop) {
         return '--list cannot be combined with --stop';
     }
@@ -234,7 +245,9 @@ export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
         background: false,
         list: false,
         once: false,
-        inPlace: false,
+        inPlace: true,
+        inPlaceExplicit: false,
+        worktreeExplicit: false,
         stop: undefined,
         positionals: [],
         dir: cwd,
@@ -280,7 +293,8 @@ export function usageText(): string {
         '',
         'Options:',
         '  --dir <path>          your clone of the repository (default: current directory)',
-        '  --in-place            work in the clone itself on the checked-out PR branch, not in the watch worktree',
+        '  --in-place            work in the clone itself (default; retained for compatibility)',
+        '  --worktree            work in a dedicated watch worktree next to the clone',
         `  --interval <seconds>  how often to look for new rockets, 1 to ${MAX_INTERVAL} (default ${DEFAULT_INTERVAL})`,
         '  --claude <path>       claude executable (default: found on PATH at start)',
         '  --claude-arg <arg>    extra claude argument, repeatable, passed literally',

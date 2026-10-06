@@ -1,6 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { createCloneGate, type CloneDeps, type GateEnv } from './cowGate.ts';
+import { gitIn } from './guards.ts';
+import { pidAlive } from './proc.ts';
+import type { CommandResult } from './types.ts';
+import { safeText } from './validate.ts';
+
 export const CLONE_TEMP_PREFIX = 'alex-pr-watch-comments-clone-';
 export const CLONE_TIMEOUT_MS = 600_000;
 
@@ -132,3 +138,120 @@ export function placeClone(
         return { kind: 'refused', code: errorCode(error) };
     }
 }
+
+export interface ClonerEnv extends GateEnv {
+    pid: number;
+    alive: (_pid: number) => boolean;
+    nowMs: () => number;
+    timeoutMs: number;
+}
+
+export type CloneOutcome =
+    | { kind: 'cloned' }
+    | { kind: 'unavailable'; reason: string }
+    | { kind: 'failed'; reason: string }
+    | { kind: 'skipped' };
+
+export interface Cloner {
+    cloneDependency(
+        _deps: CloneDeps,
+        _gitPath: string,
+        _source: string,
+        _target: string,
+        _rel: string
+    ): Promise<CloneOutcome>;
+}
+
+async function privateGitDirectory(deps: CloneDeps, gitPath: string, target: string): Promise<string | undefined> {
+    try {
+        const result = await gitIn(deps, gitPath, target, ['rev-parse', '--absolute-git-dir']);
+        const firstLine = result.stdout.split('\n', 1)[0] ?? '';
+        return result.code === 0 && !result.spawnError && path.isAbsolute(firstLine) ? firstLine : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function cloneFailure(result: CommandResult): string {
+    const reason = result.spawnError ?? `cp exited with ${result.code}`;
+    const detail = result.stderr.split('\n', 1)[0];
+    return detail ? `${reason}: ${detail}` : reason;
+}
+
+export function createCloner(env?: Partial<ClonerEnv>): Cloner {
+    const platform = env?.platform ?? process.platform;
+    const pid = env?.pid ?? process.pid;
+    const alive = env?.alive ?? pidAlive;
+    const nowMs = env?.nowMs ?? Date.now;
+    const timeoutMs = env?.timeoutMs ?? CLONE_TIMEOUT_MS;
+    const gate = createCloneGate({ platform, deviceOf: env?.deviceOf });
+    const failed = new Set<string>();
+    let counter = 0;
+    const nextTemp = (tempArea: string): string => {
+        let temp: string;
+        do {
+            counter += 1;
+            temp = path.join(tempArea, cloneTempName(pid, counter));
+        } while (lstatOrUndefined(temp) !== undefined);
+        return temp;
+    };
+    const fail = (dest: string, reason: string): CloneOutcome => {
+        failed.add(dest);
+        return { kind: 'failed', reason };
+    };
+    return {
+        async cloneDependency(deps, gitPath, source, target, rel) {
+            const dest = path.join(target, rel);
+            const ownLinkText = path.join(source, rel);
+            const stat = lstatOrUndefined(dest);
+            if (failed.has(dest) || (stat !== undefined && !isOwnLink(dest, stat, ownLinkText))) {
+                return { kind: 'skipped' };
+            }
+            const tempArea = await privateGitDirectory(deps, gitPath, target);
+            if (!tempArea) {
+                return fail(dest, 'cannot find the git directory of the worktree');
+            }
+            sweepDeadTemps(tempArea, alive);
+            const available = await gate.check(deps, {
+                sourceRoot: source,
+                target,
+                rel,
+                tempArea,
+                probePath: nextTemp(tempArea),
+            });
+            if (available.kind === 'unavailable') {
+                return available;
+            }
+            const temp = nextTemp(tempArea);
+            const command = cloneCommand(platform, ownLinkText, temp);
+            if (!command) {
+                return { kind: 'unavailable', reason: 'copy-on-write clones are not supported on this platform' };
+            }
+            const started = nowMs();
+            deps.log.info(`cloning ${safeText(rel)} into the watch worktree with copy-on-write`);
+            try {
+                const result = await deps.runner.run({ ...command, timeoutMs });
+                if (result.code !== 0 || result.spawnError) {
+                    removeTemp(temp);
+                    return fail(dest, cloneFailure(result));
+                }
+            } catch (error) {
+                removeTemp(temp);
+                return fail(dest, error instanceof Error ? error.message : 'cp failed');
+            }
+            if (lstatOrUndefined(temp)?.isDirectory() !== true) {
+                removeTemp(temp);
+                return fail(dest, 'cp did not create a directory');
+            }
+            const placement = placeClone(temp, dest, ownLinkText);
+            if (placement.kind === 'refused') {
+                return fail(dest, `cannot place the clone (${placement.code})`);
+            }
+            const elapsed = ((nowMs() - started) / 1000).toFixed(1);
+            deps.log.info(`cloned ${safeText(rel)} into the watch worktree in ${elapsed} s`);
+            return { kind: 'cloned' };
+        },
+    };
+}
+
+export const defaultCloner: Cloner = createCloner();

@@ -3,8 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 
+import { isRecord, parseJson } from '../../src/json.ts';
 import { acquireWorktreeLock, worktreeLockHolder } from '../../src/locks.ts';
 import { pidAlive } from '../../src/proc.ts';
+import { reconcile } from '../../src/reconcile.ts';
 import {
     attentionHint,
     captureRun,
@@ -436,7 +438,7 @@ await describe('evaluateRun decisions and effects', async () => {
         assert.equal(runExists(fixture), false);
     });
 
-    await test('completed while the fallback shell is alive ends claude and frees the slot', async (t) => {
+    await test('a recorded launcher exit does not release a completed run while Claude is alive', async (t) => {
         const fixture = await newRunFixture(t);
         const panePid = fixture.env.spawnOrphan('sleep', ['300']);
         await seedRun(fixture, { patch: { panePid }, events: SETTLED });
@@ -444,25 +446,59 @@ await describe('evaluateRun decisions and effects', async () => {
         fs.writeFileSync(path.join(runDir(fixture.stateDir, RUN_ID), 'exit_status'), '0');
         answerPaneTag(fixture);
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
-        assert.deepEqual(result, { state: 'completed', reason: 'done' });
-        assert.equal(pidAlive(claude), false);
-        assert.equal(lockExists(fixture, SESSION_KEY), false);
-        assert.equal(runExists(fixture), false);
+        assert.deepEqual(result, { state: 'retained', reason: 'completed-waiting-for-owner' });
+        assert.ok(pidAlive(claude));
+        assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
+        assert.ok(runExists(fixture));
+        assert.equal(doneMarks(fixture).length, 0);
     });
 
-    await test('completed: TERM reaches claude, the pane is marked done, the slot is freed', async (t) => {
+    await test('a settled outcome with no claude pid keeps a live launcher pane and its ownership', async (t) => {
+        const fixture = await newRunFixture(t);
+        const panePid = fixture.env.spawnOrphan('sleep', ['300']);
+        await seedRun(fixture, { patch: { panePid }, events: SETTLED });
+        answerPaneTag(fixture);
+        const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
+        assert.deepEqual(result, { state: 'retained', reason: 'completed-waiting-for-owner' });
+        assert.ok(pidAlive(panePid));
+        assert.equal(recordOf(fixture).state, 'completed');
+        assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
+        assert.ok(runExists(fixture));
+        assert.equal(doneMarks(fixture).length, 0);
+    });
+
+    await test('completed retains a live worker through manual activity and cleans up only after owner exit', async (t) => {
         const fixture = await newRunFixture(t);
         await seedRun(fixture, { events: SETTLED });
         const claude = await startClaude(fixture, 'cooperative');
         answerPaneTag(fixture);
-        const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
-        assert.deepEqual(result, { state: 'completed', reason: 'done' });
-        assert.equal(pidAlive(claude), false);
-        const tmuxCalls = fixture.fake.calls('tmux');
-        const tagRead = tmuxCalls.findIndex((call) => call.key === 'display-message' && call.args.includes('-p'));
-        const mark = tmuxCalls.findIndex((call) => call.key === 'set-option' && call.args.includes('@prwc_done'));
+        const terms = spyKills(t);
+        const retained = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
+        assert.deepEqual(retained, { state: 'retained', reason: 'completed-waiting-for-owner' });
+        assert.equal(recordOf(fixture).state, 'completed');
+        assert.ok(pidAlive(claude));
+        assert.deepEqual(terms(), []);
+        assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
+        assert.ok(runExists(fixture));
+        assert.equal(doneMarks(fixture).length, 0);
+
+        fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
+        assert.equal(recordOf(fixture).state, 'completed');
+        assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
+
+        appendEvents(fixture, ['prompt', 'tool'], 0);
+        const continued = await evaluate(fixture, lookupWith({ plus1At: undefined, eyes: false }));
+        assert.deepEqual(continued, retained);
+        assert.equal(recordOf(fixture).state, 'completed');
+        assert.deepEqual(terms(), []);
+        assert.equal(doneMarks(fixture).length, 0);
+
+        process.kill(claude, 'SIGKILL');
+        assert.ok(await waitUntil(5000, () => !pidAlive(claude)), 'the fake claude did not exit');
+        const finished = await evaluate(fixture, lookupWith({ plus1At: undefined, eyes: false }));
+        assert.deepEqual(finished, { state: 'completed', reason: 'done' });
         assert.equal(doneMarks(fixture).length, 1);
-        assert.ok(tagRead !== -1 && mark > tagRead, 'the pane was marked before its tag was read');
         assert.equal(lockExists(fixture, SESSION_KEY), false);
         assert.equal(runExists(fixture), false);
         assert.equal(tmuxMessages(fixture).length, 0);
@@ -529,57 +565,104 @@ await describe('evaluateRun decisions and effects', async () => {
         assert.ok(runExists(fixture));
     });
 
-    await test('a stop request during the TERM wait returns at once', async (t) => {
-        const fixture = await newRunFixture(t, { env: { PRWC_TERM_WAIT: '30' } });
+    await test('settled completion never sends TERM to Claude', async (t) => {
+        const fixture = await newRunFixture(t);
         await seedRun(fixture, { events: SETTLED });
         const termFile = path.join(fixture.env.root, 'claude.term');
         const claude = await startTermReportingClaude(fixture, termFile);
         const terms = spyKills(t);
-        const controller = new AbortController();
-        const pending = evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }), controller.signal);
-        assert.ok(await waitUntil(10_000, () => fs.existsSync(termFile)), 'the TERM never reached claude');
-        assert.deepEqual(terms(), [claude]);
-        const aborted = performance.now();
-        controller.abort();
-        const result = await pending;
-        assert.deepEqual(result, { state: 'deferred', reason: 'stop-requested' });
-        assert.ok(performance.now() - aborted < 3000, `took ${performance.now() - aborted} ms after the abort`);
+        const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
+        assert.deepEqual(result, { state: 'retained', reason: 'completed-waiting-for-owner' });
+        assert.equal(fs.existsSync(termFile), false);
+        assert.deepEqual(terms(), []);
         assert.ok(pidAlive(claude));
-        assert.equal(recordOf(fixture).state, 'running');
+        assert.equal(recordOf(fixture).state, 'completed');
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
         assert.equal(doneMarks(fixture).length, 0);
     });
 
-    await test('failed: claude ends, the pane is marked, the slot is freed, one message', async (t) => {
+    await test('a settled failed batch is retained for inspection and marked once', async (t) => {
         const fixture = await newRunFixture(t);
         await seedRun(fixture, { events: SETTLED });
         const claude = await startClaude(fixture, 'cooperative');
         answerPaneTag(fixture);
         const result = await evaluate(fixture, lookupWith({ eyes: false }));
-        assert.deepEqual(result, { state: 'failed', reason: 'claude-took-failure-path' });
-        assert.equal(pidAlive(claude), false);
+        assert.deepEqual(result, { state: 'retained', reason: 'failed-waiting-for-owner' });
+        assert.ok(pidAlive(claude));
+        assert.equal(recordOf(fixture).state, 'failed');
         assert.equal(thumbsDownAdds(fixture).length, 1);
         assert.equal(eyesRemovals(fixture).length, 0);
-        assert.equal(doneMarks(fixture).length, 1);
-        assert.equal(lockExists(fixture, SESSION_KEY), false);
-        assert.equal(runExists(fixture), false);
+        assert.equal(doneMarks(fixture).length, 0);
+        assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
+        assert.ok(runExists(fixture));
         assert.equal(tmuxMessages(fixture).length, 1);
     });
 
-    await test('a TERM-ignoring claude keeps the slot and needs attention', async (t) => {
-        const fixture = await newRunFixture(t, { env: { PRWC_TERM_WAIT: '1' } });
+    await test('an event during failure marking cannot change the certified failed outcome', async (t) => {
+        const fixture = await newRunFixture(t);
+        await seedRun(fixture, { events: SETTLED });
+        const claude = await startClaude(fixture, 'cooperative');
+        const terms = spyKills(t);
+        fixture.fake.respond('gh', 'PrwcAddReaction', () => {
+            const frozen = recordOf(fixture);
+            assert.equal(frozen.state, 'failed');
+            assert.deepEqual(frozen.pendingFailures, [{ nodeId: NODE_ID, dbId: 456, eyesOn: false }]);
+            appendEvents(fixture, ['prompt', 'tool'], 0);
+            return {};
+        });
+        const result = await evaluate(fixture, lookupWith({ eyes: false }));
+        assert.deepEqual(result, { state: 'retained', reason: 'failed-waiting-for-owner' });
+        const record = recordOf(fixture);
+        assert.equal(record.state, 'failed');
+        assert.equal(record.reason, 'claude-took-failure-path');
+        assert.equal(record.pendingFailures, undefined);
+        assert.deepEqual(terms(), []);
+        assert.ok(pidAlive(claude));
+        assert.ok(runExists(fixture));
+        assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
+    });
+
+    await test('a stop during failure marking persists its fixed outcome and exact pending targets', async (t) => {
+        const fixture = await newRunFixture(t);
+        await seedRun(fixture, { events: SETTLED });
+        const claude = await startClaude(fixture, 'cooperative');
+        const controller = new AbortController();
+        fixture.fake.respond('gh', 'PrwcAddReaction', () => {
+            controller.abort();
+            return { code: 143 };
+        });
+        const interrupted = await evaluate(fixture, lookupWith({ eyes: false }), controller.signal);
+        assert.deepEqual(interrupted, { state: 'deferred', reason: 'stop-requested' });
+        const pending = recordOf(fixture);
+        assert.equal(pending.state, 'failed');
+        assert.deepEqual(pending.pendingFailures, [{ nodeId: NODE_ID, dbId: 456, eyesOn: false }]);
+        assert.ok(pidAlive(claude));
+
+        fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
+        assert.equal(recordOf(fixture).pendingFailures, undefined);
+        const retried = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1, eyes: true }));
+        assert.deepEqual(retried, { state: 'retained', reason: 'failed-waiting-for-owner' });
+        assert.equal(recordOf(fixture).state, 'failed');
+        assert.equal(thumbsDownAdds(fixture).length, 2);
+        assert.equal(eyesRemovals(fixture).length, 0);
+        assert.equal(tmuxMessages(fixture).length, 1);
+    });
+
+    await test('a TERM-ignoring Claude is retained without a signal', async (t) => {
+        const fixture = await newRunFixture(t);
         await seedRun(fixture, { events: SETTLED });
         const claude = await startClaude(fixture, 'ignoring');
         answerPaneTag(fixture);
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
-        assert.deepEqual(result, { state: 'needs_attention', reason: 'claude-did-not-exit' });
+        assert.deepEqual(result, { state: 'retained', reason: 'completed-waiting-for-owner' });
         assert.ok(pidAlive(claude));
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
         const record = recordOf(fixture);
-        assert.equal(record.state, 'needs_attention');
-        assert.equal(record.reason, 'claude-did-not-exit');
+        assert.equal(record.state, 'completed');
+        assert.equal(record.reason, 'done');
         assert.equal(doneMarks(fixture).length, 0);
-        assert.equal(tmuxMessages(fixture).length, 1);
+        assert.equal(tmuxMessages(fixture).length, 0);
     });
 
     await test('events that arrived during the lookup defer the decision', async (t) => {
@@ -718,18 +801,23 @@ await describe('evaluateRun other effects', async () => {
             entries: [first, { ...first, nodeId: second.nodeId, dbId: 457, plus1At: undefined, eyes: false }],
         };
         const result = await evaluate(fixture, lookup);
-        assert.deepEqual(result, { state: 'failed', reason: 'claude-took-failure-path' });
+        assert.deepEqual(result, { state: 'retained', reason: 'failed-waiting-for-owner' });
         const marked = thumbsDownAdds(fixture);
         assert.equal(marked.length, 1);
         assert.ok((marked[0]?.input ?? '').includes(second.nodeId));
         assert.ok(tmuxMessages(fixture).some((call) => call.args.some((arg) => arg.includes('comments 457'))));
     });
 
-    await test('completed marks the pane on the record socket and frees the slot when marking fails', async (t) => {
+    await test('a retained completion marks the pane on the record socket only after Claude exits', async (t) => {
         const fixture = await newRunFixture(t);
         await seedRun(fixture, { patch: { socket: WORKER_SOCKET }, events: SETTLED });
-        await startClaude(fixture, 'cooperative');
+        const claude = await startClaude(fixture, 'cooperative');
         answerPaneTag(fixture);
+        const retained = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
+        assert.equal(retained.state, 'retained');
+        assert.equal(doneMarks(fixture).length, 0);
+        process.kill(claude, 'SIGKILL');
+        assert.ok(await waitUntil(5000, () => !pidAlive(claude)), 'the fake claude did not exit');
         fixture.fake.respond('tmux', 'set-option', { code: 1, stderr: 'no such pane\n' });
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
         assert.equal(result.state, 'completed');
@@ -746,8 +834,13 @@ await describe('evaluateRun other effects', async () => {
         const otherRun = '20261002110000-1';
         assert.ok(acquireWorktreeLock(fixture.stateDir, SESSION_KEY, otherRun, process.pid, fixture.deps.log, now));
         await seedRun(fixture, { patch: { worktreeKey: OTHER_KEY }, events: SETTLED });
-        await startClaude(fixture, 'cooperative');
+        const claude = await startClaude(fixture, 'cooperative');
         answerPaneTag(fixture);
+        const retained = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
+        assert.equal(retained.state, 'retained');
+        assert.equal(worktreeLockHolder(fixture.stateDir, OTHER_KEY), RUN_ID);
+        process.kill(claude, 'SIGKILL');
+        assert.ok(await waitUntil(5000, () => !pidAlive(claude)), 'the fake claude did not exit');
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
         assert.equal(result.state, 'completed');
         assert.equal(lockExists(fixture, OTHER_KEY), false);
@@ -756,6 +849,23 @@ await describe('evaluateRun other effects', async () => {
 });
 
 await describe('evaluateRun fail-closed cleanup', async () => {
+    await test('a corrupt pending failure target keeps the run and lock without a GitHub request', async (t) => {
+        const fixture = await newRunFixture(t);
+        await seedRun(fixture, {
+            patch: { state: 'failed', reason: 'claude-took-failure-path' },
+            events: SETTLED,
+        });
+        const value = parseJson(recordText(fixture));
+        assert.ok(isRecord(value));
+        value.pendingFailures = [{ nodeId: 'PRRC_not-this-run', dbId: 999, eyesOn: true }];
+        fs.writeFileSync(path.join(runDir(fixture.stateDir, RUN_ID), 'record.json'), JSON.stringify(value));
+        const result = await evaluate(fixture, lookupWith({ eyes: false }));
+        assert.deepEqual(result, { state: 'needs_attention', reason: 'record-unreadable' });
+        assert.ok(runExists(fixture));
+        assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
+        assert.equal(fixture.fake.calls('gh').length, 0);
+    });
+
     await test('an unreadable record keeps the slot and the lock and tells the owner once', async (t) => {
         const fixture = await newRunFixture(t);
         await seedRun(fixture, { events: SETTLED });

@@ -19,6 +19,7 @@ import type {
     LaunchDecision,
     RecordPatch,
     RunComment,
+    RunFailureTarget,
     RunRecord,
     RunState,
     WatcherState,
@@ -102,10 +103,46 @@ function narrowComments(value: unknown): RunComment[] | undefined {
     return comments.length > 0 && comments.length === items?.length ? comments : undefined;
 }
 
+function narrowFailureTarget(value: unknown): RunFailureTarget | undefined {
+    const read = createFieldReader(value);
+    const target: RunFailureTarget = {
+        nodeId: read.text('nodeId'),
+        dbId: read.integer('dbId'),
+        eyesOn: read.flag('eyesOn'),
+    };
+    return read.failed() ? undefined : target;
+}
+
+type PendingFailuresRead = { valid: true; targets?: RunFailureTarget[] } | { valid: false };
+
+function narrowPendingFailures(value: unknown, comments: readonly RunComment[]): PendingFailuresRead {
+    const raw = getPath(value, 'pendingFailures');
+    if (raw === undefined) {
+        return { valid: true };
+    }
+    const items = getArray(value, 'pendingFailures');
+    if (items === undefined) {
+        return { valid: false };
+    }
+    const targets = items.map((item) => narrowFailureTarget(item)).filter((item) => item !== undefined);
+    const keys = targets.map((target) => `${target.nodeId}\n${target.dbId}`);
+    const known = targets.every((target) =>
+        comments.some((comment) => comment.nodeId === target.nodeId && comment.dbId === target.dbId)
+    );
+    if (targets.length !== items.length || new Set(keys).size !== keys.length || !known) {
+        return { valid: false };
+    }
+    return { valid: true, targets };
+}
+
 function narrowRecord(value: unknown): RunRecord | undefined {
     const state = getString(value, 'state');
     const comments = narrowComments(value);
     if (getPath(value, 'format') !== RECORD_FORMAT || !isRunState(state) || comments === undefined) {
+        return;
+    }
+    const pending = narrowPendingFailures(value, comments);
+    if (!pending.valid || (pending.targets !== undefined && state !== 'failed')) {
         return;
     }
     const read = createFieldReader(value);
@@ -118,6 +155,7 @@ function narrowRecord(value: unknown): RunRecord | undefined {
         number: read.integer('number'),
         prUrl: read.text('prUrl'),
         comments,
+        ...(pending.targets === undefined ? {} : { pendingFailures: pending.targets }),
         headSha: read.text('headSha'),
         remote: read.text('remote'),
         branch: read.text('branch'),

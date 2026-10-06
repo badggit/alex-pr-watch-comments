@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { gitIn } from './guards.ts';
-import { isLinkExcluded, isOwnLink, removeIgnoredLinks, type LinkDeps } from './ignoredLinks.ts';
+import { isDependencyDir, isLinkExcluded, isOwnLink, removeIgnoredLinks, type LinkDeps } from './ignoredLinks.ts';
 import { acquireWorktreeLock, releaseWorktreeLock } from './locks.ts';
 import type { Deps, Session, WatchWorktree } from './types.ts';
 import { safeText } from './validate.ts';
@@ -205,8 +205,7 @@ export async function prepareWatchWorktree(deps: LinkDeps, request: WorktreeRequ
 
 const CLEANUP_RUN_PREFIX = 'cleanup-';
 
-// Ignored files other than own links and build and cache outputs: git worktree remove would delete them without
-// asking.
+// Ignored files other than own links, build and cache outputs and node_modules folders keep the worktree.
 async function ignoredKept(deps: LinkDeps, gitPath: string, worktree: WatchWorktree): Promise<string | undefined> {
     const args = ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'];
     const listed = await gitIn(deps, gitPath, worktree.path, args);
@@ -217,7 +216,11 @@ async function ignoredKept(deps: LinkDeps, gitPath: string, worktree: WatchWorkt
         .split('\0')
         .map((entry) => (entry.endsWith('/') ? entry.slice(0, -1) : entry))
         .filter(
-            (entry) => entry.length > 0 && !isLinkExcluded(entry) && !isOwnLink(worktree.source, worktree.path, entry)
+            (entry) =>
+                entry.length > 0 &&
+                !isLinkExcluded(entry) &&
+                !isDependencyDir(entry) &&
+                !isOwnLink(worktree.source, worktree.path, entry)
         );
     return kept.length === 0 ? undefined : `it holds ignored files: ${safeText(kept.slice(0, 3).join(', '))}`;
 }
@@ -236,9 +239,7 @@ async function keepReason(deps: LinkDeps, session: Session, dir: string): Promis
     return ahead.stdout.trim() === '0' ? undefined : 'it has commits that are not pushed';
 }
 
-// Removes the watch worktree of a closed PR when no run holds it, its tracked files are clean, every commit is
-// pushed and it holds no ignored files but build and cache outputs; otherwise it is kept and the reason is logged.
-// The local branch is kept. Never forced: git refuses a worktree with untracked files, which are then kept too.
+// Removes a closed PR's worktree when unlocked, clean and pushed; ignored files other than own links, build and cache outputs and node_modules folders keep it. Git removal is never forced, so untracked files keep it too; the local branch is kept.
 export async function removeWatchWorktree(
     deps: Pick<Deps, 'runner' | 'log' | 'nowSeconds'>,
     session: Session

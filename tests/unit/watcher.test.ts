@@ -453,15 +453,6 @@ async function deadPid(setup: Setup): Promise<number> {
     return pid;
 }
 
-// A fake claude that survives TERM and creates termFile once a TERM arrived; ready proves the trap is installed.
-async function termReportingClaude(setup: Setup, termFile: string): Promise<number> {
-    const ready = path.join(setup.testEnv.root, 'claude.ready');
-    const script = `trap "echo term > ${termFile}" TERM; : > ${ready}; while :; do sleep 1; done`;
-    const pid = setup.testEnv.spawnOrphan('/bin/sh', ['-c', script]);
-    assert.ok(await waitUntil(5000, () => fs.existsSync(ready)), 'the fake claude did not start');
-    return pid;
-}
-
 await describe('watchTick', async () => {
     await test('one poll and one batched lookup for every rocketed comment', async (t) => {
         const setup = await makeSetup(t);
@@ -670,6 +661,130 @@ await describe('watchTick', async () => {
         assert.equal(statusOf(setup).state, 'running');
     });
 
+    await test('a retained completion leaves an edited queued approval untouched until the owner exits', async (t) => {
+        const setup = await makeSetup(t);
+        setup.session.keepPanes = 0;
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, {
+            dbId: 101,
+            claudePid,
+            events: ['prompt', 'stop'],
+        });
+        const queued = rocketed(setup.now, 102, 100, { editedAt: setup.now - 50 });
+        respondLookup(setup, [{ dbId: 101, rocketAt: setup.now - 600, plus1At: setup.now - 30 }]);
+        respondPoll(setup, [{ dbId: 101 }, queued]);
+        respondLookup(setup, [queued]);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(stateOf(setup, runId), 'completed');
+        assert.deepEqual(mutations(setup.fake), []);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(rt.inflightRunId, runId);
+        assert.equal(statusOf(setup).state, 'holding');
+        assert.equal(statusOf(setup).reason, 'completed-waiting-for-owner');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 2);
+        assert.equal(splits(setup.fake), 0);
+        assert.deepEqual(mutations(setup.fake), []);
+        assert.equal(setup.fake.calls('tmux').filter((call) => call.args.includes('@prwc_done')).length, 0);
+        assert.equal(setup.fake.callCount('tmux', 'kill-pane'), 0);
+
+        process.kill(claudePid, 'SIGKILL');
+        assert.ok(await waitUntil(5000, () => !pidAlive(claudePid)), 'the fake claude did not exit');
+        fs.writeFileSync(path.join(runDir(setup.stateDir, runId), 'exit_status'), '0');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(rt.inflightRunId, undefined);
+        assert.equal(rocketRemovals(setup.fake, 102).length, 1);
+        assert.equal(splits(setup.fake), 0);
+    });
+
+    await test('a queued approval starts after the retained owner closes Claude', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, {
+            dbId: 101,
+            claudePid,
+            events: ['prompt', 'stop'],
+            patch: { state: 'completed', reason: 'done' },
+        });
+        const queued = rocketed(setup.now, 102, 100);
+        respondPoll(setup, [queued]);
+        respondLookup(setup, [queued]);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(splits(setup.fake), 0);
+
+        process.kill(claudePid, 'SIGKILL');
+        assert.ok(await waitUntil(5000, () => !pidAlive(claudePid)), 'the fake claude did not exit');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(rt.inflightRunId, runId);
+        assert.equal(splits(setup.fake), 0);
+
+        fs.writeFileSync(path.join(runDir(setup.stateDir, runId), 'exit_status'), '0');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.ok(rt.inflightRunId?.endsWith('-102'), `dispatched ${rt.inflightRunId}`);
+        assert.equal(splits(setup.fake), 1);
+        assert.equal(stateOf(setup, rt.inflightRunId), 'running');
+    });
+
+    await test('a dead retained run cleans up without a comment lookup before polling again', async (t) => {
+        const setup = await makeSetup(t);
+        const runId = await seedRun(setup, {
+            dbId: 101,
+            events: ['prompt', 'stop'],
+            exitStatus: true,
+            patch: { state: 'completed', reason: 'done' },
+        });
+        setup.fake.respond('gh', 'PrwcLookup', GH_FAIL);
+        respondPoll(setup, []);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(rt.inflightRunId, undefined);
+        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 0);
+        assert.equal(fs.existsSync(worktreeLockDir(setup)), false);
+        assert.deepEqual(listRunIds(setup.stateDir), []);
+        assert.equal(statusOf(setup).state, 'polling');
+        assert.equal(statusOf(setup).reason, 'done');
+    });
+
+    await test('a closed pull request waits for a retained owner before cleanup', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, {
+            dbId: 101,
+            claudePid,
+            events: ['prompt', 'stop'],
+            patch: { state: 'completed', reason: 'done' },
+        });
+        respondPoll(setup, [], { state: 'CLOSED' });
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(statusOf(setup).state, 'holding');
+        assert.equal(statusOf(setup).reason, 'completed-waiting-for-owner');
+        assert.ok(pidAlive(claudePid));
+        assert.ok(fs.existsSync(worktreeLockDir(setup)));
+
+        process.kill(claudePid, 'SIGKILL');
+        assert.ok(await waitUntil(5000, () => !pidAlive(claudePid)), 'the fake claude did not exit');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(statusOf(setup).state, 'holding');
+        assert.equal(rt.inflightRunId, runId);
+        assert.ok(fs.existsSync(worktreeLockDir(setup)));
+
+        fs.writeFileSync(path.join(runDir(setup.stateDir, runId), 'exit_status'), '0');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'prClosed');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assert.equal(splits(setup.fake), 0);
+        assert.equal(fs.existsSync(worktreeLockDir(setup)), false);
+        assert.deepEqual(listRunIds(setup.stateDir), []);
+        assert.equal(statusOf(setup).state, 'exited');
+        assert.equal(statusOf(setup).reason, 'pull request is CLOSED');
+    });
+
     await test('a closed pull request ends the watcher', async (t) => {
         const setup = await makeSetup(t);
         respondPoll(setup, [], { state: 'CLOSED' });
@@ -725,26 +840,24 @@ await describe('watchTick', async () => {
         assert.equal(rt.failures, 0);
     });
 
-    await test('an abort during the TERM wait ends the tick as stopped', async (t) => {
-        const termFile = 'term.flag';
-        const setup = await makeSetup(t, { env: { PRWC_TERM_WAIT: '30' } });
-        const termPath = path.join(setup.testEnv.root, termFile);
-        const claudePid = await termReportingClaude(setup, termPath);
+    await test('a watcher stop leaves a retained completion, worker and lock intact', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
         const runId = await seedRun(setup, { dbId: 101, claudePid, events: ['prompt', 'stop'] });
         respondPoll(setup, [{ dbId: 101 }]);
         respondLookup(setup, [{ dbId: 101, rocketAt: setup.now - 600, plus1At: setup.now - 30 }]);
         const rt = createRuntime('', '@1');
         rt.inflightRunId = runId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(stateOf(setup, runId), 'completed');
+        assert.equal(statusOf(setup).state, 'holding');
+        assert.equal(statusOf(setup).reason, 'completed-waiting-for-owner');
+
         const controller = new AbortController();
-        const tick = watchTick(setup.deps, setup.session, rt, controller.signal);
-        setup.atCleanup(async () => {
-            controller.abort();
-            await tick;
-        });
-        assert.ok(await waitUntil(15_000, () => fs.existsSync(termPath)), 'the TERM did not arrive');
         controller.abort();
-        assert.equal(await within(tick, 3000), 'stopped');
-        assert.equal(stateOf(setup, runId), 'running');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, controller.signal), 'stopped');
+        assert.equal(stateOf(setup, runId), 'completed');
+        assert.ok(pidAlive(claudePid));
         assert.ok(fs.existsSync(worktreeLockDir(setup)));
         assert.equal(splits(setup.fake), 0);
     });
@@ -998,36 +1111,41 @@ await describe('runWatch', async () => {
         assert.equal(fs.existsSync(prLockDir(setup)), false);
     });
 
-    await test('an abort during the first TERM wait stops promptly after the first GitHub check', async (t) => {
-        const setup = await makeSetup(t, { env: { PRWC_LAUNCH_TOKEN: TOKEN, PRWC_TERM_WAIT: '30' } });
+    await test('a restarted watcher publishes ready and can stop while a retained run stays owned', async (t) => {
+        const setup = await makeSetup(t, { env: { PRWC_LAUNCH_TOKEN: TOKEN } });
         markLaunchReady(setup.stateDir, PR_KEY, TOKEN);
-        const termPath = path.join(setup.testEnv.root, 'term.flag');
-        const claudePid = await termReportingClaude(setup, termPath);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
         const deadWatcher = await deadPid(setup);
         const runId = await seedRun(setup, {
             dbId: 101,
             claudePid,
             events: ['prompt', 'stop'],
             watcherPid: deadWatcher,
+            patch: { state: 'completed', reason: 'done' },
         });
         setup.fake.respond('tmux', 'list-panes', { stdout: `%5 ${runId}\n` });
-        respondPoll(setup, [{ dbId: 101 }]);
-        respondLookup(setup, [{ dbId: 101, rocketAt: setup.now - 600, plus1At: setup.now - 30 }]);
+        respondPoll(setup, []);
         const controller = new AbortController();
         const watching = startWatch(setup, false, controller.signal);
         setup.atCleanup(async () => {
             controller.abort();
             await watching;
         });
-        const reached = await waitUntil(15_000, () => launchResultOf(setup) === 'firstPoll' && fs.existsSync(termPath));
-        assert.ok(reached, 'the first poll was not published or the TERM did not arrive');
+        assert.ok(
+            await waitUntil(5000, () => launchResultOf(setup) === 'firstPoll'),
+            'the first poll was not published'
+        );
         controller.abort();
         assert.equal(await within(watching, 3000), 0);
-        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 1);
-        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 0);
+        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 0);
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
         assert.equal(launchResultOf(setup), 'firstPoll');
         assert.equal(fs.existsSync(prLockDir(setup)), false);
-        assert.equal(stateOf(setup, runId), 'running');
+        assert.equal(stateOf(setup, runId), 'completed');
+        assert.equal(statusOf(setup).state, 'holding');
+        assert.equal(statusOf(setup).reason, 'completed-waiting-for-owner');
+        assert.ok(pidAlive(claudePid));
+        assert.equal(worktreeLockHolder(setup.stateDir, setup.session.worktreeKey), runId);
     });
 
     await test('an unreadable own start time is fatal without a PR lock', async (t) => {

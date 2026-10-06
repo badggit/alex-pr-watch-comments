@@ -206,6 +206,12 @@ export interface RunComment {
     eyesAdded: boolean;
 }
 
+export interface RunFailureTarget {
+    nodeId: string;
+    dbId: number;
+    eyesOn: boolean;
+}
+
 // comments holds the run's batch in the order the worker resolves them (oldest rocket first), never empty.
 export interface RunRecord {
     format: 2;
@@ -216,6 +222,7 @@ export interface RunRecord {
     number: number;
     prUrl: string;
     comments: RunComment[];
+    pendingFailures?: RunFailureTarget[];
     headSha: string;
     remote: string;
     branch: string;
@@ -317,6 +324,6 @@ export interface RunDecision {
     reason: string;
 }
 
-export type EvaluateState = RunDecision['state'] | 'preparing' | 'deferred';
+export type EvaluateState = RunDecision['state'] | 'preparing' | 'retained' | 'deferred';
 
 export type PaceMode = 'normal' | 'backoff' | 'throttled';

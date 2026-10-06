@@ -360,13 +360,13 @@ function warnStopHooks(deps: PreflightDeps, toplevel: string): void {
     }
     const quiet = readEnvSeconds(deps.env, ENV_NAMES.stopQuiet, DEFAULT_STOP_QUIET);
     deps.log.warn(
-        `owner Stop hooks found (${labels.join(', ')}): a Stop hook that runs longer than ${ENV_NAMES.stopQuiet} ` +
-            `(${quiet} s) can be cut short when the run completes; raise ${ENV_NAMES.stopQuiet} if yours are slow`
+        `owner Stop hooks found (${labels.join(', ')}): completion waits for ${ENV_NAMES.stopQuiet} (${quiet} s) ` +
+            'without hook activity; completed Claude and its lock stay open until you close Claude'
     );
 }
 
 // Start-up checks in a fixed order, first failure wins. Nothing here changes anything on GitHub or in the owner's
-// working tree; outside --in-place mode it creates or reuses the watch worktree and links ignored paths into it.
+// working tree; in --worktree mode it creates or reuses the watch worktree and links ignored paths into it.
 export async function preflight(
     deps: PreflightDeps,
     options: CliOptions,

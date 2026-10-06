@@ -26,6 +26,7 @@ import type {
     LookupResult,
     PollResult,
     PrRef,
+    PrState,
     RateInfo,
     Session,
     WatcherStatus,
@@ -57,6 +58,7 @@ interface WatcherRuntime {
     pendingLockRunId: string | undefined;
     endMessage: string;
     unpublishedFatal: string;
+    closedPrState: Exclude<PrState, 'OPEN'> | undefined;
 }
 
 export interface TickHooks {
@@ -121,6 +123,7 @@ export function createRuntime(launchToken: string, windowId: string): WatcherRun
         pendingLockRunId: undefined,
         endMessage: '',
         unpublishedFatal: '',
+        closedPrState: undefined,
     };
 }
 
@@ -240,7 +243,8 @@ function failedFetch(
 function noteInflight(session: Session, runId: string): Inflight {
     const read = readRecord(session.stateDir, runId);
     const record = read.kind === 'ok' ? read.record : undefined;
-    const nodeIds = record?.comments.map((comment) => comment.nodeId) ?? [];
+    const retained = record?.state === 'completed' || record?.state === 'failed';
+    const nodeIds = retained ? [] : (record?.comments.map((comment) => comment.nodeId) ?? []);
     if (record?.state === 'preparing') {
         return { kind: 'preparing', runId, nodeIds };
     }
@@ -324,7 +328,8 @@ async function evaluateInflight(
     if (result.state === 'deferred' && previous?.reason !== reason) {
         deps.log.info(`run ${safeText(runId)} deferred: ${reason}`);
     }
-    const state = result.state === 'needs_attention' ? 'needs_attention' : 'running';
+    const state =
+        result.state === 'needs_attention' ? 'needs_attention' : result.state === 'retained' ? 'holding' : 'running';
     const hint = state === 'needs_attention' ? attentionHint(result.reason) : '';
     setStatus(deps, session, { state, reason, hint, ...runFields(session, runId) });
     return { kind: 'kept' };
@@ -382,6 +387,14 @@ function emptyLookup(): LookupResult {
     return { rate: { remaining: undefined, resetAt: undefined }, entries: [], gone: [] };
 }
 
+function runIsRetained(session: Session, runId: string | undefined): boolean {
+    if (runId === undefined) {
+        return false;
+    }
+    const read = readRecord(session.stateDir, runId);
+    return read.kind === 'ok' && (read.record.state === 'completed' || read.record.state === 'failed');
+}
+
 function pollDue(deps: Deps, session: Session, rt: WatcherRuntime): boolean {
     return rt.lastPollAt === undefined || deps.nowSeconds() - rt.lastPollAt >= session.interval;
 }
@@ -437,9 +450,14 @@ async function pollTick(
         return 'stopped';
     }
     if (poll.prState !== 'OPEN') {
-        deps.log.info(`pull request is ${poll.prState}, stopping`);
-        setStatus(deps, session, { state: 'exited', reason: `pull request is ${poll.prState}`, hint: '' });
+        rt.closedPrState = poll.prState;
         rt.endMessage = `pull request is ${poll.prState}`;
+        if (inflight !== undefined) {
+            deps.log.info(`pull request is ${poll.prState}; waiting for the worker owner to close Claude`);
+            return 'ok';
+        }
+        deps.log.info(`pull request is ${poll.prState}, stopping`);
+        setStatus(deps, session, { state: 'exited', reason: rt.endMessage, hint: '' });
         return 'prClosed';
     }
     const inflightIds = inflight?.nodeIds ?? [];
@@ -459,6 +477,9 @@ async function pollTick(
         return 'stopped';
     }
     publishLaunch(deps.log, stateDir, pr.prKey, rt, 'firstPoll', 'first poll succeeded');
+    if (runIsRetained(session, rt.inflightRunId)) {
+        return 'ok';
+    }
     const queue = buildQueue(poll, lookup, inflightIds, deps.log);
     for (const entry of queue.edited) {
         if (stop.aborted) {
@@ -500,6 +521,10 @@ export async function watchTick(
     retryPendingLock(deps, session, rt);
     const inflight = rt.inflightRunId === undefined ? undefined : noteInflight(session, rt.inflightRunId);
     hooks?.beforePoll?.();
+    if (rt.closedPrState !== undefined && inflight === undefined) {
+        setStatus(deps, session, { state: 'exited', reason: rt.endMessage, hint: '', ...NO_RUN });
+        return 'prClosed';
+    }
     if (inflight?.kind !== 'evaluate') {
         return await pollTick(deps, session, rt, { inflight, idleReason: '' }, ctx);
     }
@@ -509,13 +534,17 @@ export async function watchTick(
             return checked.outcome;
         }
         case 'kept': {
-            if (pollDue(deps, session, rt)) {
+            if (rt.closedPrState === undefined && pollDue(deps, session, rt)) {
                 return await pollTick(deps, session, rt, { inflight, idleReason: '' }, ctx);
             }
             rt.failures = 0;
             return 'ok';
         }
         case 'cleared': {
+            if (rt.closedPrState !== undefined) {
+                setStatus(deps, session, { state: 'exited', reason: rt.endMessage, hint: '', ...NO_RUN });
+                return 'prClosed';
+            }
             return await pollTick(deps, session, rt, { inflight: undefined, idleReason: checked.reason }, ctx);
         }
     }

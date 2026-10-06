@@ -163,6 +163,34 @@ await describe('records', async () => {
         );
     });
 
+    await test('pending failure targets round-trip only for failed comments of the same run', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const sample = sampleRecord(RUN_A, PR_KEY);
+        const target = { nodeId: 'PRRC_1', dbId: 1, eyesOn: true };
+        const write = (value: unknown): void => {
+            fs.writeFileSync(path.join(dir, 'record.json'), JSON.stringify(value));
+        };
+
+        const failed: RunRecord = { ...sample, state: 'failed', pendingFailures: [target] };
+        write(failed);
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record: failed });
+
+        for (const pendingFailures of [
+            [{ ...target, nodeId: 'PRRC_other' }],
+            [{ ...target, dbId: 2 }],
+            [{ ...target, eyesOn: 'yes' }],
+            [target, target],
+        ]) {
+            write({ ...failed, pendingFailures });
+            assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+        }
+        write({ ...sample, state: 'completed', pendingFailures: [target] });
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+        write({ ...failed, pendingFailures: 'broken' });
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+    });
+
     await test('runIdsForPr lists only runs of that PR and clearRun removes a run', async (t) => {
         const fixture = await newFixture(t);
         for (const [runId, prKey] of [

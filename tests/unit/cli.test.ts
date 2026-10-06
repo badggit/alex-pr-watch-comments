@@ -87,7 +87,7 @@ await describe('parseArgs', async () => {
         assert.equal(options.claude, undefined);
         assert.deepEqual(options.claudeArgs, []);
         assert.equal(options.once, false);
-        assert.equal(options.inPlace, false);
+        assert.equal(options.inPlace, true);
     });
 
     await test('value options', () => {
@@ -131,6 +131,8 @@ await describe('parseArgs', async () => {
         assert.equal(okOptions([PR_URL, '--once']).once, true);
         assert.equal(okOptions([PR_URL, '--in-place']).inPlace, true);
         assert.equal(okOptions([PR_URL, '--background', '--in-place']).inPlace, true);
+        assert.equal(okOptions([PR_URL, '--worktree']).inPlace, false);
+        assert.equal(okOptions([PR_URL, '--background', '--worktree']).inPlace, false);
     });
 
     await test('--help', () => {
@@ -161,6 +163,14 @@ await describe('parseArgs', async () => {
         assert.match(errorMessage([PR_URL, '--background', '--list']), /--background/u);
         assert.match(errorMessage(['--background', '--stop', PR_URL]), /--background/u);
         assert.equal(errorMessage([PR_URL, '--background', '--once']), '--once cannot be combined with --background');
+        assert.equal(
+            errorMessage([PR_URL, '--in-place', '--worktree']),
+            '--in-place cannot be combined with --worktree'
+        );
+        assert.equal(
+            errorMessage([PR_URL, '--worktree', '--in-place']),
+            '--in-place cannot be combined with --worktree'
+        );
         assert.match(errorMessage([]), /PR URL/u);
         assert.match(errorMessage(['--background']), /PR URL/u);
         assert.match(errorMessage(['https://localhost/o/r/pull/1']), /invalid PR URL/u);
@@ -181,6 +191,8 @@ await describe('parseArgs', async () => {
             '--keep-panes',
             '--batch-max',
             '--once',
+            '--in-place',
+            '--worktree',
             '--help',
         ]) {
             assert.ok(usage.includes(option), option);

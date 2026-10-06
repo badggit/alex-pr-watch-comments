@@ -73,3 +73,107 @@ export function findSampleFile(dir: string, limit = SAMPLE_ENTRY_LIMIT): string 
     }
     return undefined;
 }
+
+export interface GateEnv {
+    platform: NodeJS.Platform;
+    deviceOf: (_file: string) => number | undefined;
+}
+
+export interface GateRequest {
+    sourceRoot: string;
+    target: string;
+    rel: string;
+    tempArea: string;
+    probePath: string;
+}
+
+export type GateResult = { kind: 'available' } | { kind: 'unavailable'; reason: string };
+
+export interface CloneGate {
+    check(_deps: CloneDeps, _request: GateRequest): Promise<GateResult>;
+}
+
+const DARWIN_TOOL_ENV = { LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' };
+const VOLUME_READ_FAILURE: GateResult = { kind: 'unavailable', reason: 'cannot read the volume type' };
+const LINUX_PROBE_FAILURE: GateResult = {
+    kind: 'unavailable',
+    reason: 'no copy-on-write between the clone and the worktree',
+};
+
+function deviceOf(file: string): number | undefined {
+    try {
+        return fs.statSync(file).dev;
+    } catch {
+        return undefined;
+    }
+}
+
+function sameVolume(env: GateEnv, request: GateRequest): boolean {
+    const sourceDevice = env.deviceOf(path.join(request.sourceRoot, request.rel));
+    const targetDevice = env.deviceOf(request.target);
+    const tempDevice = env.deviceOf(request.tempArea);
+    return sourceDevice !== undefined && sourceDevice === targetDevice && sourceDevice === tempDevice;
+}
+
+async function checkDarwin(deps: CloneDeps, request: GateRequest): Promise<GateResult> {
+    try {
+        const df = await deps.runner.run({ file: '/bin/df', args: ['-P', request.target], env: DARWIN_TOOL_ENV });
+        const mount = await deps.runner.run({ file: '/sbin/mount', args: [], env: DARWIN_TOOL_ENV });
+        if (df.code !== 0 || mount.code !== 0 || df.spawnError || mount.spawnError) {
+            return VOLUME_READ_FAILURE;
+        }
+        const volume = parseDfMount(df.stdout);
+        if (!volume) {
+            return VOLUME_READ_FAILURE;
+        }
+        return isApfsMount(mount.stdout, volume)
+            ? { kind: 'available' }
+            : { kind: 'unavailable', reason: 'the worktree volume is not APFS' };
+    } catch {
+        return VOLUME_READ_FAILURE;
+    }
+}
+
+async function probeLinux(deps: CloneDeps, sample: string, probePath: string): Promise<GateResult> {
+    try {
+        const result = await deps.runner.run({ file: 'cp', args: ['--reflink=always', sample, probePath] });
+        return result.code === 0 && !result.spawnError ? { kind: 'available' } : LINUX_PROBE_FAILURE;
+    } catch {
+        return LINUX_PROBE_FAILURE;
+    } finally {
+        fs.rmSync(probePath, { force: true });
+    }
+}
+
+// macOS cp -c can silently make a full copy, and Node copyFile cannot clone there; the gate selects a link fallback.
+export function createCloneGate(env?: Partial<GateEnv>): CloneGate {
+    const gateEnv: GateEnv = { platform: env?.platform ?? process.platform, deviceOf: env?.deviceOf ?? deviceOf };
+    const cache = new Map<string, GateResult>();
+    return {
+        async check(deps, request) {
+            if (gateEnv.platform !== 'darwin' && gateEnv.platform !== 'linux') {
+                return { kind: 'unavailable', reason: 'copy-on-write clones are not supported on this platform' };
+            }
+            if (gateEnv.platform === 'darwin' && !sameVolume(gateEnv, request)) {
+                return { kind: 'unavailable', reason: 'the clone and the worktree are on different volumes' };
+            }
+            const key = `${request.sourceRoot}\0${request.target}`;
+            const cached = cache.get(key);
+            if (cached) {
+                return cached;
+            }
+            let result: GateResult;
+            if (gateEnv.platform === 'darwin') {
+                result = await checkDarwin(deps, request);
+            } else {
+                const sample = findSampleFile(path.join(request.sourceRoot, request.rel));
+                if (!sample) {
+                    return { kind: 'available' };
+                }
+                result = await probeLinux(deps, sample, request.probePath);
+            }
+            cache.set(key, result);
+            return result;
+        },
+    };
+}

@@ -1,7 +1,7 @@
 ---
 name: alex-pr-watch-comments
-description: Starts, lists or stops the alex-pr-watch-comments watcher, which turns rocket-approved inline review comments on a GitHub pull request into commits made by Claude Code in tmux panes. Use only when the user runs this skill with a PR URL, list, or stop and a PR URL.
-argument-hint: PR_URL | list | stop PR_URL
+description: Starts, lists or stops the alex-pr-watch-comments watcher, which turns rocket-approved inline review comments on a GitHub pull request into commits made by Claude Code in tmux panes. Use only when the user runs this skill with a PR URL, optionally followed by --worktree, list, or stop and a PR URL.
+argument-hint: PR_URL [--worktree] | list | stop PR_URL
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments *)
 disable-model-invocation: true
 ---
@@ -18,6 +18,8 @@ Run the command from the current project directory, as a single Bash call, with 
 
 - A pull request URL (`https://HOST/OWNER/REPO/pull/NUMBER`, where HOST is github.com or a GitHub Enterprise Server host):
   `"${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments" PR_URL --background`
+- A pull request URL followed by `--worktree`:
+  `"${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments" PR_URL --background --worktree`
 - `list`:
   `"${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments" --list`
 - `stop` followed by a pull request URL:
@@ -25,7 +27,7 @@ Run the command from the current project directory, as a single Bash call, with 
 
 Put the URL from the arguments in place of `PR_URL`, as one argument, exactly as given.
 
-If the arguments match none of these forms (empty, several URLs, an unknown word), do not run anything. Reply with the usage line `/alex-pr-watch-comments:alex-pr-watch-comments PR_URL | list | stop PR_URL` and stop.
+If the arguments match none of these forms (empty, several URLs, an unknown word or any other option), do not run anything. Reply with the usage line `/alex-pr-watch-comments:alex-pr-watch-comments PR_URL [--worktree] | list | stop PR_URL` and stop.
 
 ## Rules
 

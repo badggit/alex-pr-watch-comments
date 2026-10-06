@@ -10,7 +10,6 @@ import {
     DEFAULT_START_TIMEOUT,
     DEFAULT_STOP_QUIET,
     DEFAULT_STOP_WAIT,
-    DEFAULT_TERM_WAIT,
     ENV_NAMES,
     GH_STRIP_VARS,
     PS_PATH,
@@ -53,7 +52,6 @@ type LaunchOutcome = LaunchResult | 'exited' | undefined;
 // environment never survives; the state directory and the launch token are set separately.
 const FORWARDED_OVERRIDES: readonly (readonly [string, number])[] = [
     [ENV_NAMES.startTimeout, DEFAULT_START_TIMEOUT],
-    [ENV_NAMES.termWait, DEFAULT_TERM_WAIT],
     [ENV_NAMES.launchWait, DEFAULT_LAUNCH_WAIT],
     [ENV_NAMES.rateReserve, DEFAULT_RATE_RESERVE],
     [ENV_NAMES.stopQuiet, DEFAULT_STOP_QUIET],
@@ -146,7 +144,7 @@ function watcherCommand(session: Session, entry: BackgroundEntry): string[] {
         session.pr.prUrl,
         '--dir',
         session.worktree?.source ?? session.dirCanon,
-        ...(session.worktree === undefined ? ['--in-place'] : []),
+        session.worktree === undefined ? '--in-place' : '--worktree',
         '--interval',
         String(session.interval),
         '--keep-panes',

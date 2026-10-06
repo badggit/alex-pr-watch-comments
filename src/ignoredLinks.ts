@@ -1,11 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { defaultCloner, type Cloner } from './cowClone.ts';
 import { gitIn } from './guards.ts';
 import type { Deps } from './types.ts';
 import { safeText } from './validate.ts';
 
 export type LinkDeps = Pick<Deps, 'runner' | 'log'>;
+
+export interface SyncCounts {
+    linked: number;
+    cloned: number;
+}
 
 // Build and cache outputs stay per working tree: a link would let a run on the PR branch overwrite the outputs of
 // the branch the owner works on.
@@ -101,9 +107,7 @@ function readTextOrEmpty(file: string): string {
     }
 }
 
-// Appends a pattern for every link to the repository's info/exclude, which all its working trees share, so git
-// lists no link as untracked and no link can be committed by accident. For the clone this changes nothing: every
-// linked path is one that is ignored there already.
+// Links and cloned node_modules get patterns in the shared info/exclude so git never lists or commits them.
 async function excludeLinks(deps: LinkDeps, gitPath: string, target: string, rels: readonly string[]): Promise<void> {
     if (rels.length === 0) {
         return;
@@ -131,43 +135,83 @@ async function excludeLinks(deps: LinkDeps, gitPath: string, target: string, rel
     }
 }
 
-// Links every ignored path of SOURCE into TARGET where TARGET has nothing at that path yet; existing files, own
-// links and paths whose parent directory is missing in TARGET are left alone. Returns the number of new links, or
-// undefined when the ignored paths cannot be listed. Every own link is then excluded in info/exclude. Never fails
-// the caller: a link that cannot be made is logged.
+function linkMissing(deps: LinkDeps, source: string, target: string, rel: string): boolean {
+    const dest = path.join(target, rel);
+    if (lstatOrUndefined(dest) !== undefined) {
+        return false;
+    }
+    try {
+        fs.symlinkSync(path.join(source, rel), dest);
+        return true;
+    } catch (error) {
+        const code = error instanceof Error && 'code' in error ? String(error.code) : 'unknown';
+        if (code !== 'EEXIST') {
+            deps.log.warn(`cannot link ${safeText(rel)} into the worktree: ${safeText(code)}`);
+        }
+        return false;
+    }
+}
+
+// Clones ignored node_modules with copy-on-write, converts own links and falls back to links; other paths stay shared. Returns new link/clone counts, or undefined on listing failure; excludes own links and dependency directories from git.
 export async function syncIgnoredLinks(
     deps: LinkDeps,
     gitPath: string,
     source: string,
-    target: string
-): Promise<number | undefined> {
+    target: string,
+    cloner: Cloner = defaultCloner
+): Promise<SyncCounts | undefined> {
     if (source === target) {
-        return 0;
+        return { linked: 0, cloned: 0 };
     }
     const entries = await ignoredPaths(deps, gitPath, source);
     if (entries === undefined) {
         deps.log.warn(`cannot list the ignored files of ${safeText(source)}; nothing linked into the worktree`);
         return;
     }
-    let created = 0;
+    const counts: SyncCounts = { linked: 0, cloned: 0 };
+    const unavailable: string[] = [];
     for (const rel of entries) {
         const dest = path.join(target, rel);
-        if (lstatOrUndefined(dest) !== undefined || !parentInside(target, rel)) {
+        const dependency = isDependencyDir(rel);
+        if (
+            !parentInside(target, rel) ||
+            (lstatOrUndefined(dest) !== undefined && !(dependency && isOwnLink(source, target, rel)))
+        ) {
             continue;
         }
-        try {
-            fs.symlinkSync(path.join(source, rel), dest);
-            created += 1;
-        } catch (error) {
-            const code = error instanceof Error && 'code' in error ? String(error.code) : 'unknown';
-            if (code !== 'EEXIST') {
-                deps.log.warn(`cannot link ${safeText(rel)} into the worktree: ${safeText(code)}`);
+        if (dependency) {
+            const outcome = await cloner.cloneDependency(deps, gitPath, source, target, rel);
+            if (outcome.kind === 'cloned') {
+                counts.cloned += 1;
+                continue;
             }
+            const linked = linkMissing(deps, source, target, rel);
+            counts.linked += Number(linked);
+            if (outcome.kind === 'unavailable' && linked) {
+                unavailable.push(rel);
+            }
+            if (outcome.kind === 'failed') {
+                const fallback = isOwnLink(source, target, rel) ? '; linked it instead' : '';
+                deps.log.warn(
+                    `cannot clone ${safeText(rel)} into the watch worktree (${safeText(outcome.reason)})${fallback}`
+                );
+            }
+        } else {
+            counts.linked += Number(linkMissing(deps, source, target, rel));
         }
     }
-    const own = entries.filter((rel) => isOwnLink(source, target, rel));
-    await excludeLinks(deps, gitPath, target, own);
-    return created;
+    if (unavailable.length > 0) {
+        deps.log.info(
+            `linked ${unavailable.map((rel) => safeText(rel)).join(', ')}: no copy-on-write between the clone and the worktree`
+        );
+    }
+    const excluded = entries.filter(
+        (rel) =>
+            isOwnLink(source, target, rel) ||
+            (isDependencyDir(rel) && lstatOrUndefined(path.join(target, rel))?.isDirectory() === true)
+    );
+    await excludeLinks(deps, gitPath, target, excluded);
+    return counts;
 }
 
 // Removes the links syncIgnoredLinks made, found among the untracked and ignored entries of TARGET itself, so a

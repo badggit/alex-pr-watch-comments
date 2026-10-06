@@ -63,7 +63,6 @@ const OLD_START = 'Mon Jan  1 00:00:00 2001';
 const TOKEN_ITEM = 'PRWC_LAUNCH_TOKEN=';
 const FORWARDED = [
     'PRWC_START_TIMEOUT',
-    'PRWC_TERM_WAIT',
     'PRWC_LAUNCH_WAIT',
     'PRWC_RATE_RESERVE',
     'PRWC_STOP_QUIET',
@@ -437,7 +436,7 @@ await describe('background start', async () => {
         assert.deepEqual(launchFiles(setup), []);
     });
 
-    await test('a worktree start passes the clone, not the worktree, and no --in-place', async (t) => {
+    await test('a worktree start passes the clone and explicit --worktree', async (t) => {
         const setup = await makeSetup(t);
         gitSync(setup.testEnv.env, ['-C', setup.clone, 'checkout', '--quiet', 'main']);
         answerAtOnce(setup, 'firstPoll');
@@ -446,6 +445,7 @@ await describe('background start', async () => {
         const clone = fs.realpathSync.native(setup.clone);
         assert.equal(call.args[call.args.indexOf('--dir') + 1], clone);
         assert.ok(!call.args.includes('--in-place'));
+        assert.ok(call.args.includes('--worktree'));
         const worktree = path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12');
         assert.equal(gitSync(setup.testEnv.env, ['-C', worktree, 'branch', '--show-current']).trim(), BRANCH);
         assert.ok(printed(setup).includes(`created the watch worktree ${worktree}`), printed(setup));
@@ -509,13 +509,14 @@ await describe('background start', async () => {
     });
 
     await test('every override is forwarded with its effective value, defaults included', async (t) => {
-        const setup = await makeSetup(t, { env: { PRWC_TERM_WAIT: 'abc' } });
+        const setup = await makeSetup(t);
         answerAtOnce(setup, 'firstPoll');
         assert.equal(await startBackground(setup), 0, printed(setup));
         const items = envItems(onlyWindow(setup));
-        for (const expected of ['PRWC_LAUNCH_WAIT=60', 'PRWC_STOP_QUIET=10', 'PRWC_TERM_WAIT=10']) {
+        for (const expected of ['PRWC_LAUNCH_WAIT=60', 'PRWC_STOP_QUIET=10']) {
             assert.ok(items.includes(expected), `${expected} missing from ${items.join(' ')}`);
         }
+        assert.ok(!items.some((item) => item.startsWith('PRWC_TERM_WAIT=')), items.join(' '));
         for (const name of FORWARDED) {
             assert.equal(items.filter((item) => item.startsWith(`${name}=`)).length, 1, name);
         }

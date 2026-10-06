@@ -6,7 +6,7 @@ import { getNumber } from './json.ts';
 import { adoptWorktreeLock, worktreeLockHolder } from './locks.ts';
 import { pidAlive } from './proc.ts';
 import { markFailed, removeEyes } from './reactions.ts';
-import { commentOutcome, failTarget, notifyOwner, releaseRunLock } from './runState.ts';
+import { captureRun, commentOutcome, evaluateRun, failTarget, notifyOwner, releaseRunLock } from './runState.ts';
 import { claimLaunch, clearRun, launchDecision, listRunIds, mergeRecord, readRecord, workerAlive } from './runStore.ts';
 import { readJsonFile, worktreeDir } from './stateStore.ts';
 import { paneForRun } from './tmuxControl.ts';
@@ -18,10 +18,12 @@ export interface ReconcileResult {
 
 type DropOutcome = 'dropped' | 'kept' | 'aborted';
 
-const UNFINISHED_STATES: ReadonlySet<RunState> = new Set<RunState>([
+const HELD_STATES: ReadonlySet<RunState> = new Set<RunState>([
     'preparing',
     'running',
     'needs_attention',
+    'completed',
+    'failed',
     'abandoned',
 ]);
 
@@ -41,8 +43,11 @@ async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promis
     const pane = await paneForRun(deps, session.tools.tmux, record.socket, runId);
     if (pane === undefined) {
         const reason = 'worker-pane-not-found';
-        mergeRecord(session.stateDir, runId, { state: 'needs_attention', reason });
-        if (record.state !== 'needs_attention' || record.reason !== reason) {
+        const retained = record.state === 'completed' || record.state === 'failed';
+        if (!retained) {
+            mergeRecord(session.stateDir, runId, { state: 'needs_attention', reason });
+        }
+        if (retained || record.state !== 'needs_attention' || record.reason !== reason) {
             await notifyOwner(deps, session, `run ${runId} needs attention: ${reason}`);
         }
     }
@@ -106,6 +111,24 @@ function finishAbandonedRun(deps: Deps, session: Session, record: RunRecord): Dr
     return 'dropped';
 }
 
+async function finishRetainedRun(
+    deps: Deps,
+    session: Session,
+    record: RunRecord,
+    stop?: AbortSignal
+): Promise<DropOutcome> {
+    const signal = stop ?? new AbortController().signal;
+    const result = await evaluateRun(
+        deps,
+        session,
+        record.runId,
+        captureRun(session.stateDir, record.runId),
+        { rate: { remaining: undefined, resetAt: undefined }, entries: [], gone: [] },
+        signal
+    );
+    return result.state === record.state ? 'dropped' : signal.aborted ? 'aborted' : 'kept';
+}
+
 function lockWatcherPid(stateDir: string, wtKey: string): number | undefined {
     return getNumber(readJsonFile(path.join(worktreeDir(stateDir, wtKey), 'lock', 'owner.json')), 'watcherPid');
 }
@@ -159,12 +182,32 @@ export async function reconcile(deps: Deps, session: Session, stop?: AbortSignal
         if (launchDecision(session.stateDir, runId) !== 'go') {
             claimLaunch(session.stateDir, runId, 'cancel');
         }
-        if (!UNFINISHED_STATES.has(record.state)) {
+        if (!HELD_STATES.has(record.state)) {
             continue;
         }
         if (record.state === 'abandoned') {
             if (finishAbandonedRun(deps, session, record) === 'kept') {
                 kept.push(runId);
+            }
+            continue;
+        }
+        if (record.state === 'completed' || record.state === 'failed') {
+            if (!workerAlive(session.stateDir, runId)) {
+                const finished = await finishRetainedRun(deps, session, record, stop);
+                if (finished === 'kept') {
+                    kept.push(runId);
+                }
+            } else if (inflightRunId === undefined) {
+                await adoptRun(deps, session, record);
+                if (record.pendingFailures !== undefined) {
+                    const finished = await finishRetainedRun(deps, session, record, stop);
+                    if (finished === 'dropped') {
+                        continue;
+                    }
+                }
+                inflightRunId = runId;
+            } else {
+                deps.log.warn(`run ${runId} also has a live worker; run ${inflightRunId} stays in flight`);
             }
             continue;
         }
