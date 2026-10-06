@@ -26,6 +26,12 @@ export function isLinkExcluded(rel: string): boolean {
     return EXCLUDED_NAMES.has(name) || name.endsWith(EXCLUDED_SUFFIX);
 }
 
+// Cloned per worktree where copy-on-write works and disposable on cleanup; Python venvs are not, because a byte copy
+// of a venv still runs the clone's interpreter.
+export function isDependencyDir(rel: string): boolean {
+    return path.posix.basename(rel) === 'node_modules';
+}
+
 // The topmost ignored paths of the working tree at source, relative and without a trailing slash, build and cache
 // outputs left out; undefined when git fails.
 export async function ignoredPaths(deps: LinkDeps, gitPath: string, source: string): Promise<string[] | undefined> {
