@@ -345,25 +345,61 @@ function assertNoControl(text: string): void {
     }
 }
 
-// A zombie: sh starts a short child and replaces itself with sleep, which never reaps that child.
+async function cleanupZombieChild(
+    runner: CommandRunner,
+    pidFile: string,
+    parent: number,
+    parentStart: string | undefined
+): Promise<void> {
+    try {
+        const child = Number.parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+        if (!Number.isInteger(child) || child <= 1 || parentStart === undefined) {
+            return;
+        }
+        const owner = await runner.run({ file: '/bin/ps', args: ['-o', 'ppid=', '-p', String(child)] });
+        if (
+            owner.code === 0 &&
+            Number.parseInt(owner.stdout.trim(), 10) === parent &&
+            (await processStart(runner, parent)) === parentStart
+        ) {
+            process.kill(child, 'SIGKILL');
+        }
+    } catch {
+        return;
+    }
+}
+
+// Terminate the child only after its parent execs sleep, so the shell cannot reap it first.
 async function spawnZombie(setup: Setup): Promise<number> {
     const pidFile = path.join(setup.testEnv.root, 'zombie.pid');
-    const script = `sleep 0 & echo $! > ${pidFile}; exec sleep 300`;
-    setup.testEnv.spawnOrphan('/bin/sh', ['-c', script]);
-    let zombie = 0;
-    const ready = await waitUntil(10_000, async () => {
-        zombie = Number.parseInt(fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : '', 10);
-        if (!Number.isInteger(zombie)) {
-            return false;
-        }
-        const state = await createProcessRunner(setup.testEnv.env).run({
-            file: '/bin/ps',
-            args: ['-o', 'stat=', '-p', String(zombie)],
+    const script = '/bin/sleep 300 & echo $! > "$1"; exec /bin/sleep 300';
+    const parent = setup.testEnv.spawnOrphan('/bin/sh', ['-c', script, 'sh', pidFile]);
+    const runner = createProcessRunner(setup.testEnv.env);
+    const parentStart = await processStart(runner, parent);
+    try {
+        const parentReady = await waitUntil(10_000, async () => {
+            const command = await runner.run({
+                file: '/bin/ps',
+                args: ['-o', 'comm=', '-p', String(parent)],
+            });
+            return command.code === 0 && path.basename(command.stdout.trim()) === 'sleep';
         });
-        return state.stdout.trim().startsWith('Z');
-    });
-    assert.ok(ready, 'no zombie appeared');
-    return zombie;
+        assert.ok(parentReady, 'zombie parent did not exec sleep');
+        const zombie = Number.parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+        assert.ok(Number.isInteger(zombie) && zombie > 1, 'invalid zombie child pid');
+        process.kill(zombie, 'SIGTERM');
+        const ready = await waitUntil(10_000, async () => {
+            const state = await runner.run({
+                file: '/bin/ps',
+                args: ['-o', 'stat=', '-p', String(zombie)],
+            });
+            return state.stdout.trim().startsWith('Z');
+        });
+        assert.ok(ready, 'no zombie appeared');
+        return zombie;
+    } finally {
+        await cleanupZombieChild(runner, pidFile, parent, parentStart);
+    }
 }
 
 function stop(setup: Setup, pr = PR): Promise<number> {
