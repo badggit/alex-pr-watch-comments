@@ -14,6 +14,9 @@ export interface WorktreeEntry {
     branch: string | undefined;
     bare: boolean;
     prunable: boolean;
+    // Only a hint: git 2.29 prints no locked line in porcelain output.
+    locked: boolean;
+    detached: boolean;
 }
 
 export type WorktreeResult = { ok: true; worktree: WatchWorktree; created: boolean } | { ok: false; reason: string };
@@ -40,7 +43,14 @@ export function parseWorktreeList(text: string): WorktreeEntry[] {
     let current: WorktreeEntry | undefined;
     for (const line of text.split('\n')) {
         if (line.startsWith('worktree ')) {
-            current = { path: line.slice('worktree '.length), branch: undefined, bare: false, prunable: false };
+            current = {
+                path: line.slice('worktree '.length),
+                branch: undefined,
+                bare: false,
+                prunable: false,
+                locked: false,
+                detached: false,
+            };
             entries.push(current);
         } else if (current !== undefined) {
             if (line.startsWith(`branch ${BRANCH_REF_PREFIX}`)) {
@@ -49,13 +59,17 @@ export function parseWorktreeList(text: string): WorktreeEntry[] {
                 current.bare = true;
             } else if (line === 'prunable' || line.startsWith('prunable ')) {
                 current.prunable = true;
+            } else if (line === 'locked' || line.startsWith('locked ')) {
+                current.locked = true;
+            } else if (line === 'detached') {
+                current.detached = true;
             }
         }
     }
     return entries;
 }
 
-function canonical(file: string): string {
+export function canonical(file: string): string {
     try {
         return fs.realpathSync.native(file);
     } catch {
@@ -63,16 +77,20 @@ function canonical(file: string): string {
     }
 }
 
-function samePath(left: string, right: string): boolean {
+export function samePath(left: string, right: string): boolean {
     return left === right || canonical(left) === canonical(right);
 }
 
-async function listWorktrees(deps: LinkDeps, gitPath: string, dir: string): Promise<WorktreeEntry[] | undefined> {
+export async function listWorktrees(
+    deps: LinkDeps,
+    gitPath: string,
+    dir: string
+): Promise<WorktreeEntry[] | undefined> {
     const listed = await gitIn(deps, gitPath, dir, ['worktree', 'list', '--porcelain']);
     return listed.code === 0 ? parseWorktreeList(listed.stdout) : undefined;
 }
 
-function entryExists(file: string): boolean {
+export function entryExists(file: string): boolean {
     try {
         fs.lstatSync(file);
         return true;

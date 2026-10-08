@@ -36,11 +36,36 @@ await describe('parseWorktreeList', async () => {
             '',
         ].join('\n');
         assert.deepEqual(parseWorktreeList(text), [
-            { path: '/repo', branch: 'main', bare: false, prunable: false },
-            { path: '/alex-pr-watch-comments-pr-7', branch: 'feature/x', bare: false, prunable: false },
-            { path: '/detached', branch: undefined, bare: false, prunable: false },
-            { path: '/gone', branch: 'old', bare: false, prunable: true },
-            { path: '/bare.git', branch: undefined, bare: true, prunable: false },
+            { path: '/repo', branch: 'main', bare: false, prunable: false, locked: false, detached: false },
+            {
+                path: '/alex-pr-watch-comments-pr-7',
+                branch: 'feature/x',
+                bare: false,
+                prunable: false,
+                locked: true,
+                detached: false,
+            },
+            { path: '/detached', branch: undefined, bare: false, prunable: false, locked: false, detached: true },
+            { path: '/gone', branch: 'old', bare: false, prunable: true, locked: false, detached: false },
+            { path: '/bare.git', branch: undefined, bare: true, prunable: false, locked: false, detached: false },
+        ]);
+    });
+
+    await test('a locked line with a reason also marks the entry locked', () => {
+        const text = [
+            'worktree /repo',
+            'HEAD 1111111111111111111111111111111111111111',
+            'branch refs/heads/main',
+            '',
+            'worktree /kept',
+            'HEAD 2222222222222222222222222222222222222222',
+            'branch refs/heads/side',
+            'locked some reason',
+            '',
+        ].join('\n');
+        assert.deepEqual(parseWorktreeList(text), [
+            { path: '/repo', branch: 'main', bare: false, prunable: false, locked: false, detached: false },
+            { path: '/kept', branch: 'side', bare: false, prunable: false, locked: true, detached: false },
         ]);
     });
 
