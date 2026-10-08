@@ -14,8 +14,8 @@ const RUN_PATH = /^\/[\w./+-]*$/u;
 const SOCKET_PATH = /^\/[\w./-]*$/u;
 const UNSAFE_TEXT = /[^\w .,:/+()=-]/gu;
 const SAFE_TEXT_LIMIT = 200;
-const FIRST_PRINTABLE = 32;
-const DELETE = 127;
+const FIRST_PRINTABLE = 0x20;
+const DELETE = 0x7f;
 // Node timers overflow above 2^31-1 milliseconds and then fire after 1 ms, so larger values would spin a loop.
 const MAX_ENV_SECONDS = 2_147_483;
 
@@ -61,18 +61,20 @@ export function isSafeRunPath(value: string): boolean {
     return RUN_PATH.test(value);
 }
 
-// For tool paths and the gh config directory, which only travel as literal arguments or quoted words.
-export function isSafeAbsPath(value: string): boolean {
-    if (!value.startsWith('/')) {
-        return false;
-    }
+// A line break or another control character is unsafe to log and to write as one line.
+export function hasControlCharacter(value: string): boolean {
     for (const character of value) {
         const code = character.codePointAt(0) ?? 0;
         if (code < FIRST_PRINTABLE || code === DELETE) {
-            return false;
+            return true;
         }
     }
-    return true;
+    return false;
+}
+
+// For tool paths and the gh config directory, which only travel as literal arguments or quoted words.
+export function isSafeAbsPath(value: string): boolean {
+    return value.startsWith('/') && !hasControlCharacter(value);
 }
 
 export function isSafeSocketPath(value: string): boolean {
