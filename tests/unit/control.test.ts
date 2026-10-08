@@ -785,6 +785,42 @@ await describe('list', async () => {
         assert.ok(setup.deps.outText().includes(expected), setup.deps.outText());
     });
 
+    await test('a retained run shows its outcome', async (t) => {
+        const setup = await makeSetup(t);
+        seedRecord(setup, '20261002120000-101', { state: 'retained', outcome: 'failed', startedAt: setup.now - 90 });
+        assert.equal(await runList(setup.deps, setup.stateDir), 0);
+        const output = setup.deps.outText();
+        assert.ok(output.includes('state=retained outcome=failed comments=101,102 age=90s\n'), output);
+    });
+
+    await test('a run removed while listing prints nothing', async (t) => {
+        const setup = await makeSetup(t);
+        seedRecord(setup, '20261002120000-101', { startedAt: setup.now - 90 });
+        seedRecord(setup, '20261002120000-102', { startedAt: setup.now - 60 });
+        let listed: readonly string[] = [];
+        const hooks = {
+            afterListing: (runIds: readonly string[]): void => {
+                listed = runIds;
+                fs.rmSync(runDir(setup.stateDir, '20261002120000-101'), { recursive: true, force: true });
+            },
+        };
+        assert.equal(await runList(setup.deps, setup.stateDir, hooks), 0);
+        const output = setup.deps.outText();
+        assert.deepEqual(listed, ['20261002120000-101', '20261002120000-102']);
+        assert.ok(!output.includes('20261002120000-101'), output);
+        assert.ok(!output.includes('unreadable record'), output);
+        assert.ok(output.includes('run 20261002120000-102 state=running comments=101,102 age=60s\n'), output);
+    });
+
+    await test('a run directory without a record is reported as unreadable', async (t) => {
+        const setup = await makeSetup(t);
+        const runId = '20261002120000-103';
+        fs.mkdirSync(runDir(setup.stateDir, runId), { recursive: true, mode: 0o700 });
+        assert.equal(await runList(setup.deps, setup.stateDir), 0);
+        const expected = `unreadable record ${path.join(runDir(setup.stateDir, runId), 'record.json')} (format unknown)`;
+        assert.ok(setup.deps.outText().includes(expected), setup.deps.outText());
+    });
+
     await test('another state format is reported and exits 0', async (t) => {
         const setup = await makeSetup(t);
         setFormat(setup, '2');
