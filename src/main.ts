@@ -6,9 +6,11 @@ import { parseArgs, usageText } from './cli.ts';
 import { GH_STRIP_VARS } from './constants.ts';
 import { runBackground, runList, runStop } from './control.ts';
 import { createLogger } from './log.ts';
+import type { NewWorktreeArgs } from './newWorktreeArgs.ts';
+import { runNewWorktree, type NewWorktreeIo } from './newWorktreeCommand.ts';
 import { createProcessRunner } from './proc.ts';
 import { resolveStateDir } from './stateStore.ts';
-import type { CliOptions, CommandRunner, Deps, Env } from './types.ts';
+import type { CliOptions, CommandRunner, Deps, Env, Logger } from './types.ts';
 import { safeText } from './validate.ts';
 import { installStopSignals, runWatch } from './watcher.ts';
 
@@ -31,16 +33,20 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }
 }
 
+function stderrLogger(): Logger {
+    return createLogger(
+        (line) => {
+            process.stderr.write(`${line}\n`);
+        },
+        () => new Date()
+    );
+}
+
 function buildDeps(env: Env, runner: CommandRunner): Deps {
     return {
         runner,
         env,
-        log: createLogger(
-            (line) => {
-                process.stderr.write(`${line}\n`);
-            },
-            () => new Date()
-        ),
+        log: stderrLogger(),
         out: (text) => {
             process.stdout.write(text);
         },
@@ -71,6 +77,26 @@ async function runMode(options: CliOptions, env: Env, cwd: string): Promise<numb
     }
 }
 
+// Prints the outcome and returns the exit code: only a created or reused worktree path reaches stdout.
+async function runNewWorktreeMode(args: NewWorktreeArgs, env: Env, cwd: string): Promise<number> {
+    const io: NewWorktreeIo = { env, log: stderrLogger(), makeRunner: (childEnv) => createProcessRunner(childEnv) };
+    const outcome = await runNewWorktree(io, args, cwd);
+    switch (outcome.kind) {
+        case 'ok': {
+            await writeText(process.stdout, `${outcome.path}\n`);
+            return 0;
+        }
+        case 'refused': {
+            await writeText(process.stderr, `alex-pr-watch-comments: ${outcome.reason}\n`);
+            return 1;
+        }
+        case 'usage': {
+            await writeText(process.stderr, `alex-pr-watch-comments: ${outcome.message}\n\n${usageText()}`);
+            return 2;
+        }
+    }
+}
+
 // A background window empties each GH_STRIP_VARS name its tmux server environment may hold (tmux cannot unset one
 // for a new window); an empty one is removed here before anything runs, so this process never holds it either.
 function dropEmptyStripVars(): void {
@@ -78,6 +104,17 @@ function dropEmptyStripVars(): void {
         if (process.env[name] === '') {
             Reflect.deleteProperty(process.env, name);
         }
+    }
+}
+
+// An unexpected error is reported on stderr and exits 1.
+async function exitCodeOf(run: () => Promise<number>): Promise<number> {
+    try {
+        return await run();
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'unknown error';
+        await writeText(process.stderr, `alex-pr-watch-comments: ${safeText(message)}\n`);
+        return 1;
     }
 }
 
@@ -99,13 +136,11 @@ switch (parsed.kind) {
         break;
     }
     case 'ok': {
-        try {
-            process.exitCode = await runMode(parsed.options, callerEnv, callerCwd);
-        } catch (error) {
-            const message = error instanceof Error ? error.message : 'unknown error';
-            await writeText(process.stderr, `alex-pr-watch-comments: ${safeText(message)}\n`);
-            process.exitCode = 1;
-        }
+        process.exitCode = await exitCodeOf(() => runMode(parsed.options, callerEnv, callerCwd));
+        break;
+    }
+    case 'newWorktree': {
+        process.exitCode = await exitCodeOf(() => runNewWorktreeMode(parsed.args, callerEnv, callerCwd));
         break;
     }
 }
