@@ -767,7 +767,7 @@ await describe('watchTick', async () => {
             patch: { state: 'retained', outcome: 'completed', reason: 'done' },
         });
         const reconciled = await reconcile(setup.deps, setup.session);
-        assert.deepEqual(reconciled, { inflightRunId: undefined });
+        assert.deepEqual(reconciled, { inflightRunId: undefined, problem: undefined });
         assert.deepEqual(listRunIds(setup.stateDir), []);
         respondPoll(setup, []);
         const rt = createRuntime('', '@1');
@@ -793,7 +793,7 @@ await describe('watchTick', async () => {
         rt.inflightRunId = runId;
         assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
         assert.equal(statusOf(setup).state, 'holding');
-        assert.equal(statusOf(setup).reason, 'completed-waiting-for-owner');
+        assert.equal(statusOf(setup).reason, 'completed-waiting-for-owner, PR closed');
         assert.ok(pidAlive(claudePid));
         assert.ok(fs.existsSync(worktreeLockDir(setup)));
 
@@ -891,6 +891,172 @@ await describe('watchTick', async () => {
         assert.ok(pidAlive(claudePid));
         assert.ok(fs.existsSync(worktreeLockDir(setup)));
         assert.equal(splits(setup.fake), 0);
+    });
+});
+
+const RETAINED_REASON = 'completed-waiting-for-owner';
+const NEXT_BATCH_HINT = 'exit Claude in pane 5 to start the next batch';
+const OTHER_PR: PrRef = { ...PR, number: 13, prUrl: 'https://github.com/o/r/pull/13', prKey: 'o+r+13' };
+
+// A retained completion of comment 101 with a live claude, in flight in a fresh runtime.
+async function retainedInflight(setup: Setup): Promise<{ runId: string; rt: ReturnType<typeof createRuntime> }> {
+    const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+    const runId = await seedRun(setup, {
+        dbId: 101,
+        claudePid,
+        events: ['prompt', 'stop'],
+        patch: { state: 'retained', outcome: 'completed', reason: 'done' },
+    });
+    const rt = createRuntime('', '@1');
+    rt.inflightRunId = runId;
+    return { runId, rt };
+}
+
+function assertWaiting(setup: Setup, reason: string, hint: string): void {
+    const status = statusOf(setup);
+    assert.equal(status.state, 'holding');
+    assert.equal(status.reason, reason);
+    assert.equal(status.hint, hint);
+}
+
+// Overwrites the shown reason and hint, so a later assertion proves they were written again.
+function scrambleStatus(setup: Setup): void {
+    writeStatus(setup.stateDir, PR_KEY, { reason: 'stale', hint: 'stale' }, setup.now);
+}
+
+await describe('retained waiting set', async () => {
+    await test('approved comments are counted read-only while a run is retained', async (t) => {
+        const setup = await makeSetup(t);
+        const { runId, rt } = await retainedInflight(setup);
+        const comments = [rocketed(setup.now, 101, 50), rocketed(setup.now, 102, 100)];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assert.deepEqual(mutations(setup.fake), []);
+        assert.equal(splits(setup.fake), 0);
+        assert.deepEqual(listRunIds(setup.stateDir), [runId]);
+        assert.equal(rt.inflightRunId, runId);
+        assertWaiting(setup, `${RETAINED_REASON}, 2 approved comments waiting`, NEXT_BATCH_HINT);
+        assert.equal(rt.waiting?.count, 2);
+    });
+
+    await test('the whole queue counts, edited and unconfirmed rockets do not, nothing is logged', async (t) => {
+        const setup = await makeSetup(t);
+        setup.session.batchMax = 1;
+        const { runId, rt } = await retainedInflight(setup);
+        const edited = rocketed(setup.now, 104, 300, { editedAt: setup.now - 10 });
+        const unconfirmed: CommentSpec = { dbId: 105, rocket: true };
+        const approved = [rocketed(setup.now, 102, 100), rocketed(setup.now, 103, 200), rocketed(setup.now, 106, 50)];
+        const comments = [...approved, edited, unconfirmed];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assertWaiting(setup, `${RETAINED_REASON}, 3 approved comments waiting`, NEXT_BATCH_HINT);
+        assert.deepEqual(rocketRemovals(setup.fake), []);
+        assert.deepEqual(mutations(setup.fake), []);
+        assert.equal(splits(setup.fake), 0);
+        assert.deepEqual(listRunIds(setup.stateDir), [runId]);
+        assert.ok(!setup.deps.logLines.some((line) => line.includes('viewer rocket time not found')));
+        assert.ok(!setup.deps.logLines.some((line) => line.includes('edited after approval')));
+    });
+
+    await test('a run check before the next poll writes the same reason and hint', async (t) => {
+        const setup = await makeSetup(t);
+        const { rt } = await retainedInflight(setup);
+        const comments = [rocketed(setup.now, 102, 100)];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assertWaiting(setup, `${RETAINED_REASON}, 1 approved comment waiting`, NEXT_BATCH_HINT);
+        scrambleStatus(setup);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assertWaiting(setup, `${RETAINED_REASON}, 1 approved comment waiting`, NEXT_BATCH_HINT);
+    });
+
+    await test('a failed poll keeps the previous count for the next run check', async (t) => {
+        const setup = await makeSetup(t);
+        const { rt } = await retainedInflight(setup);
+        const comments = [rocketed(setup.now, 102, 100), rocketed(setup.now, 103, 200)];
+        respondPoll(setup, comments);
+        setup.fake.respond('gh', 'PrwcPoll', GH_FAIL);
+        respondLookup(setup, comments);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        rt.lastPollAt = setup.now - setup.session.interval;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 2);
+        assert.equal(statusOf(setup).state, 'backing_off');
+        rt.lastPollAt = setup.now;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 2);
+        assertWaiting(setup, `${RETAINED_REASON}, 2 approved comments waiting`, NEXT_BATCH_HINT);
+    });
+
+    await test('throttled overrides holding and the next run check restores the waiting status', async (t) => {
+        const setup = await makeSetup(t);
+        const { rt } = await retainedInflight(setup);
+        const comments = [rocketed(setup.now, 102, 100)];
+        respondPoll(setup, comments, { remaining: 4000 });
+        respondLookup(setup, comments, { remaining: 100, resetAt: setup.now + 900 });
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(applyPacing(setup.deps, setup.session, rt), 900);
+        assert.equal(statusOf(setup).state, 'throttled');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assertWaiting(setup, `${RETAINED_REASON}, 1 approved comment waiting`, NEXT_BATCH_HINT);
+    });
+
+    await test('a merged PR replaces the count with the finish hint for good', async (t) => {
+        const setup = await makeSetup(t);
+        const { runId, rt } = await retainedInflight(setup);
+        const comments = [rocketed(setup.now, 102, 100), rocketed(setup.now, 103, 200)];
+        respondPoll(setup, comments);
+        respondPoll(setup, comments, { state: 'MERGED' });
+        respondLookup(setup, comments);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assertWaiting(setup, `${RETAINED_REASON}, 2 approved comments waiting`, NEXT_BATCH_HINT);
+        rt.lastPollAt = setup.now - setup.session.interval;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(rt.waiting, undefined);
+        assertWaiting(setup, `${RETAINED_REASON}, PR merged`, 'exit Claude in pane 5 to finish');
+        for (let check = 0; check < 2; check += 1) {
+            assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+            assertWaiting(setup, `${RETAINED_REASON}, PR merged`, 'exit Claude in pane 5 to finish');
+        }
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 2);
+        assert.equal(rt.inflightRunId, runId);
+    });
+
+    await test('a clone held by a retained run of another PR names that run in the busy hint', async (t) => {
+        const setup = await makeSetup(t);
+        const { runId } = await retainedInflight(setup);
+        const comments = [rocketed(setup.now, 201, 100)];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        const other: Session = { ...setup.session, pr: OTHER_PR };
+        assert.equal(await watchTick(setup.deps, other, createRuntime('', '@1'), NEVER), 'ok');
+        const status = readStatus(setup.stateDir, OTHER_PR.prKey);
+        assert.ok(status !== undefined, 'no status of the other watcher');
+        assert.equal(status.state, 'holding');
+        assert.equal(status.reason, 'clone busy');
+        assert.equal(status.hint, `run ${runId} of PR 12 holds the clone until its Claude session exits`);
+        assert.equal(splits(setup.fake), 0);
+    });
+
+    await test('a clone held by a running run of another PR shows no busy hint', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        await seedRun(setup, { dbId: 101, claudePid });
+        const comments = [rocketed(setup.now, 201, 100)];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        const other: Session = { ...setup.session, pr: OTHER_PR };
+        assert.equal(await watchTick(setup.deps, other, createRuntime('', '@1'), NEVER), 'ok');
+        const status = readStatus(setup.stateDir, OTHER_PR.prKey);
+        assert.ok(status !== undefined, 'no status of the other watcher');
+        assert.equal(status.state, 'holding');
+        assert.equal(status.reason, 'clone busy');
+        assert.equal(status.hint, '');
     });
 });
 
