@@ -22,6 +22,7 @@ import {
     lockWatcherPid,
     lookupWith,
     newRunFixture,
+    NODE_ID,
     OTHER_KEY,
     recordOf,
     RUN_ID,
@@ -31,6 +32,7 @@ import {
     SESSION_SOCKET,
     socketOf,
     startClaude,
+    stopClaudeNow,
     thumbsDownAdds,
     tmuxMessages,
     WORKER_SOCKET,
@@ -98,7 +100,7 @@ await describe('reconcile', async () => {
         fixture.fake.respond('tmux', 'list-panes', { stdout: `%3 other-run\n%7 ${RUN_ID}\n` });
         assert.equal(fixture.session.tmux.socket, SESSION_SOCKET);
         const result = await reconcile(fixture.deps, fixture.session);
-        assert.deepEqual(result, { inflightRunId: RUN_ID });
+        assert.deepEqual(result, { inflightRunId: RUN_ID, problem: undefined });
         assert.ok(runExists(fixture));
         assert.equal(launchDecision(fixture.stateDir, RUN_ID), 'go');
         assert.equal(fixture.fake.calls('gh').length, 0);
@@ -125,7 +127,10 @@ await describe('reconcile', async () => {
             });
             const claude = await startClaude(fixture, 'cooperative');
             fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
-            assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
+            assert.deepEqual(await reconcile(fixture.deps, fixture.session), {
+                inflightRunId: RUN_ID,
+                problem: undefined,
+            });
             const record = recordOf(fixture);
             assert.equal(record.state, 'retained');
             assert.equal(record.outcome, outcome);
@@ -148,12 +153,159 @@ await describe('reconcile', async () => {
         });
         const claude = await startClaude(fixture, 'cooperative');
         fixture.fake.respond('tmux', 'list-panes', { stdout: '%3 other-run\n' });
-        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), {
+            inflightRunId: RUN_ID,
+            problem: { runId: RUN_ID, reason: 'worker-pane-not-found' },
+        });
         assert.equal(recordOf(fixture).state, 'retained');
         assert.equal(recordOf(fixture).outcome, 'completed');
         assert.equal(recordOf(fixture).reason, 'done');
         assert.ok(pidAlive(claude));
         assert.equal(tmuxMessages(fixture).length, 1);
+    });
+
+    await test('a live retained failure without its pane hands over the problem and keeps its stored record', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        const pendingFailures = [{ nodeId: NODE_ID, dbId: 456, eyesOn: false }];
+        const reason = 'claude-took-failure-path';
+        await seedRun(fixture, {
+            patch: { state: 'retained', outcome: 'failed', reason, watcherPid: watcher, pendingFailures },
+            events: ['prompt', 'stop'],
+            lockWatcherPid: watcher,
+        });
+        await startClaude(fixture, 'cooperative');
+        fixture.fake.respond('tmux', 'list-panes', { stdout: '%3 other-run\n' });
+        const controller = new AbortController();
+        fixture.fake.respond('gh', 'PrwcAddReaction', () => {
+            controller.abort();
+            return { code: 143 };
+        });
+        const result = await reconcile(fixture.deps, fixture.session, controller.signal);
+        assert.equal(result.inflightRunId, RUN_ID);
+        assert.deepEqual(result.problem, { runId: RUN_ID, reason: 'worker-pane-not-found' });
+        const record = recordOf(fixture);
+        assert.equal(record.state, 'retained');
+        assert.equal(record.outcome, 'failed');
+        assert.equal(record.reason, reason);
+        assert.deepEqual(record.pendingFailures, pendingFailures);
+        assert.equal(record.watcherPid, process.pid);
+        assert.equal(tmuxMessages(fixture).length, 1);
+    });
+
+    await test('a live retained failure gets its pending -1 and stays in flight unchanged', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        const reason = 'claude-took-failure-path';
+        await seedRun(fixture, {
+            patch: {
+                state: 'retained',
+                outcome: 'failed',
+                reason,
+                socket: WORKER_SOCKET,
+                watcherPid: watcher,
+                pendingFailures: [{ nodeId: NODE_ID, dbId: 456, eyesOn: false }],
+            },
+            events: ['prompt', 'stop'],
+            lockWatcherPid: watcher,
+        });
+        const claude = await startClaude(fixture, 'cooperative');
+        fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID, problem: undefined });
+        assert.equal(thumbsDownAdds(fixture).length, 1);
+        const record = recordOf(fixture);
+        assert.equal(record.pendingFailures, undefined);
+        assert.equal(record.state, 'retained');
+        assert.equal(record.outcome, 'failed');
+        assert.equal(record.reason, reason);
+        assert.ok(pidAlive(claude));
+    });
+
+    await test('an owner exit while recovery sends the pending -1 finishes the run', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        await seedRun(fixture, {
+            patch: {
+                state: 'retained',
+                outcome: 'failed',
+                reason: 'claude-took-failure-path',
+                socket: WORKER_SOCKET,
+                watcherPid: watcher,
+                pendingFailures: [{ nodeId: NODE_ID, dbId: 456, eyesOn: false }],
+            },
+            events: ['prompt', 'stop'],
+            lockWatcherPid: watcher,
+        });
+        const claude = await startClaude(fixture, 'cooperative');
+        fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
+        fixture.fake.respond('gh', 'PrwcAddReaction', () => {
+            stopClaudeNow(claude);
+            return {};
+        });
+        const result = await reconcile(fixture.deps, fixture.session);
+        assert.deepEqual(result, { inflightRunId: undefined, problem: undefined });
+        assert.equal(thumbsDownAdds(fixture).length, 1);
+        assert.equal(runExists(fixture), false);
+        assert.equal(lockExists(fixture, SESSION_KEY), false);
+    });
+
+    await test('an owner exit during the pending -1 of a run without its pane drops the problem too', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        await seedRun(fixture, {
+            patch: {
+                state: 'retained',
+                outcome: 'failed',
+                reason: 'claude-took-failure-path',
+                socket: WORKER_SOCKET,
+                watcherPid: watcher,
+                pendingFailures: [{ nodeId: NODE_ID, dbId: 456, eyesOn: false }],
+            },
+            events: ['prompt', 'stop'],
+            lockWatcherPid: watcher,
+        });
+        const claude = await startClaude(fixture, 'cooperative');
+        fixture.fake.respond('tmux', 'list-panes', { stdout: '%3 other-run\n' });
+        fixture.fake.respond('gh', 'PrwcAddReaction', () => {
+            stopClaudeNow(claude);
+            return {};
+        });
+        const result = await reconcile(fixture.deps, fixture.session);
+        assert.deepEqual(result, { inflightRunId: undefined, problem: undefined });
+        assert.equal(thumbsDownAdds(fixture).length, 1);
+        assert.equal(runExists(fixture), false);
+        assert.equal(lockExists(fixture, SESSION_KEY), false);
+    });
+
+    await test('a retained run survives a restart and is cleared after the owner exits', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        await seedRun(fixture, {
+            patch: {
+                state: 'retained',
+                outcome: 'completed',
+                reason: 'done',
+                socket: WORKER_SOCKET,
+                watcherPid: watcher,
+            },
+            events: ['prompt', 'stop'],
+            lockWatcherPid: watcher,
+        });
+        const claude = await startClaude(fixture, 'cooperative');
+        fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID, problem: undefined });
+        const adopted = recordOf(fixture);
+        assert.equal(adopted.state, 'retained');
+        assert.equal(adopted.outcome, 'completed');
+        assert.equal(adopted.reason, 'done');
+        stopClaudeNow(claude);
+        assert.deepEqual(await evaluateNow(fixture), { state: 'completed', reason: 'done' });
+        assert.equal(runExists(fixture), false);
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), {
+            inflightRunId: undefined,
+            problem: undefined,
+        });
+        assert.equal(lockExists(fixture, SESSION_KEY), false);
     });
 
     for (const outcome of ['completed', 'failed'] as const) {
@@ -166,7 +318,10 @@ await describe('reconcile', async () => {
                 events: ['prompt', 'stop'],
                 lockWatcherPid: watcher,
             });
-            assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: undefined });
+            assert.deepEqual(await reconcile(fixture.deps, fixture.session), {
+                inflightRunId: undefined,
+                problem: undefined,
+            });
             assert.equal(runExists(fixture), false);
             assert.equal(lockExists(fixture, SESSION_KEY), false);
             assert.equal(fixture.fake.calls('gh').length, 0);
@@ -192,7 +347,10 @@ await describe('reconcile', async () => {
             events: ['prompt', 'stop'],
             lockWatcherPid: watcher,
         });
-        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: undefined });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), {
+            inflightRunId: undefined,
+            problem: undefined,
+        });
         assert.equal(thumbsDownAdds(fixture).length, 1);
         assert.equal(runExists(fixture), false);
         assert.equal(lockExists(fixture, SESSION_KEY), false);
@@ -210,7 +368,7 @@ await describe('reconcile', async () => {
         writeRawRecord(fixture, legacy);
         const claude = await startClaude(fixture, 'cooperative');
         fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
-        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID, problem: undefined });
         const adopted = { ...legacy, state: 'retained', outcome: 'completed', watcherPid: process.pid };
         assert.deepEqual(readRawRecord(fixture), parseJson(JSON.stringify(adopted)));
         assert.ok(pidAlive(claude));
@@ -226,7 +384,10 @@ await describe('reconcile', async () => {
             lockWatcherPid: watcher,
         });
         writeRawRecord(fixture, { ...seeded, state: 'failed', reason: 'claude-took-failure-path' });
-        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: undefined });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), {
+            inflightRunId: undefined,
+            problem: undefined,
+        });
         assert.equal(runExists(fixture), false);
         assert.equal(lockExists(fixture, SESSION_KEY), false);
         assert.ok(fixture.deps.logLines.some((line) => line.includes(`run ${RUN_ID} failed: owner closed Claude`)));
@@ -257,6 +418,7 @@ await describe('reconcile', async () => {
         fixture.fake.respond('tmux', 'list-panes', { stdout: '%3 other-run\n' });
         const result = await reconcile(fixture.deps, fixture.session);
         assert.equal(result.inflightRunId, RUN_ID);
+        assert.equal(result.problem, undefined);
         const record = recordOf(fixture);
         assert.equal(record.state, 'needs_attention');
         assert.equal(record.reason, 'worker-pane-not-found');
@@ -278,7 +440,7 @@ await describe('reconcile', async () => {
         });
         answerLookup(fixture, { eyes: true });
         const result = await reconcile(fixture.deps, fixture.session);
-        assert.deepEqual(result, { inflightRunId: undefined });
+        assert.deepEqual(result, { inflightRunId: undefined, problem: undefined });
         assert.equal(eyesRemovals(fixture).length, 1);
         assert.equal(thumbsDownAdds(fixture).length, 1);
         assert.ok(

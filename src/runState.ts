@@ -410,12 +410,16 @@ async function retainRun(
     return { state: 'retained', reason: retainedReason(decision.state) };
 }
 
+// Sending pending marks takes time, so liveness is checked again after them instead of trusting the capture: an owner
+// who closed Claude meanwhile must not leave the run waiting for one more evaluation.
 async function evaluateRetained(ctx: RunContext, outcome: RunOutcome): Promise<EvaluateResult> {
-    const { deps, record } = ctx;
+    const { deps, session, record } = ctx;
+    const marked = record.pendingFailures !== undefined;
     if (record.pendingFailures !== undefined && !(await applyPendingFailures(ctx, record.pendingFailures))) {
         return deferred('stop-requested');
     }
-    if (ctx.capture.alive) {
+    const alive = marked ? workerAlive(session.stateDir, record.runId) : ctx.capture.alive;
+    if (alive) {
         return { state: 'retained', reason: retainedReason(outcome) };
     }
     const interrupted = await finishRun(ctx);

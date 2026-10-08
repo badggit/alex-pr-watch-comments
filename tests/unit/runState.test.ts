@@ -486,7 +486,7 @@ await describe('evaluateRun decisions and effects', async () => {
         assert.equal(doneMarks(fixture).length, 0);
 
         fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
-        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID, problem: undefined });
         assert.equal(recordOf(fixture).state, 'retained');
         assert.equal(recordOf(fixture).outcome, 'completed');
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
@@ -649,7 +649,7 @@ await describe('evaluateRun decisions and effects', async () => {
         assert.ok(pidAlive(claude));
 
         fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
-        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID, problem: undefined });
         assert.equal(recordOf(fixture).pendingFailures, undefined);
         const retried = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1, eyes: true }));
         assert.deepEqual(retried, { state: 'retained', reason: 'failed-waiting-for-owner' });

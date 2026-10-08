@@ -240,6 +240,18 @@ export async function startClaude(fixture: RunFixture, mode: ClaudeMode): Promis
     return pid;
 }
 
+// Kills a fake claude and waits synchronously until its pid is gone, so a fake runner responder (which cannot await)
+// can end the worker in the middle of a call.
+export function stopClaudeNow(pid: number): void {
+    process.kill(pid, 'SIGKILL');
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    const deadline = Date.now() + 5000;
+    while (pidAlive(pid) && Date.now() < deadline) {
+        Atomics.wait(pause, 0, 0, 10);
+    }
+    assert.ok(!pidAlive(pid), 'the fake claude did not die');
+}
+
 // A fake claude that survives TERM and creates termFile when one arrives (the trap runs once the current one-second
 // sleep ends), so a test can wait for the proof that the TERM was sent.
 export async function startTermReportingClaude(fixture: RunFixture, termFile: string): Promise<number> {

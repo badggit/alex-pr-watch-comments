@@ -20,8 +20,15 @@ import { readJsonFile, worktreeDir } from './stateStore.ts';
 import { paneForRun } from './tmuxControl.ts';
 import type { Deps, RecordPatch, RunRecord, RunState, Session } from './types.ts';
 
+export interface RecoveryProblem {
+    runId: string;
+    reason: 'worker-pane-not-found';
+}
+
+// problem belongs to the run returned as inflightRunId only.
 export interface ReconcileResult {
     inflightRunId: string | undefined;
+    problem: RecoveryProblem | undefined;
 }
 
 type DropOutcome = 'dropped' | 'kept' | 'aborted';
@@ -36,8 +43,9 @@ const HELD_STATES: ReadonlySet<RunState> = new Set<RunState>([
 
 // A run with a live worker belongs to this watcher again: its record and worktree lock name this process. Nothing is
 // asked of GitHub; only the pane is looked up, on the tmux server the record names. A preparing run whose worker
-// already lives is promoted to running, so the tick evaluates it instead of resuming it into a second pane.
-async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promise<void> {
+// already lives is promoted to running, so the tick evaluates it instead of resuming it into a second pane. A retained
+// run whose pane is missing keeps its stored state, outcome and pending marks; the problem is handed to the caller.
+async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promise<RecoveryProblem | undefined> {
     const { runId } = record;
     const patch: RecordPatch = { watcherPid: process.pid };
     if (record.state === 'preparing') {
@@ -48,10 +56,13 @@ async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promis
         deps.log.warn(`could not adopt the worktree lock of run ${runId}`);
     }
     const pane = await paneForRun(deps, session.tools.tmux, record.socket, runId);
+    let problem: RecoveryProblem | undefined;
     if (pane === undefined) {
         const reason = 'worker-pane-not-found';
         const retained = record.state === 'retained';
-        if (!retained) {
+        if (retained) {
+            problem = { runId, reason };
+        } else {
             mergeRecord(session.stateDir, runId, { state: 'needs_attention', reason });
         }
         if (retained || record.state !== 'needs_attention' || record.reason !== reason) {
@@ -59,6 +70,7 @@ async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promis
         }
     }
     deps.log.info(`re-adopted run ${runId}`);
+    return problem;
 }
 
 // Marks the comments of an interrupted run that failTarget picks, read from one lookup. When the lookup fails nothing
@@ -173,6 +185,7 @@ function claimUnreadable(deps: Deps, session: Session, runId: string, inflightRu
 // one run is in flight: a further live run is left alone (its lock stays unreclaimable while its worker lives).
 export async function reconcile(deps: Deps, session: Session, stop?: AbortSignal): Promise<ReconcileResult> {
     let inflightRunId: string | undefined;
+    let problem: RecoveryProblem | undefined;
     const kept: string[] = [];
     for (const runId of listRunIds(session.stateDir)) {
         if (stop?.aborted === true) {
@@ -208,7 +221,7 @@ export async function reconcile(deps: Deps, session: Session, stop?: AbortSignal
                     kept.push(runId);
                 }
             } else if (inflightRunId === undefined) {
-                await adoptRun(deps, session, record);
+                const adopted = await adoptRun(deps, session, record);
                 if (record.pendingFailures !== undefined) {
                     const finished = await finishRetainedRun(deps, session, record, stop);
                     if (finished === 'dropped') {
@@ -216,6 +229,7 @@ export async function reconcile(deps: Deps, session: Session, stop?: AbortSignal
                     }
                 }
                 inflightRunId = runId;
+                problem = adopted;
             } else {
                 deps.log.warn(`run ${runId} also has a live worker; run ${inflightRunId} stays in flight`);
             }
@@ -233,5 +247,5 @@ export async function reconcile(deps: Deps, session: Session, stop?: AbortSignal
             deps.log.warn(`run ${runId} also has a live worker; run ${inflightRunId} stays in flight`);
         }
     }
-    return { inflightRunId: inflightRunId ?? kept[0] };
+    return inflightRunId === undefined ? { inflightRunId: kept[0], problem: undefined } : { inflightRunId, problem };
 }
