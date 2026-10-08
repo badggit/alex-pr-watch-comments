@@ -59,6 +59,7 @@ interface ReviewComment {
 interface RecordState {
     runId: string;
     state: string;
+    outcome: string;
     reason: string;
 }
 
@@ -691,6 +692,7 @@ function recordStates(stateDir: string): RecordState[] {
         return {
             runId,
             state: getString(value, 'state') ?? 'unreadable',
+            outcome: getString(value, 'outcome') ?? '',
             reason: getString(value, 'reason') ?? '',
         };
     });
@@ -776,7 +778,8 @@ async function trustDialogWaiting(ctx: Ctx, target: Target): Promise<boolean> {
 
 function retainedSuccessRecord(obs: Observation): RecordState | undefined {
     const [record] = obs.records;
-    return obs.records.length === 1 && record?.state === 'completed' && record.reason === 'done' ? record : undefined;
+    const success = record?.state === 'retained' && record.outcome === 'completed' && record.reason === 'done';
+    return obs.records.length === 1 && success ? record : undefined;
 }
 
 function settled(obs: Observation, mode: Mode): boolean {
@@ -800,7 +803,7 @@ function failFast(obs: Observation): void {
     if (attention !== undefined) {
         throw new Error(`needs_attention ${safeText(attention.reason)}`);
     }
-    const failed = obs.records.find((record) => record.state === 'failed');
+    const failed = obs.records.find((record) => record.state === 'retained' && record.outcome === 'failed');
     if (failed !== undefined) {
         throw new Error(`failed ${safeText(failed.reason)}`);
     }

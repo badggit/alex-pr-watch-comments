@@ -461,7 +461,8 @@ await describe('evaluateRun decisions and effects', async () => {
         const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
         assert.deepEqual(result, { state: 'retained', reason: 'completed-waiting-for-owner' });
         assert.ok(pidAlive(panePid));
-        assert.equal(recordOf(fixture).state, 'completed');
+        assert.equal(recordOf(fixture).state, 'retained');
+        assert.equal(recordOf(fixture).outcome, 'completed');
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
         assert.ok(runExists(fixture));
         assert.equal(doneMarks(fixture).length, 0);
@@ -475,7 +476,9 @@ await describe('evaluateRun decisions and effects', async () => {
         const terms = spyKills(t);
         const retained = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
         assert.deepEqual(retained, { state: 'retained', reason: 'completed-waiting-for-owner' });
-        assert.equal(recordOf(fixture).state, 'completed');
+        assert.equal(recordOf(fixture).state, 'retained');
+        assert.equal(recordOf(fixture).outcome, 'completed');
+        assert.equal(recordOf(fixture).reason, 'done');
         assert.ok(pidAlive(claude));
         assert.deepEqual(terms(), []);
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
@@ -484,13 +487,15 @@ await describe('evaluateRun decisions and effects', async () => {
 
         fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
         assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
-        assert.equal(recordOf(fixture).state, 'completed');
+        assert.equal(recordOf(fixture).state, 'retained');
+        assert.equal(recordOf(fixture).outcome, 'completed');
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
 
         appendEvents(fixture, ['prompt', 'tool'], 0);
         const continued = await evaluate(fixture, lookupWith({ plus1At: undefined, eyes: false }));
         assert.deepEqual(continued, retained);
-        assert.equal(recordOf(fixture).state, 'completed');
+        assert.equal(recordOf(fixture).state, 'retained');
+        assert.equal(recordOf(fixture).outcome, 'completed');
         assert.deepEqual(terms(), []);
         assert.equal(doneMarks(fixture).length, 0);
 
@@ -576,7 +581,8 @@ await describe('evaluateRun decisions and effects', async () => {
         assert.equal(fs.existsSync(termFile), false);
         assert.deepEqual(terms(), []);
         assert.ok(pidAlive(claude));
-        assert.equal(recordOf(fixture).state, 'completed');
+        assert.equal(recordOf(fixture).state, 'retained');
+        assert.equal(recordOf(fixture).outcome, 'completed');
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
         assert.equal(doneMarks(fixture).length, 0);
     });
@@ -589,7 +595,8 @@ await describe('evaluateRun decisions and effects', async () => {
         const result = await evaluate(fixture, lookupWith({ eyes: false }));
         assert.deepEqual(result, { state: 'retained', reason: 'failed-waiting-for-owner' });
         assert.ok(pidAlive(claude));
-        assert.equal(recordOf(fixture).state, 'failed');
+        assert.equal(recordOf(fixture).state, 'retained');
+        assert.equal(recordOf(fixture).outcome, 'failed');
         assert.equal(thumbsDownAdds(fixture).length, 1);
         assert.equal(eyesRemovals(fixture).length, 0);
         assert.equal(doneMarks(fixture).length, 0);
@@ -605,7 +612,8 @@ await describe('evaluateRun decisions and effects', async () => {
         const terms = spyKills(t);
         fixture.fake.respond('gh', 'PrwcAddReaction', () => {
             const frozen = recordOf(fixture);
-            assert.equal(frozen.state, 'failed');
+            assert.equal(frozen.state, 'retained');
+            assert.equal(frozen.outcome, 'failed');
             assert.deepEqual(frozen.pendingFailures, [{ nodeId: NODE_ID, dbId: 456, eyesOn: false }]);
             appendEvents(fixture, ['prompt', 'tool'], 0);
             return {};
@@ -613,7 +621,8 @@ await describe('evaluateRun decisions and effects', async () => {
         const result = await evaluate(fixture, lookupWith({ eyes: false }));
         assert.deepEqual(result, { state: 'retained', reason: 'failed-waiting-for-owner' });
         const record = recordOf(fixture);
-        assert.equal(record.state, 'failed');
+        assert.equal(record.state, 'retained');
+        assert.equal(record.outcome, 'failed');
         assert.equal(record.reason, 'claude-took-failure-path');
         assert.equal(record.pendingFailures, undefined);
         assert.deepEqual(terms(), []);
@@ -634,7 +643,8 @@ await describe('evaluateRun decisions and effects', async () => {
         const interrupted = await evaluate(fixture, lookupWith({ eyes: false }), controller.signal);
         assert.deepEqual(interrupted, { state: 'deferred', reason: 'stop-requested' });
         const pending = recordOf(fixture);
-        assert.equal(pending.state, 'failed');
+        assert.equal(pending.state, 'retained');
+        assert.equal(pending.outcome, 'failed');
         assert.deepEqual(pending.pendingFailures, [{ nodeId: NODE_ID, dbId: 456, eyesOn: false }]);
         assert.ok(pidAlive(claude));
 
@@ -643,7 +653,8 @@ await describe('evaluateRun decisions and effects', async () => {
         assert.equal(recordOf(fixture).pendingFailures, undefined);
         const retried = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1, eyes: true }));
         assert.deepEqual(retried, { state: 'retained', reason: 'failed-waiting-for-owner' });
-        assert.equal(recordOf(fixture).state, 'failed');
+        assert.equal(recordOf(fixture).state, 'retained');
+        assert.equal(recordOf(fixture).outcome, 'failed');
         assert.equal(thumbsDownAdds(fixture).length, 2);
         assert.equal(eyesRemovals(fixture).length, 0);
         assert.equal(tmuxMessages(fixture).length, 1);
@@ -659,7 +670,8 @@ await describe('evaluateRun decisions and effects', async () => {
         assert.ok(pidAlive(claude));
         assert.equal(worktreeLockHolder(fixture.stateDir, SESSION_KEY), RUN_ID);
         const record = recordOf(fixture);
-        assert.equal(record.state, 'completed');
+        assert.equal(record.state, 'retained');
+        assert.equal(record.outcome, 'completed');
         assert.equal(record.reason, 'done');
         assert.equal(doneMarks(fixture).length, 0);
         assert.equal(tmuxMessages(fixture).length, 0);
@@ -828,6 +840,19 @@ await describe('evaluateRun other effects', async () => {
         assert.equal(runExists(fixture), false);
     });
 
+    await test('a retained failure whose worker is gone ends with its stored outcome', async (t) => {
+        const fixture = await newRunFixture(t);
+        await seedRun(fixture, {
+            patch: { state: 'retained', outcome: 'failed', reason: 'claude-took-failure-path' },
+            events: SETTLED,
+        });
+        const result = await evaluate(fixture, lookupWith({ plus1At: FRESH_PLUS1 }));
+        assert.deepEqual(result, { state: 'failed', reason: 'claude-took-failure-path' });
+        assert.equal(runExists(fixture), false);
+        assert.equal(lockExists(fixture, SESSION_KEY), false);
+        assert.equal(thumbsDownAdds(fixture).length, 0);
+    });
+
     await test("the record's worktree key is released, not the session's", async (t) => {
         const fixture = await newRunFixture(t);
         const now = Math.floor(Date.now() / 1000);
@@ -852,7 +877,7 @@ await describe('evaluateRun fail-closed cleanup', async () => {
     await test('a corrupt pending failure target keeps the run and lock without a GitHub request', async (t) => {
         const fixture = await newRunFixture(t);
         await seedRun(fixture, {
-            patch: { state: 'failed', reason: 'claude-took-failure-path' },
+            patch: { state: 'retained', outcome: 'failed', reason: 'claude-took-failure-path' },
             events: SETTLED,
         });
         const value = parseJson(recordText(fixture));

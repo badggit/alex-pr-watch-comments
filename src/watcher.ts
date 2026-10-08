@@ -10,7 +10,7 @@ import { preflight } from './preflight.ts';
 import { processStart } from './proc.ts';
 import { buildQueue, lookupIds } from './queue.ts';
 import { reconcile } from './reconcile.ts';
-import { attentionHint, captureRun, evaluateRun } from './runState.ts';
+import { attentionHint, captureRun, evaluateRun, isClearedResult } from './runState.ts';
 import { readRecord, readStatus, writeStatus } from './runStore.ts';
 import { initState, resolveStateDir, type InitStateResult } from './stateStore.ts';
 import type {
@@ -106,7 +106,6 @@ const STOPPED_EARLY = 'watcher stopped before its first poll';
 const ENDED_EARLY = 'watcher ended before its first poll';
 const LOCK_PENDING = 'worktree lock release pending';
 const NO_RUN: Pick<WatcherStatus, 'runId' | 'comments'> = { runId: '', comments: '' };
-const CLEARED_STATES: ReadonlySet<string> = new Set(['completed', 'failed', 'exited']);
 
 export function createRuntime(launchToken: string, windowId: string): WatcherRuntime {
     return {
@@ -243,7 +242,7 @@ function failedFetch(
 function noteInflight(session: Session, runId: string): Inflight {
     const read = readRecord(session.stateDir, runId);
     const record = read.kind === 'ok' ? read.record : undefined;
-    const retained = record?.state === 'completed' || record?.state === 'failed';
+    const retained = record?.state === 'retained';
     const nodeIds = retained ? [] : (record?.comments.map((comment) => comment.nodeId) ?? []);
     if (record?.state === 'preparing') {
         return { kind: 'preparing', runId, nodeIds };
@@ -317,7 +316,7 @@ async function evaluateInflight(
     const { runId } = inflight;
     const result = await evaluateRun(deps, session, runId, inflight.capture, lookup, stop);
     const reason = safeText(result.reason.length > 0 ? result.reason : result.state);
-    if (CLEARED_STATES.has(result.state)) {
+    if (isClearedResult(result.state)) {
         rt.inflightRunId = undefined;
         return { kind: 'cleared', reason };
     }
@@ -392,7 +391,7 @@ function runIsRetained(session: Session, runId: string | undefined): boolean {
         return false;
     }
     const read = readRecord(session.stateDir, runId);
-    return read.kind === 'ok' && (read.record.state === 'completed' || read.record.state === 'failed');
+    return read.kind === 'ok' && read.record.state === 'retained';
 }
 
 function pollDue(deps: Deps, session: Session, rt: WatcherRuntime): boolean {

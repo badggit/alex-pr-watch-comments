@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 
+import { parseJson } from '../../src/json.ts';
 import { acquireWorktreeLock, worktreeLockHolder } from '../../src/locks.ts';
 import { pidAlive } from '../../src/proc.ts';
 import { reconcile } from '../../src/reconcile.ts';
@@ -64,6 +65,18 @@ async function evaluateNow(fixture: RunFixture, runId = RUN_ID) {
     return await evaluateRun(fixture.deps, fixture.session, runId, capture, lookupWith(), signal);
 }
 
+function recordFile(fixture: RunFixture): string {
+    return path.join(runDir(fixture.stateDir, RUN_ID), 'record.json');
+}
+
+function writeRawRecord(fixture: RunFixture, value: unknown): void {
+    fs.writeFileSync(recordFile(fixture), JSON.stringify(value));
+}
+
+function readRawRecord(fixture: RunFixture): unknown {
+    return parseJson(fs.readFileSync(recordFile(fixture), 'utf8'));
+}
+
 function breakRecord(fixture: RunFixture): void {
     fs.writeFileSync(path.join(runDir(fixture.stateDir, RUN_ID), 'record.json'), '{"format": 1, "sta');
 }
@@ -100,13 +113,13 @@ await describe('reconcile', async () => {
         assertNoRocketAdded(fixture);
     });
 
-    for (const state of ['completed', 'failed'] as const) {
-        await test(`re-adopts a live retained ${state} run without changing its outcome`, async (t) => {
+    for (const outcome of ['completed', 'failed'] as const) {
+        await test(`re-adopts a live retained ${outcome} run without changing its outcome`, async (t) => {
             const fixture = await newRunFixture(t);
             const watcher = await deadPid(fixture.env);
-            const reason = state === 'completed' ? 'done' : 'claude-took-failure-path';
+            const reason = outcome === 'completed' ? 'done' : 'claude-took-failure-path';
             await seedRun(fixture, {
-                patch: { state, reason, socket: WORKER_SOCKET, watcherPid: watcher },
+                patch: { state: 'retained', outcome, reason, socket: WORKER_SOCKET, watcherPid: watcher },
                 events: ['prompt', 'stop'],
                 lockWatcherPid: watcher,
             });
@@ -114,7 +127,8 @@ await describe('reconcile', async () => {
             fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
             assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
             const record = recordOf(fixture);
-            assert.equal(record.state, state);
+            assert.equal(record.state, 'retained');
+            assert.equal(record.outcome, outcome);
             assert.equal(record.reason, reason);
             assert.equal(record.watcherPid, process.pid);
             assert.equal(lockWatcherPid(fixture, SESSION_KEY), process.pid);
@@ -128,26 +142,27 @@ await describe('reconcile', async () => {
         const fixture = await newRunFixture(t);
         const watcher = await deadPid(fixture.env);
         await seedRun(fixture, {
-            patch: { state: 'completed', reason: 'done', watcherPid: watcher },
+            patch: { state: 'retained', outcome: 'completed', reason: 'done', watcherPid: watcher },
             events: ['prompt', 'stop'],
             lockWatcherPid: watcher,
         });
         const claude = await startClaude(fixture, 'cooperative');
         fixture.fake.respond('tmux', 'list-panes', { stdout: '%3 other-run\n' });
         assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
-        assert.equal(recordOf(fixture).state, 'completed');
+        assert.equal(recordOf(fixture).state, 'retained');
+        assert.equal(recordOf(fixture).outcome, 'completed');
         assert.equal(recordOf(fixture).reason, 'done');
         assert.ok(pidAlive(claude));
         assert.equal(tmuxMessages(fixture).length, 1);
     });
 
-    for (const state of ['completed', 'failed'] as const) {
-        await test(`cleans a dead retained ${state} run without reclassifying it or touching GitHub`, async (t) => {
+    for (const outcome of ['completed', 'failed'] as const) {
+        await test(`cleans a dead retained ${outcome} run without reclassifying it or touching GitHub`, async (t) => {
             const fixture = await newRunFixture(t);
             const watcher = await deadPid(fixture.env);
-            const reason = state === 'completed' ? 'done' : 'claude-took-failure-path';
+            const reason = outcome === 'completed' ? 'done' : 'claude-took-failure-path';
             await seedRun(fixture, {
-                patch: { state, reason, watcherPid: watcher },
+                patch: { state: 'retained', outcome, reason, watcherPid: watcher },
                 events: ['prompt', 'stop'],
                 lockWatcherPid: watcher,
             });
@@ -157,7 +172,7 @@ await describe('reconcile', async () => {
             assert.equal(fixture.fake.calls('gh').length, 0);
             assert.equal(doneMarks(fixture).length, 0);
             assert.ok(
-                fixture.deps.logLines.some((line) => line.includes(`run ${RUN_ID} ${state}: owner closed Claude`))
+                fixture.deps.logLines.some((line) => line.includes(`run ${RUN_ID} ${outcome}: owner closed Claude`))
             );
         });
     }
@@ -168,7 +183,8 @@ await describe('reconcile', async () => {
         const comment = baseComment();
         await seedRun(fixture, {
             patch: {
-                state: 'failed',
+                state: 'retained',
+                outcome: 'failed',
                 reason: 'claude-took-failure-path',
                 watcherPid: watcher,
                 pendingFailures: [{ nodeId: comment.nodeId, dbId: comment.dbId, eyesOn: false }],
@@ -180,6 +196,40 @@ await describe('reconcile', async () => {
         assert.equal(thumbsDownAdds(fixture).length, 1);
         assert.equal(runExists(fixture), false);
         assert.equal(lockExists(fixture, SESSION_KEY), false);
+    });
+
+    await test('a legacy completed record with a live worker is adopted in its mapped form', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        const seeded = await seedRun(fixture, {
+            patch: { socket: WORKER_SOCKET, watcherPid: watcher },
+            events: ['prompt', 'stop'],
+            lockWatcherPid: watcher,
+        });
+        const legacy = { ...seeded, state: 'completed', reason: 'done' };
+        writeRawRecord(fixture, legacy);
+        const claude = await startClaude(fixture, 'cooperative');
+        fixture.fake.respond('tmux', 'list-panes', { stdout: `%7 ${RUN_ID}\n` });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: RUN_ID });
+        const adopted = { ...legacy, state: 'retained', outcome: 'completed', watcherPid: process.pid };
+        assert.deepEqual(readRawRecord(fixture), parseJson(JSON.stringify(adopted)));
+        assert.ok(pidAlive(claude));
+        assert.equal(fixture.fake.calls('gh').length, 0);
+    });
+
+    await test('a legacy failed record with a dead worker is dropped', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        const seeded = await seedRun(fixture, {
+            patch: { watcherPid: watcher },
+            events: ['prompt', 'stop'],
+            lockWatcherPid: watcher,
+        });
+        writeRawRecord(fixture, { ...seeded, state: 'failed', reason: 'claude-took-failure-path' });
+        assert.deepEqual(await reconcile(fixture.deps, fixture.session), { inflightRunId: undefined });
+        assert.equal(runExists(fixture), false);
+        assert.equal(lockExists(fixture, SESSION_KEY), false);
+        assert.ok(fixture.deps.logLines.some((line) => line.includes(`run ${RUN_ID} failed: owner closed Claude`)));
     });
 
     await test("adopts the lock under the record's worktree key, not the session's", async (t) => {

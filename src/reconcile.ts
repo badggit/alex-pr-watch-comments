@@ -6,7 +6,15 @@ import { getNumber } from './json.ts';
 import { adoptWorktreeLock, worktreeLockHolder } from './locks.ts';
 import { pidAlive } from './proc.ts';
 import { markFailed, removeEyes } from './reactions.ts';
-import { captureRun, commentOutcome, evaluateRun, failTarget, notifyOwner, releaseRunLock } from './runState.ts';
+import {
+    captureRun,
+    commentOutcome,
+    evaluateRun,
+    failTarget,
+    isClearedResult,
+    notifyOwner,
+    releaseRunLock,
+} from './runState.ts';
 import { claimLaunch, clearRun, launchDecision, listRunIds, mergeRecord, readRecord, workerAlive } from './runStore.ts';
 import { readJsonFile, worktreeDir } from './stateStore.ts';
 import { paneForRun } from './tmuxControl.ts';
@@ -22,8 +30,7 @@ const HELD_STATES: ReadonlySet<RunState> = new Set<RunState>([
     'preparing',
     'running',
     'needs_attention',
-    'completed',
-    'failed',
+    'retained',
     'abandoned',
 ]);
 
@@ -43,7 +50,7 @@ async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promis
     const pane = await paneForRun(deps, session.tools.tmux, record.socket, runId);
     if (pane === undefined) {
         const reason = 'worker-pane-not-found';
-        const retained = record.state === 'completed' || record.state === 'failed';
+        const retained = record.state === 'retained';
         if (!retained) {
             mergeRecord(session.stateDir, runId, { state: 'needs_attention', reason });
         }
@@ -126,7 +133,10 @@ async function finishRetainedRun(
         { rate: { remaining: undefined, resetAt: undefined }, entries: [], gone: [] },
         signal
     );
-    return result.state === record.state ? 'dropped' : signal.aborted ? 'aborted' : 'kept';
+    if (isClearedResult(result.state)) {
+        return 'dropped';
+    }
+    return signal.aborted ? 'aborted' : 'kept';
 }
 
 function lockWatcherPid(stateDir: string, wtKey: string): number | undefined {
@@ -191,7 +201,7 @@ export async function reconcile(deps: Deps, session: Session, stop?: AbortSignal
             }
             continue;
         }
-        if (record.state === 'completed' || record.state === 'failed') {
+        if (record.state === 'retained') {
             if (!workerAlive(session.stateDir, runId)) {
                 const finished = await finishRetainedRun(deps, session, record, stop);
                 if (finished === 'kept') {

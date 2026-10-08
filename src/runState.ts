@@ -29,6 +29,7 @@ import type {
     RunComment,
     RunDecision,
     RunFailureTarget,
+    RunOutcome,
     RunRecord,
     Session,
 } from './types.ts';
@@ -334,8 +335,15 @@ async function endExited(
     return decision;
 }
 
-function retainedReason(state: 'completed' | 'failed'): string {
-    return `${state}-waiting-for-owner`;
+function retainedReason(outcome: RunOutcome): string {
+    return `${outcome}-waiting-for-owner`;
+}
+
+// The results that free the in-flight slot.
+const CLEARED_RESULTS: ReadonlySet<EvaluateState> = new Set(['completed', 'failed', 'exited']);
+
+export function isClearedResult(state: EvaluateState): boolean {
+    return CLEARED_RESULTS.has(state);
 }
 
 async function applyPendingFailures(ctx: RunContext, targets: readonly RunFailureTarget[]): Promise<boolean> {
@@ -353,7 +361,7 @@ async function applyPendingFailures(ctx: RunContext, targets: readonly RunFailur
 // fixed batch outcome, so later prompts, tools or GitHub changes cannot reclassify it.
 async function retainRun(
     ctx: RunContext,
-    decision: { state: 'completed' | 'failed'; reason: string },
+    decision: { state: RunOutcome; reason: string },
     targets: readonly FailTarget[]
 ): Promise<EvaluateResult> {
     const { deps, session, record, stop } = ctx;
@@ -378,10 +386,8 @@ async function retainRun(
             break;
         }
     }
-    const patch =
-        decision.state === 'failed'
-            ? { state: decision.state, reason: decision.reason, pendingFailures: [...targets] }
-            : { state: decision.state, reason: decision.reason };
+    const settledFields = { state: 'retained', outcome: decision.state, reason: decision.reason } as const;
+    const patch = decision.state === 'failed' ? { ...settledFields, pendingFailures: [...targets] } : settledFields;
     const frozen = mergeRecord(session.stateDir, record.runId, patch);
     if (frozen === undefined) {
         return deferred('record-unreadable');
@@ -404,20 +410,20 @@ async function retainRun(
     return { state: 'retained', reason: retainedReason(decision.state) };
 }
 
-async function evaluateRetained(ctx: RunContext, state: 'completed' | 'failed'): Promise<EvaluateResult> {
+async function evaluateRetained(ctx: RunContext, outcome: RunOutcome): Promise<EvaluateResult> {
     const { deps, record } = ctx;
     if (record.pendingFailures !== undefined && !(await applyPendingFailures(ctx, record.pendingFailures))) {
         return deferred('stop-requested');
     }
     if (ctx.capture.alive) {
-        return { state: 'retained', reason: retainedReason(state) };
+        return { state: 'retained', reason: retainedReason(outcome) };
     }
     const interrupted = await finishRun(ctx);
     if (interrupted !== undefined) {
         return interrupted;
     }
-    deps.log.info(`run ${record.runId} ${state}: owner closed Claude`);
-    return { state, reason: record.reason };
+    deps.log.info(`run ${record.runId} ${outcome}: owner closed Claude`);
+    return { state: outcome, reason: record.reason };
 }
 
 function recordRunning(ctx: RunContext, decision: RunDecision): EvaluateResult {
@@ -570,8 +576,11 @@ export async function evaluateRun(
     if (record.state === 'abandoned') {
         return finishAbandoned(deps, session, record, stop);
     }
-    if (record.state === 'completed' || record.state === 'failed') {
-        return await evaluateRetained({ deps, session, record, capture, stop }, record.state);
+    if (record.state === 'retained') {
+        // readRecord guarantees the outcome of a retained record.
+        return record.outcome === undefined
+            ? deferred('record-unreadable')
+            : await evaluateRetained({ deps, session, record, capture, stop }, record.outcome);
     }
     if (readEvents(session.stateDir, runId).count !== capture.events.count) {
         return deferred('events-changed');

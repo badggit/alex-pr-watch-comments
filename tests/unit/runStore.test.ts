@@ -172,9 +172,10 @@ await describe('records', async () => {
             fs.writeFileSync(path.join(dir, 'record.json'), JSON.stringify(value));
         };
 
-        const failed: RunRecord = { ...sample, state: 'failed', pendingFailures: [target] };
+        const failed = { ...sample, state: 'failed', pendingFailures: [target] };
         write(failed);
-        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record: failed });
+        const mapped: RunRecord = { ...sample, state: 'retained', outcome: 'failed', pendingFailures: [target] };
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record: mapped });
 
         for (const pendingFailures of [
             [{ ...target, nodeId: 'PRRC_other' }],
@@ -189,6 +190,37 @@ await describe('records', async () => {
         assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
         write({ ...failed, pendingFailures: 'broken' });
         assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+    });
+
+    await test('a legacy settled record without an outcome reads as retained with that outcome', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const sample = sampleRecord(RUN_A, PR_KEY);
+        const write = (value: unknown): void => {
+            fs.writeFileSync(path.join(dir, 'record.json'), JSON.stringify(value));
+        };
+        const target = { nodeId: 'PRRC_1', dbId: 1, eyesOn: false };
+
+        write({ ...sample, state: 'completed', reason: 'done' });
+        const completed: RunRecord = { ...sample, state: 'retained', outcome: 'completed', reason: 'done' };
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record: completed });
+
+        write({ ...sample, state: 'failed', reason: 'claude-took-failure-path', pendingFailures: [target] });
+        const read = readRecord(fixture.stateDir, RUN_A);
+        assert.ok(read.kind === 'ok');
+        assert.equal(read.record.state, 'retained');
+        assert.equal(read.record.outcome, 'failed');
+        assert.equal(read.record.reason, 'claude-took-failure-path');
+        assert.deepEqual(read.record.pendingFailures, [target]);
+
+        for (const value of [
+            { ...sample, state: 'completed', reason: 'done', pendingFailures: [target] },
+            { ...sample, state: 'failed', reason: 'claude-took-failure-path', outcome: 'failed' },
+            { ...sample, state: 'completed', reason: 'done', outcome: 'completed' },
+        ]) {
+            write(value);
+            assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+        }
     });
 
     await test('a retained record round-trips with either outcome', async (t) => {

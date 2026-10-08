@@ -8,6 +8,7 @@ import { getPath, isRecord, parseJson } from '../../src/json.ts';
 import { markLaunchReady, readLaunchResult } from '../../src/launchChannel.ts';
 import { acquirePrLock, acquireWorktreeLock, worktreeLockHolder } from '../../src/locks.ts';
 import { createProcessRunner, pidAlive, processStart } from '../../src/proc.ts';
+import { reconcile } from '../../src/reconcile.ts';
 import { attentionHint } from '../../src/runState.ts';
 import {
     claimLaunch,
@@ -377,6 +378,12 @@ function stateOf(setup: Setup, runId: string | undefined): string {
     return read.record.state;
 }
 
+function outcomeOf(setup: Setup, runId: string): string | undefined {
+    const read = readRecord(setup.stateDir, runId);
+    assert.ok(read.kind === 'ok', 'the run record is unreadable');
+    return read.record.outcome;
+}
+
 function variable(call: RecordedCall, name: string): unknown {
     return getPath(parseJson(call.input ?? ''), 'variables', name);
 }
@@ -677,7 +684,8 @@ await describe('watchTick', async () => {
         const rt = createRuntime('', '@1');
         rt.inflightRunId = runId;
         assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
-        assert.equal(stateOf(setup, runId), 'completed');
+        assert.equal(stateOf(setup, runId), 'retained');
+        assert.equal(outcomeOf(setup, runId), 'completed');
         assert.deepEqual(mutations(setup.fake), []);
         assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
         assert.equal(rt.inflightRunId, runId);
@@ -706,7 +714,7 @@ await describe('watchTick', async () => {
             dbId: 101,
             claudePid,
             events: ['prompt', 'stop'],
-            patch: { state: 'completed', reason: 'done' },
+            patch: { state: 'retained', outcome: 'completed', reason: 'done' },
         });
         const queued = rocketed(setup.now, 102, 100);
         respondPoll(setup, [queued]);
@@ -735,7 +743,7 @@ await describe('watchTick', async () => {
             dbId: 101,
             events: ['prompt', 'stop'],
             exitStatus: true,
-            patch: { state: 'completed', reason: 'done' },
+            patch: { state: 'retained', outcome: 'completed', reason: 'done' },
         });
         setup.fake.respond('gh', 'PrwcLookup', GH_FAIL);
         respondPoll(setup, []);
@@ -750,6 +758,27 @@ await describe('watchTick', async () => {
         assert.equal(statusOf(setup).reason, 'done');
     });
 
+    await test('reconcile drops a dead retained run so the next tick does not report it missing', async (t) => {
+        const setup = await makeSetup(t);
+        const runId = await seedRun(setup, {
+            dbId: 101,
+            events: ['prompt', 'stop'],
+            exitStatus: true,
+            patch: { state: 'retained', outcome: 'completed', reason: 'done' },
+        });
+        const reconciled = await reconcile(setup.deps, setup.session);
+        assert.deepEqual(reconciled, { inflightRunId: undefined });
+        assert.deepEqual(listRunIds(setup.stateDir), []);
+        respondPoll(setup, []);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = reconciled.inflightRunId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(rt.inflightRunId, undefined);
+        assert.notEqual(statusOf(setup).reason, 'run-missing');
+        assert.equal(statusOf(setup).state, 'polling');
+        assert.equal(fs.existsSync(runDir(setup.stateDir, runId)), false);
+    });
+
     await test('a closed pull request waits for a retained owner before cleanup', async (t) => {
         const setup = await makeSetup(t);
         const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
@@ -757,7 +786,7 @@ await describe('watchTick', async () => {
             dbId: 101,
             claudePid,
             events: ['prompt', 'stop'],
-            patch: { state: 'completed', reason: 'done' },
+            patch: { state: 'retained', outcome: 'completed', reason: 'done' },
         });
         respondPoll(setup, [], { state: 'CLOSED' });
         const rt = createRuntime('', '@1');
@@ -849,14 +878,16 @@ await describe('watchTick', async () => {
         const rt = createRuntime('', '@1');
         rt.inflightRunId = runId;
         assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
-        assert.equal(stateOf(setup, runId), 'completed');
+        assert.equal(stateOf(setup, runId), 'retained');
+        assert.equal(outcomeOf(setup, runId), 'completed');
         assert.equal(statusOf(setup).state, 'holding');
         assert.equal(statusOf(setup).reason, 'completed-waiting-for-owner');
 
         const controller = new AbortController();
         controller.abort();
         assert.equal(await watchTick(setup.deps, setup.session, rt, controller.signal), 'stopped');
-        assert.equal(stateOf(setup, runId), 'completed');
+        assert.equal(stateOf(setup, runId), 'retained');
+        assert.equal(outcomeOf(setup, runId), 'completed');
         assert.ok(pidAlive(claudePid));
         assert.ok(fs.existsSync(worktreeLockDir(setup)));
         assert.equal(splits(setup.fake), 0);
@@ -1121,7 +1152,7 @@ await describe('runWatch', async () => {
             claudePid,
             events: ['prompt', 'stop'],
             watcherPid: deadWatcher,
-            patch: { state: 'completed', reason: 'done' },
+            patch: { state: 'retained', outcome: 'completed', reason: 'done' },
         });
         setup.fake.respond('tmux', 'list-panes', { stdout: `%5 ${runId}\n` });
         respondPoll(setup, []);
@@ -1141,7 +1172,8 @@ await describe('runWatch', async () => {
         assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
         assert.equal(launchResultOf(setup), 'firstPoll');
         assert.equal(fs.existsSync(prLockDir(setup)), false);
-        assert.equal(stateOf(setup, runId), 'completed');
+        assert.equal(stateOf(setup, runId), 'retained');
+        assert.equal(outcomeOf(setup, runId), 'completed');
         assert.equal(statusOf(setup).state, 'holding');
         assert.equal(statusOf(setup).reason, 'completed-waiting-for-owner');
         assert.ok(pidAlive(claudePid));

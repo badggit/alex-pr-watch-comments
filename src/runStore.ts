@@ -144,28 +144,42 @@ function narrowPendingFailures(value: unknown, comments: readonly RunComment[]):
 
 type OutcomeRead = { valid: true; outcome?: RunOutcome } | { valid: false };
 
+interface StateFields {
+    state: string | undefined;
+    outcome: unknown;
+}
+
+// A legacy settled record stored its outcome as the state (completed or failed, without an outcome field); it reads
+// as retained with that outcome. Such a state next to an outcome field is unreadable.
+function narrowStateFields(value: unknown): StateFields | undefined {
+    const state = getString(value, 'state');
+    const outcome = getPath(value, 'outcome');
+    if (state !== 'completed' && state !== 'failed') {
+        return { state, outcome };
+    }
+    return outcome === undefined ? { state: 'retained', outcome: state } : undefined;
+}
+
 // outcome is required for a retained record and rejected for every other state.
-function narrowOutcome(value: unknown, state: RunState): OutcomeRead {
-    const raw = getPath(value, 'outcome');
+function narrowOutcome(raw: unknown, state: RunState): OutcomeRead {
     if (state !== 'retained') {
         return raw === undefined ? { valid: true } : { valid: false };
     }
-    const outcome = getString(value, 'outcome');
-    return isRunOutcome(outcome) ? { valid: true, outcome } : { valid: false };
+    return typeof raw === 'string' && isRunOutcome(raw) ? { valid: true, outcome: raw } : { valid: false };
 }
 
 function narrowRecord(value: unknown): RunRecord | undefined {
-    const state = getString(value, 'state');
+    const fields = narrowStateFields(value);
+    const state = fields?.state;
     const comments = narrowComments(value);
     if (getPath(value, 'format') !== RECORD_FORMAT || !isRunState(state) || comments === undefined) {
         return;
     }
-    const outcome = narrowOutcome(value, state);
+    const outcome = narrowOutcome(fields?.outcome, state);
     if (!outcome.valid) {
         return;
     }
-    // A legacy failed record may still carry targets until the read-time mapping to retained lands.
-    const failedOutcome = state === 'failed' || (state === 'retained' && outcome.outcome === 'failed');
+    const failedOutcome = state === 'retained' && outcome.outcome === 'failed';
     const pending = narrowPendingFailures(value, comments);
     if (!pending.valid || (pending.targets !== undefined && !failedOutcome)) {
         return;
