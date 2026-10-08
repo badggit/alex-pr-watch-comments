@@ -120,7 +120,7 @@ function enclosingWorktree(dir: string): string | undefined {
     return current;
 }
 
-function projectRoots(dir: string): string[] {
+export function projectRoots(dir: string): string[] {
     const canonical = canonicalPath(dir) ?? dir;
     const worktrees = [enclosingWorktree(dir), enclosingWorktree(canonical)].filter((root) => root !== undefined);
     return [dir, canonical, ...worktrees];
