@@ -220,3 +220,31 @@ await describe('parseArgs', async () => {
         assert.match(usage, /default 5/u);
     });
 });
+
+await describe('parseArgs new-worktree', async () => {
+    await test('a leading new-worktree routes to the new-worktree parser', () => {
+        assert.deepEqual(parseArgs(['new-worktree', '--task', 'abc-123'], CWD), {
+            kind: 'newWorktree',
+            args: { name: undefined, task: 'abc-123', branch: undefined, base: undefined },
+        });
+    });
+
+    await test('help and errors of the new-worktree parser pass through', () => {
+        assert.deepEqual(parseArgs(['new-worktree', '--help'], CWD), { kind: 'help' });
+        const message = errorMessage(['new-worktree']);
+        assert.match(message, /NAME/u);
+        assert.match(message, /--task/u);
+        assert.equal(errorMessage(['new-worktree', '--bogus']), 'unknown option: --bogus');
+    });
+
+    await test('new-worktree in any other position keeps its old meaning', () => {
+        assert.equal(errorMessage([PR_URL, 'new-worktree']), 'unexpected argument: new-worktree');
+    });
+
+    await test('usageText lists both new-worktree forms', () => {
+        const usage = usageText();
+        assert.ok(usage.includes('alex-pr-watch-comments new-worktree NAME [--branch BRANCH] [--base REF]'));
+        assert.ok(usage.includes('alex-pr-watch-comments new-worktree --task SLUG [--branch BRANCH] [--base REF]'));
+        assert.ok(usage.includes('create or reuse a worktree next to the main clone and print its path'));
+    });
+});

@@ -6,7 +6,7 @@ import { describe, test, type TestContext } from 'node:test';
 
 import { CLONE_TEMP_PREFIX, createCloner } from '../../src/cowClone.ts';
 import { runGuards } from '../../src/guards.ts';
-import { syncIgnoredLinks } from '../../src/ignoredLinks.ts';
+import { EXCLUDE_HEADER, LEGACY_EXCLUDE_HEADER, syncIgnoredLinks } from '../../src/ignoredLinks.ts';
 import { acquireWorktreeLock, releaseWorktreeLock } from '../../src/locks.ts';
 import { createProcessRunner } from '../../src/proc.ts';
 import { initState, worktreeKey } from '../../src/stateStore.ts';
@@ -295,6 +295,100 @@ await describe('ignored links', async () => {
         assert.equal(linkText(path.join(worktree.path, '.env')), undefined);
         assert.ok(!exists(path.join(worktree.path, 'only-here')));
     });
+
+    await test('an exclude file with the legacy header gets new patterns but no second header', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const exclude = path.join(setup.clone, '.git', 'info', 'exclude');
+        fs.appendFileSync(exclude, `${LEGACY_EXCLUDE_HEADER}\n/node_modules\n`);
+        const worktree = await prepared(setup);
+        await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, linkOnly);
+        const lines = fs.readFileSync(exclude, 'utf8').split('\n');
+        assert.ok(lines.includes('/.env'));
+        assert.equal(lines.filter((line) => line === LEGACY_EXCLUDE_HEADER).length, 1);
+        assert.equal(lines.filter((line) => line === EXCLUDE_HEADER).length, 0);
+        assert.equal(lines.filter((line) => line === '/node_modules').length, 1);
+    });
+
+    await test('a fresh exclude file gets exactly one new-style header', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const worktree = await prepared(setup);
+        await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, linkOnly);
+        await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, linkOnly);
+        const lines = fs.readFileSync(path.join(setup.clone, '.git', 'info', 'exclude'), 'utf8').split('\n');
+        assert.equal(lines.filter((line) => line === EXCLUDE_HEADER).length, 1);
+        assert.equal(lines.filter((line) => line === LEGACY_EXCLUDE_HEADER).length, 0);
+    });
+
+    await test('an ignored path with a control character in its name is skipped', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const bad = 'bad\nname.local.md';
+        fs.writeFileSync(path.join(setup.clone, bad), 'odd\n');
+        const worktree = await prepared(setup);
+        const created = await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, linkOnly);
+        assert.deepEqual(created, { linked: 4, cloned: 0 });
+        assert.ok(!exists(path.join(worktree.path, bad)));
+        for (const rel of ['node_modules', '.env', 'CLAUDE.local.md', 'docs.local']) {
+            assert.equal(linkText(path.join(worktree.path, rel)), path.join(setup.clone, rel), rel);
+        }
+        const exclude = fs.readFileSync(path.join(setup.clone, '.git', 'info', 'exclude'), 'utf8');
+        assert.ok(!exclude.split('\n').some((line) => line.includes('bad') || line.includes('name.local.md')));
+        const skipped = setup.deps.logLines.filter((line) =>
+            line.startsWith('warn skipped an ignored path with a control character in its name: ')
+        );
+        assert.equal(skipped.length, 1);
+        assert.ok(!skipped[0]?.includes('\n'));
+    });
+
+    await test(
+        'an exclude file that cannot be written is reported with the removal hint',
+        { skip: process.getuid?.() === 0 },
+        async (t) => {
+            const setup = await setUp(t);
+            seedIgnored(setup);
+            const exclude = path.join(setup.clone, '.git', 'info', 'exclude');
+            const worktree = await prepared(setup);
+            // Restored before the test ends: after hooks run in order, so one added here would follow the cleanup.
+            fs.chmodSync(exclude, 0o444);
+            const created = await syncIgnoredLinks(
+                setup.deps,
+                setup.git,
+                worktree.source,
+                worktree.path,
+                linkOnly
+            ).finally(() => {
+                fs.chmodSync(exclude, 0o644);
+            });
+            assert.deepEqual(created, { linked: 4, cloned: 0 });
+            const warnings = setup.deps.logLines.filter((line) => line.startsWith('warn cannot update '));
+            assert.equal(warnings.length, 1);
+            assert.ok(warnings[0]?.endsWith('must be removed before git worktree remove'), warnings[0]);
+            assert.equal(fs.readFileSync(exclude, 'utf8'), IGNORE_RULES);
+        }
+    );
+
+    await test('an exclude file git cannot locate is reported with the removal hint', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const worktree = await prepared(setup);
+        const runner: CommandRunner = {
+            run(request) {
+                if (request.args.includes('--git-path')) {
+                    return Promise.resolve({ code: 128, stdout: '', stderr: 'fatal: no exclude file\n' });
+                }
+                return setup.runner.run(request);
+            },
+        };
+        const deps = setup.testEnv.deps(runner);
+        const created = await syncIgnoredLinks(deps, setup.git, worktree.source, worktree.path, linkOnly);
+        assert.deepEqual(created, { linked: 4, cloned: 0 });
+        const warnings = deps.logLines.filter((line) => line.startsWith('warn cannot find the info/exclude file '));
+        assert.equal(warnings.length, 1);
+        assert.ok(warnings[0]?.endsWith('must be removed before git worktree remove'), warnings[0]);
+        assert.equal(fs.readFileSync(path.join(setup.clone, '.git', 'info', 'exclude'), 'utf8'), IGNORE_RULES);
+    });
 });
 
 async function linkedWorktree(setup: Setup): Promise<WatchWorktree> {
@@ -393,9 +487,9 @@ await describe('dependency clones', async () => {
         );
         assertClean(setup, worktree);
         assertNoCloneTemps(setup, worktree);
-        assert.ok(deps.logLines.includes('info cloning node_modules into the watch worktree with copy-on-write'));
+        assert.ok(deps.logLines.includes('info cloning node_modules into the worktree with copy-on-write'));
         assert.ok(
-            deps.logLines.some((line) => /^info cloned node_modules into the watch worktree in \d+\.\d s$/u.test(line))
+            deps.logLines.some((line) => /^info cloned node_modules into the worktree in \d+\.\d s$/u.test(line))
         );
         fs.writeFileSync(dependency, 'changed in the worktree\n');
         assert.equal(fs.readFileSync(path.join(setup.clone, 'node_modules', 'pkg', 'index.js'), 'utf8'), 'kept\n');
@@ -518,7 +612,7 @@ await describe('dependency clones', async () => {
         );
         assert.ok(fs.lstatSync(dest).isDirectory());
         assert.deepEqual(setup.deps.logLines, [
-            'warn cannot clone node_modules into the watch worktree (another writer?created the directory)',
+            'warn cannot clone node_modules into the worktree (another writer?created the directory)',
         ]);
         assertClean(setup, worktree);
     });
@@ -537,7 +631,7 @@ await describe('dependency clones', async () => {
         assert.equal(linkText(path.join(worktree.path, 'node_modules')), path.join(setup.clone, 'node_modules'));
         const warnings = deps.logLines.filter((line) => line.startsWith('warn cannot clone'));
         assert.deepEqual(warnings, [
-            'warn cannot clone node_modules into the watch worktree (cp exited with 1: cp: cannot create); linked it instead',
+            'warn cannot clone node_modules into the worktree (cp exited with 1: cp: cannot create); linked it instead',
         ]);
         assertClean(setup, worktree);
         assertNoCloneTemps(setup, worktree);

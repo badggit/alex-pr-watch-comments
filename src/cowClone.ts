@@ -228,7 +228,7 @@ export function createCloner(env?: Partial<ClonerEnv>): Cloner {
                 return { kind: 'unavailable', reason: 'copy-on-write clones are not supported on this platform' };
             }
             const started = nowMs();
-            deps.log.info(`cloning ${safeText(rel)} into the watch worktree with copy-on-write`);
+            deps.log.info(`cloning ${safeText(rel)} into the worktree with copy-on-write`);
             try {
                 const result = await deps.runner.run({ ...command, timeoutMs });
                 if (result.code !== 0 || result.spawnError) {
@@ -248,7 +248,7 @@ export function createCloner(env?: Partial<ClonerEnv>): Cloner {
                 return fail(dest, `cannot place the clone (${placement.code})`);
             }
             const elapsed = ((nowMs() - started) / 1000).toFixed(1);
-            deps.log.info(`cloned ${safeText(rel)} into the watch worktree in ${elapsed} s`);
+            deps.log.info(`cloned ${safeText(rel)} into the worktree in ${elapsed} s`);
             return { kind: 'cloned' };
         },
     };

@@ -6,13 +6,13 @@
         "name": "badggit"
     },
     "metadata": {
-        "version": "0.4.0"
+        "version": "0.6.0"
     },
     "plugins": [
         {
             "name": "alex-pr-watch-comments",
             "source": "./",
-            "description": "Watch a GitHub pull request and turn rocket-approved inline review comments into commits made by Claude Code in tmux panes."
+            "description": "Watch a GitHub pull request and turn rocket-approved inline review comments into commits made by Claude Code in tmux panes, and create git worktrees with copy-on-write dependencies for parallel work."
         }
     ]
 }

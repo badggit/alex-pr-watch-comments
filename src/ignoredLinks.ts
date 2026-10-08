@@ -4,7 +4,9 @@ import path from 'node:path';
 import { defaultCloner, type Cloner } from './cowClone.ts';
 import { gitIn } from './guards.ts';
 import type { Deps } from './types.ts';
-import { safeText } from './validate.ts';
+import { hasControlCharacter, safeText } from './validate.ts';
+
+export { hasControlCharacter } from './validate.ts';
 
 export type LinkDeps = Pick<Deps, 'runner' | 'log'>;
 
@@ -89,7 +91,11 @@ export function isOwnLink(source: string, target: string, rel: string): boolean 
     }
 }
 
-const EXCLUDE_HEADER = '# alex-pr-watch-comments: links in watch worktrees, ignored in the clone already';
+export const EXCLUDE_HEADER =
+    '# alex-pr-watch-comments: links and dependency clones in worktrees, ignored in the main clone already';
+// Written by earlier versions; a file that carries it needs no second header.
+export const LEGACY_EXCLUDE_HEADER = '# alex-pr-watch-comments: links in watch worktrees, ignored in the clone already';
+const EXCLUDE_FAILURE_TAIL = '; the worktree links show as untracked and must be removed before git worktree remove';
 const GLOB_CHARACTERS = /[*?[\\]/gu;
 
 // An anchored gitignore pattern that matches exactly REL, a link included: a pattern with a trailing slash such as
@@ -115,7 +121,7 @@ async function excludeLinks(deps: LinkDeps, gitPath: string, target: string, rel
     const resolved = await gitIn(deps, gitPath, target, ['rev-parse', '--git-path', 'info/exclude']);
     const [line = ''] = resolved.stdout.split('\n', 1);
     if (resolved.code !== 0 || line.length === 0) {
-        deps.log.warn('cannot find the info/exclude file of the repository; the worktree links show as untracked');
+        deps.log.warn(`cannot find the info/exclude file of the repository${EXCLUDE_FAILURE_TAIL}`);
         return;
     }
     const file = path.resolve(target, line);
@@ -125,14 +131,27 @@ async function excludeLinks(deps: LinkDeps, gitPath: string, target: string, rel
     if (missing.length === 0) {
         return;
     }
-    const header = present.has(EXCLUDE_HEADER) ? [] : [EXCLUDE_HEADER];
+    const header = present.has(EXCLUDE_HEADER) || present.has(LEGACY_EXCLUDE_HEADER) ? [] : [EXCLUDE_HEADER];
     const lead = text.length > 0 && !text.endsWith('\n') ? '\n' : '';
     try {
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.appendFileSync(file, `${lead}${[...header, ...missing].join('\n')}\n`);
     } catch {
-        deps.log.warn(`cannot update ${safeText(file)}; the worktree links show as untracked`);
+        deps.log.warn(`cannot update ${safeText(file)}${EXCLUDE_FAILURE_TAIL}`);
     }
+}
+
+// Drops the paths with control characters in their names, each logged once.
+function withoutControlCharacters(deps: LinkDeps, rels: readonly string[]): string[] {
+    const kept: string[] = [];
+    for (const rel of rels) {
+        if (hasControlCharacter(rel)) {
+            deps.log.warn(`skipped an ignored path with a control character in its name: ${safeText(rel)}`);
+        } else {
+            kept.push(rel);
+        }
+    }
+    return kept;
 }
 
 function linkMissing(deps: LinkDeps, source: string, target: string, rel: string): boolean {
@@ -163,11 +182,12 @@ export async function syncIgnoredLinks(
     if (source === target) {
         return { linked: 0, cloned: 0 };
     }
-    const entries = await ignoredPaths(deps, gitPath, source);
-    if (entries === undefined) {
+    const listed = await ignoredPaths(deps, gitPath, source);
+    if (listed === undefined) {
         deps.log.warn(`cannot list the ignored files of ${safeText(source)}; nothing linked into the worktree`);
         return;
     }
+    const entries = withoutControlCharacters(deps, listed);
     const counts: SyncCounts = { linked: 0, cloned: 0 };
     const unavailable: string[] = [];
     for (const rel of entries) {
@@ -193,7 +213,7 @@ export async function syncIgnoredLinks(
             if (outcome.kind === 'failed') {
                 const fallback = isOwnLink(source, target, rel) ? '; linked it instead' : '';
                 deps.log.warn(
-                    `cannot clone ${safeText(rel)} into the watch worktree (${safeText(outcome.reason)})${fallback}`
+                    `cannot clone ${safeText(rel)} into the worktree (${safeText(outcome.reason)})${fallback}`
                 );
             }
         } else {
