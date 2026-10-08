@@ -471,6 +471,19 @@ await describe('tmuxMessage', async () => {
         await tmuxMessage(depsOf(fake), TMUX, CONTEXT, '-x not a flag');
         assert.deepEqual(tmuxArgs(fake.calls()[0]), ['display-message', '-t', '%1', '--', '-x not a flag']);
     });
+
+    await test('resolves to true when tmux exits 0', async () => {
+        const fake = createFakeRunner();
+        fake.respond('tmux', 'display-message', { code: 0 });
+        assert.equal(await tmuxMessage(depsOf(fake), TMUX, CONTEXT, 'shown'), true);
+    });
+
+    await test('resolves to false when tmux exits nonzero', async () => {
+        const fake = createFakeRunner();
+        fake.respond('tmux', 'display-message', { code: 1, stderr: 'no current client' });
+        assert.equal(await tmuxMessage(depsOf(fake), TMUX, CONTEXT, 'not shown'), false);
+        assert.equal(fake.calls().length, 1);
+    });
 });
 
 await describe('capDonePanes', async () => {

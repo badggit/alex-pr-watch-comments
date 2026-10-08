@@ -289,10 +289,10 @@ export async function paneForRun(
 }
 
 // Shows text in the watcher's tmux client; # is dropped because display-message format-expands its message, and
-// -- ends the options so a message starting with - is not read as a flag.
-export async function tmuxMessage(deps: TmuxDeps, tmuxPath: string, tmux: TmuxContext, text: string): Promise<void> {
+// -- ends the options so a message starting with - is not read as a flag. Resolves to whether tmux exited 0.
+export async function tmuxMessage(deps: TmuxDeps, tmuxPath: string, tmux: TmuxContext, text: string): Promise<boolean> {
     const message = safeText(text.replaceAll('#', ''));
-    await tmuxOn(deps, tmuxPath, tmux.socket, ['display-message', '-t', tmux.pane, '--', message]);
+    return succeeded(await tmuxOn(deps, tmuxPath, tmux.socket, ['display-message', '-t', tmux.pane, '--', message]));
 }
 
 // Pane ids are reused after a pane dies, so the pane is marked only while it still carries this run's tag.

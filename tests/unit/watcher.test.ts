@@ -1060,6 +1060,240 @@ await describe('retained waiting set', async () => {
     });
 });
 
+const NOTICE_PREFIX = 'alex-pr-watch-comments: ';
+const MERGED_NOTICE = `${NOTICE_PREFIX}PR merged, exit Claude to finish`;
+const PANE_MISSING = 'worker-pane-not-found';
+const REMINDER_SECONDS = 1800;
+
+// The owner notices of the watch loop: display-message texts with the notice prefix.
+function notices(fake: FakeRunner): string[] {
+    return fake
+        .calls('tmux')
+        .filter((call) => call.key === 'display-message')
+        .map((call) => call.args.at(-1) ?? '')
+        .filter((text) => text.startsWith(NOTICE_PREFIX));
+}
+
+function waitingNotice(runId: string, count: number, pane: string): string {
+    return `${NOTICE_PREFIX}run ${runId}: ${count} approved comments waiting, exit Claude in ${pane} to start the next batch`;
+}
+
+// Makes the setup clock movable; the returned function advances it and gives the new time.
+function movableClock(setup: Setup): (_seconds: number) => number {
+    let clock = setup.now;
+    setup.deps.nowSeconds = () => clock;
+    return (seconds) => {
+        clock += seconds;
+        return clock;
+    };
+}
+
+// A tick with no poll due: only the run check runs.
+async function runCheckTick(setup: Setup, rt: ReturnType<typeof createRuntime>): Promise<void> {
+    rt.lastPollAt = setup.deps.nowSeconds();
+    assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+}
+
+function recordOf(setup: Setup, runId: string): RunRecord {
+    const read = readRecord(setup.stateDir, runId);
+    assert.ok(read.kind === 'ok', 'the run record is unreadable');
+    return read.record;
+}
+
+await describe('retained owner notices', async () => {
+    await test('a new waiting set sends one notice and one reminder after 30 minutes', async (t) => {
+        const setup = await makeSetup(t);
+        const advance = movableClock(setup);
+        const { runId, rt } = await retainedInflight(setup);
+        const comments = [rocketed(setup.now, 102, 100), rocketed(setup.now, 103, 200)];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        const notice = waitingNotice(runId, 2, 'pane 5');
+        assert.deepEqual(notices(setup.fake), [notice]);
+        const logged = setup.deps.logLines.filter((line) => line === `info run ${runId}: 2 approved comments waiting`);
+        assert.equal(logged.length, 1);
+
+        for (const step of [1, 600, REMINDER_SECONDS - 602]) {
+            advance(step);
+            await runCheckTick(setup, rt);
+            assert.deepEqual(notices(setup.fake), [notice]);
+        }
+        advance(1);
+        await runCheckTick(setup, rt);
+        assert.deepEqual(notices(setup.fake), [notice, notice]);
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assertWaiting(setup, `${RETAINED_REASON}, 2 approved comments waiting`, NEXT_BATCH_HINT);
+    });
+
+    await test('a waiting set that empties is logged without a notice', async (t) => {
+        const setup = await makeSetup(t);
+        const { runId, rt } = await retainedInflight(setup);
+        const comments = [rocketed(setup.now, 102, 100), rocketed(setup.now, 103, 200)];
+        respondPoll(setup, comments);
+        respondPoll(setup, []);
+        respondLookup(setup, comments);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(notices(setup.fake).length, 1);
+        rt.lastPollAt = setup.now - setup.session.interval;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 2);
+        assert.equal(notices(setup.fake).length, 1);
+        assert.ok(setup.deps.logLines.includes(`info run ${runId}: no approved comments waiting`));
+        assertWaiting(setup, RETAINED_REASON, '');
+    });
+
+    await test('a merged PR sends one finish notice and reminders from the run checks only', async (t) => {
+        const setup = await makeSetup(t);
+        const advance = movableClock(setup);
+        const { runId, rt } = await retainedInflight(setup);
+        respondPoll(setup, [rocketed(setup.now, 102, 100)], { state: 'MERGED' });
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.deepEqual(notices(setup.fake), [MERGED_NOTICE]);
+        assert.ok(setup.deps.logLines.includes(`info run ${runId}: PR merged, waiting for the owner to exit Claude`));
+
+        advance(REMINDER_SECONDS - 1);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.deepEqual(notices(setup.fake), [MERGED_NOTICE]);
+        advance(1);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.deepEqual(notices(setup.fake), [MERGED_NOTICE, MERGED_NOTICE]);
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 0);
+        assertWaiting(setup, `${RETAINED_REASON}, PR merged`, 'exit Claude in pane 5 to finish');
+    });
+
+    await test('a notice tmux refuses is logged and the status and run stay', async (t) => {
+        const setup = await makeSetup(t, {
+            prime: (fake) => {
+                fake.respond('tmux', 'display-message', { code: 1, stderr: 'no current client' });
+            },
+        });
+        const { runId, rt } = await retainedInflight(setup);
+        const comments = [rocketed(setup.now, 102, 100), rocketed(setup.now, 103, 200)];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(notices(setup.fake).length, 1);
+        assert.ok(setup.deps.logLines.some((line) => line.startsWith('warn ') && line.includes('notice')));
+        assertWaiting(setup, `${RETAINED_REASON}, 2 approved comments waiting`, NEXT_BATCH_HINT);
+        assert.equal(rt.inflightRunId, runId);
+        assert.deepEqual(listRunIds(setup.stateDir), [runId]);
+        assert.equal(stateOf(setup, runId), 'retained');
+    });
+});
+
+await describe('recovery problem', async () => {
+    await test('a missing worker pane is shown until the retained run is cleared', async (t) => {
+        const setup = await makeSetup(t);
+        const advance = movableClock(setup);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, {
+            dbId: 101,
+            claudePid,
+            events: ['prompt', 'stop'],
+            patch: { state: 'retained', outcome: 'completed', reason: 'done' },
+        });
+        setup.fake.respond('tmux', 'list-panes', { stdout: '' });
+        const reconciled = await reconcile(setup.deps, setup.session);
+        assert.deepEqual(reconciled, { inflightRunId: runId, problem: { runId, reason: PANE_MISSING } });
+        const record = recordOf(setup, runId);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = reconciled.inflightRunId;
+        rt.recoveryProblem = reconciled.problem;
+
+        const comments = [rocketed(setup.now, 102, 100), rocketed(setup.now, 103, 200)];
+        respondPoll(setup, comments);
+        respondPoll(setup, comments, { state: 'MERGED' });
+        respondLookup(setup, comments);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        const waiting = `${PANE_MISSING}, 2 approved comments waiting`;
+        assert.equal(statusOf(setup).state, 'needs_attention');
+        assert.equal(statusOf(setup).reason, waiting);
+        assert.equal(statusOf(setup).hint, '');
+        assert.deepEqual(notices(setup.fake).slice(-1), [waitingNotice(runId, 2, 'its worker pane')]);
+
+        scrambleStatus(setup);
+        await runCheckTick(setup, rt);
+        assert.equal(statusOf(setup).state, 'needs_attention');
+        assert.equal(statusOf(setup).reason, waiting);
+        assert.equal(statusOf(setup).hint, '');
+
+        rt.lastPollAt = setup.now - setup.session.interval;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(statusOf(setup).state, 'needs_attention');
+        assert.equal(statusOf(setup).reason, `${PANE_MISSING}, PR merged`);
+        assert.equal(statusOf(setup).hint, '');
+        assert.deepEqual(notices(setup.fake).slice(-1), [MERGED_NOTICE]);
+        assert.deepEqual(recordOf(setup, runId), record);
+
+        const sent = notices(setup.fake).length;
+        advance(REMINDER_SECONDS);
+        await runCheckTick(setup, rt);
+        assert.equal(statusOf(setup).state, 'needs_attention');
+        assert.equal(statusOf(setup).reason, `${PANE_MISSING}, PR merged`);
+        assert.deepEqual(notices(setup.fake).slice(sent), [MERGED_NOTICE]);
+
+        process.kill(claudePid, 'SIGKILL');
+        assert.ok(await waitUntil(5000, () => !pidAlive(claudePid)), 'the fake claude did not exit');
+        fs.writeFileSync(path.join(runDir(setup.stateDir, runId), 'exit_status'), '0');
+        assert.deepEqual(recordOf(setup, runId), record);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'prClosed');
+        assert.equal(rt.inflightRunId, undefined);
+        assert.equal(rt.recoveryProblem, undefined);
+        assert.deepEqual(listRunIds(setup.stateDir), []);
+        assert.equal(statusOf(setup).state, 'exited');
+    });
+
+    await test('a cleared run of an open PR drops the problem and polls again', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, {
+            dbId: 101,
+            claudePid,
+            events: ['prompt', 'stop'],
+            patch: { state: 'retained', outcome: 'completed', reason: 'done' },
+        });
+        setup.fake.respond('tmux', 'list-panes', { stdout: '' });
+        const reconciled = await reconcile(setup.deps, setup.session);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = reconciled.inflightRunId;
+        rt.recoveryProblem = reconciled.problem;
+        respondPoll(setup, []);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(statusOf(setup).state, 'needs_attention');
+        assert.equal(statusOf(setup).reason, PANE_MISSING);
+
+        process.kill(claudePid, 'SIGKILL');
+        assert.ok(await waitUntil(5000, () => !pidAlive(claudePid)), 'the fake claude did not exit');
+        fs.writeFileSync(path.join(runDir(setup.stateDir, runId), 'exit_status'), '0');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(rt.recoveryProblem, undefined);
+        assert.equal(rt.inflightRunId, undefined);
+        assert.equal(statusOf(setup).state, 'polling');
+    });
+
+    await test('a restarted watcher shows the missing pane of its adopted retained run', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const deadWatcher = await deadPid(setup);
+        const runId = await seedRun(setup, {
+            dbId: 101,
+            claudePid,
+            events: ['prompt', 'stop'],
+            watcherPid: deadWatcher,
+            patch: { state: 'retained', outcome: 'completed', reason: 'done' },
+        });
+        setup.fake.respond('tmux', 'list-panes', { stdout: '' });
+        respondPoll(setup, []);
+        assert.equal(await startWatch(setup, true), 0);
+        assert.equal(statusOf(setup).state, 'needs_attention');
+        assert.equal(statusOf(setup).reason, PANE_MISSING);
+        assert.equal(stateOf(setup, runId), 'retained');
+        assert.equal(recordOf(setup, runId).reason, 'done');
+    });
+});
+
 await describe('applyPacing', async () => {
     await test('throttles an idle tick', async (t) => {
         const setup = await makeSetup(t);

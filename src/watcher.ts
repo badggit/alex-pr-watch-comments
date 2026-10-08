@@ -9,11 +9,22 @@ import { nextDelay } from './pacing.ts';
 import { preflight } from './preflight.ts';
 import { processStart } from './proc.ts';
 import { buildQueue, lookupIds } from './queue.ts';
-import { reconcile } from './reconcile.ts';
-import { busyHint, retainedStatus, waitingSetOf, type WaitingSet } from './retainedWait.ts';
+import { reconcile, type RecoveryProblem } from './reconcile.ts';
+import {
+    busyHint,
+    initialNoticeState,
+    planNotice,
+    retainedStatus,
+    waitingSetOf,
+    waitingSuffix,
+    type NoticeState,
+    type RetainedStatusInput,
+    type WaitingSet,
+} from './retainedWait.ts';
 import { attentionHint, captureRun, evaluateRun, isClearedResult } from './runState.ts';
 import { readRecord, readStatus, writeStatus } from './runStore.ts';
 import { initState, resolveStateDir, type InitStateResult } from './stateStore.ts';
+import { tmuxMessage } from './tmuxControl.ts';
 import type {
     Candidate,
     Capture,
@@ -45,7 +56,8 @@ type StatusFields = Pick<WatcherStatus, 'state' | 'reason' | 'hint'>;
 // succeeded; pendingLockRunId names a worktree lock a held dispatch could not release, retried on every tick;
 // endMessage says why a terminal tick ended the loop; unpublishedFatal is the first fatal message whose write was not
 // confirmed, so its retry keeps the reason. waiting is the approved queue last seen while a run was retained, dropped
-// for good once the PR is closed.
+// for good once the PR is closed. notice is the owner notice schedule of the retained run; recoveryProblem is what
+// reconcile found wrong with the adopted run, shown until that run is cleared. None of the three is ever stored.
 interface WatcherRuntime {
     inflightRunId: string | undefined;
     lastPollAt: number | undefined;
@@ -62,6 +74,8 @@ interface WatcherRuntime {
     unpublishedFatal: string;
     closedPrState: Exclude<PrState, 'OPEN'> | undefined;
     waiting: WaitingSet | undefined;
+    notice: NoticeState;
+    recoveryProblem: RecoveryProblem | undefined;
 }
 
 export interface TickHooks {
@@ -109,6 +123,7 @@ const STOPPED_EARLY = 'watcher stopped before its first poll';
 const ENDED_EARLY = 'watcher ended before its first poll';
 const LOCK_PENDING = 'worktree lock release pending';
 const NO_RUN: Pick<WatcherStatus, 'runId' | 'comments'> = { runId: '', comments: '' };
+const NOTICE_PREFIX = 'alex-pr-watch-comments: ';
 function ignoreMessage(): void {
     return;
 }
@@ -133,6 +148,8 @@ export function createRuntime(launchToken: string, windowId: string): WatcherRun
         unpublishedFatal: '',
         closedPrState: undefined,
         waiting: undefined,
+        notice: initialNoticeState(),
+        recoveryProblem: undefined,
     };
 }
 
@@ -203,15 +220,64 @@ function runFields(session: Session, runId: string | undefined): Pick<WatcherSta
     return { runId: safeText(runId), comments };
 }
 
-// The holding status of a retained run, or undefined when the run is not (or no longer readably) retained.
-function retainedFields(session: Session, rt: WatcherRuntime, runId: string): StatusFields | undefined {
+// The status of a retained run and the input its notices are planned on, or undefined when the run is not (or no
+// longer readably) retained. A recovery problem of the run is shown instead of holding, and its notices name no pane
+// id, because that pane was not found.
+function retainedShown(
+    session: Session,
+    rt: WatcherRuntime,
+    runId: string
+): { fields: StatusFields; input: RetainedStatusInput } | undefined {
     const read = readRecord(session.stateDir, runId);
     if (read.kind !== 'ok' || read.record.state !== 'retained' || read.record.outcome === undefined) {
         return undefined;
     }
+    const problem = rt.recoveryProblem?.runId === runId ? rt.recoveryProblem : undefined;
     const { outcome, paneId } = read.record;
-    const shown = retainedStatus({ outcome, paneId, waiting: rt.waiting, closed: rt.closedPrState });
-    return { state: 'holding', ...shown };
+    const input = {
+        outcome,
+        paneId: problem === undefined ? paneId : '',
+        waiting: rt.waiting,
+        closed: rt.closedPrState,
+    };
+    if (problem === undefined) {
+        return { fields: { state: 'holding', ...retainedStatus(input) }, input };
+    }
+    const reason = `${problem.reason}${waitingSuffix(rt.waiting, rt.closedPrState)}`;
+    return { fields: { state: 'needs_attention', reason, hint: '' }, input };
+}
+
+// A notice tmux does not show is only logged; the schedule moves on either way.
+async function noticeOwner(
+    deps: Deps,
+    session: Session,
+    rt: WatcherRuntime,
+    runId: string,
+    input: RetainedStatusInput
+): Promise<void> {
+    const plan = planNotice(rt.notice, { now: deps.nowSeconds(), runId: safeText(runId), status: input });
+    rt.notice = plan.next;
+    if (plan.log !== undefined) {
+        deps.log.info(plan.log);
+    }
+    if (plan.notice === undefined) {
+        return;
+    }
+    if (!(await tmuxMessage(deps, session.tools.tmux, session.tmux, `${NOTICE_PREFIX}${plan.notice}`))) {
+        deps.log.warn(`could not show the owner notice in tmux: ${plan.notice}`);
+    }
+}
+
+// Writes the status of a retained run, then sends the owner the notice it calls for. False when the run is not
+// readably retained, so nothing was written.
+async function showRetained(deps: Deps, session: Session, rt: WatcherRuntime, runId: string): Promise<boolean> {
+    const shown = retainedShown(session, rt, runId);
+    if (shown === undefined) {
+        return false;
+    }
+    setStatus(deps, session, { ...shown.fields, ...runFields(session, runId) });
+    await noticeOwner(deps, session, rt, runId, shown.input);
+    return true;
 }
 
 // Pacing always uses whichever rate came last; a reading without a remaining budget (an all-gone lookup) is not one.
@@ -340,6 +406,8 @@ async function evaluateInflight(
     if (isClearedResult(result.state)) {
         rt.inflightRunId = undefined;
         rt.waiting = undefined;
+        rt.notice = initialNoticeState();
+        rt.recoveryProblem = undefined;
         return { kind: 'cleared', reason };
     }
     if (stop.aborted) {
@@ -349,11 +417,13 @@ async function evaluateInflight(
     if (result.state === 'deferred' && previous?.reason !== reason) {
         deps.log.info(`run ${safeText(runId)} deferred: ${reason}`);
     }
-    const retained = result.state === 'retained' ? retainedFields(session, rt, runId) : undefined;
+    if (result.state === 'retained' && (await showRetained(deps, session, rt, runId))) {
+        return { kind: 'kept' };
+    }
     const state =
         result.state === 'needs_attention' ? 'needs_attention' : result.state === 'retained' ? 'holding' : 'running';
     const hint = state === 'needs_attention' ? attentionHint(result.reason) : '';
-    setStatus(deps, session, { state, reason, hint, ...retained, ...runFields(session, runId) });
+    setStatus(deps, session, { state, reason, hint, ...runFields(session, runId) });
     return { kind: 'kept' };
 }
 
@@ -422,18 +492,15 @@ function runIsRetained(session: Session, runId: string | undefined): boolean {
 
 // The queue an idle watcher would build (the retained batch's re-approved comments included), only counted: nothing
 // is reacted to, refused or dispatched. The status is written at once so the new count shows in this tick.
-function countWaiting(
+async function countWaiting(
     deps: Deps,
     session: Session,
     rt: WatcherRuntime,
     runId: string,
     lists: { poll: PollResult; lookup: LookupResult }
-): void {
+): Promise<void> {
     rt.waiting = waitingSetOf(buildQueue(lists.poll, lists.lookup, [], QUIET_QUEUE_LOG).candidates);
-    const retained = retainedFields(session, rt, runId);
-    if (retained !== undefined) {
-        setStatus(deps, session, { ...retained, ...runFields(session, runId) });
-    }
+    await showRetained(deps, session, rt, runId);
 }
 
 function pollDue(deps: Deps, session: Session, rt: WatcherRuntime): boolean {
@@ -497,11 +564,8 @@ async function pollTick(
             rt.waiting = undefined;
             deps.log.info(`pull request is ${poll.prState}; waiting for the worker owner to close Claude`);
             // Replace a next-batch hint at once; no next batch follows a closed PR.
-            const retained = retainedFields(session, rt, inflight.runId);
-            if (retained !== undefined) {
-                setStatus(deps, session, { ...retained, ...runFields(session, inflight.runId) });
-            }
-            return 'ok';
+            await showRetained(deps, session, rt, inflight.runId);
+            return stop.aborted ? 'stopped' : 'ok';
         }
         deps.log.info(`pull request is ${poll.prState}, stopping`);
         setStatus(deps, session, { state: 'exited', reason: rt.endMessage, hint: '' });
@@ -525,8 +589,8 @@ async function pollTick(
     }
     publishLaunch(deps.log, stateDir, pr.prKey, rt, 'firstPoll', 'first poll succeeded');
     if (rt.inflightRunId !== undefined && runIsRetained(session, rt.inflightRunId)) {
-        countWaiting(deps, session, rt, rt.inflightRunId, { poll, lookup });
-        return 'ok';
+        await countWaiting(deps, session, rt, rt.inflightRunId, { poll, lookup });
+        return stop.aborted ? 'stopped' : 'ok';
     }
     const queue = buildQueue(poll, lookup, inflightIds, deps.log);
     for (const entry of queue.edited) {
@@ -731,6 +795,7 @@ async function watchLocked(deps: Deps, session: Session, rt: WatcherRuntime, sto
         writeStatus(stateDir, pr.prKey, { ...reset, ...NO_RUN, since: now }, now);
         const reconciled = await reconcile(deps, session, stop);
         rt.inflightRunId = reconciled.inflightRunId;
+        rt.recoveryProblem = reconciled.problem;
         if (stop.aborted) {
             return 0;
         }
