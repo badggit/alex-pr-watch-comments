@@ -1,10 +1,15 @@
 import path from 'node:path';
 
 import { DEFAULT_BATCH_MAX, DEFAULT_INTERVAL, DEFAULT_KEEP_PANES, GITHUB_HOST, MAX_BATCH } from './constants.ts';
+import { parseNewWorktreeArgs, type NewWorktreeArgs } from './newWorktreeArgs.ts';
 import type { CliMode, CliOptions, PrRef } from './types.ts';
 import { HOST_PATTERN, isUintString, isValidName, safeText } from './validate.ts';
 
-export type ParseResult = { kind: 'ok'; options: CliOptions } | { kind: 'help' } | { kind: 'error'; message: string };
+export type ParseResult =
+    | { kind: 'ok'; options: CliOptions }
+    | { kind: 'newWorktree'; args: NewWorktreeArgs }
+    | { kind: 'help' }
+    | { kind: 'error'; message: string };
 
 type WorkingTreeMode = 'in-place' | 'worktree' | 'conflict';
 
@@ -249,7 +254,16 @@ function finish(draft: Draft): ParseResult {
     return toResult(draft, mode, pr);
 }
 
+// Only a leading new-worktree selects the subcommand; elsewhere the word stays a plain positional.
+function parseNewWorktree(rest: readonly string[]): ParseResult {
+    const parsed = parseNewWorktreeArgs(rest);
+    return parsed.kind === 'ok' ? { kind: 'newWorktree', args: parsed.args } : parsed;
+}
+
 export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
+    if (argv[0] === 'new-worktree') {
+        return parseNewWorktree(argv.slice(1));
+    }
     const draft: Draft = {
         background: false,
         list: false,
@@ -296,6 +310,9 @@ export function usageText(): string {
         '  alex-pr-watch-comments <PR URL> --background [options]  watch in a detached tmux window',
         '  alex-pr-watch-comments --list                           list watchers and runs',
         '  alex-pr-watch-comments --stop <PR URL>                  stop the watcher for a PR (a running worker is kept)',
+        '  alex-pr-watch-comments new-worktree NAME [--branch BRANCH] [--base REF]',
+        '  alex-pr-watch-comments new-worktree --task SLUG [--branch BRANCH] [--base REF]',
+        '      create or reuse a worktree next to the main clone and print its path',
         '  alex-pr-watch-comments --help                           show this help',
         '',
         'Options:',
