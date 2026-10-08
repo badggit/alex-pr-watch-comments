@@ -542,6 +542,91 @@ await describe('preflight', async () => {
         assert.equal(inPlace.dirCanon, worktree);
     });
 
+    await test('--worktree inside another linked worktree works there in place and creates none', async (t) => {
+        const setup = await setUp(t);
+        const env = setup.testEnv.env;
+        const clone = fs.realpathSync.native(setup.clone);
+        gitSync(env, ['-C', clone, 'checkout', '--quiet', 'main']);
+        const linked = path.join(path.dirname(clone), 'mine');
+        gitSync(env, ['-C', clone, 'worktree', 'add', '--quiet', linked, BRANCH]);
+        const run = await runPreflight(setup, { inPlace: false, dir: linked });
+        const session = sessionOf(run.result);
+        assert.equal(session.dirCanon, linked);
+        assert.equal(session.toplevel, linked);
+        assert.equal(session.worktree, undefined);
+        assert.ok(!fs.existsSync(path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12')));
+        assert.ok(
+            run.deps.logLines.includes(`info already in the worktree ${linked}: --worktree works in place there`),
+            run.deps.logLines.join('\n')
+        );
+    });
+
+    await test('--worktree inside a linked worktree on another branch is refused without a new worktree', async (t) => {
+        const setup = await setUp(t);
+        const clone = fs.realpathSync.native(setup.clone);
+        const linked = path.join(path.dirname(clone), 'other');
+        gitSync(setup.testEnv.env, ['-C', clone, 'worktree', 'add', '--quiet', '-b', 'other', linked]);
+        const reason = await refusalOf(setup, { inPlace: false, dir: linked });
+        assert.equal(reason, `other is checked out, not ${BRANCH} (switch with: gh pr checkout 12)`);
+        assert.ok(!fs.existsSync(path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12')));
+    });
+
+    await test('--worktree in a linked worktree that only shares the watch worktree name works in place', async (t) => {
+        const setup = await setUp(t);
+        const env = setup.testEnv.env;
+        const clone = fs.realpathSync.native(setup.clone);
+        gitSync(env, ['-C', clone, 'checkout', '--quiet', 'main']);
+        const nested = path.join(clone, '.claude', 'worktrees', 'alex-pr-watch-comments-pr-12');
+        gitSync(env, ['-C', clone, 'worktree', 'add', '--quiet', nested, BRANCH]);
+        const session = await sessionFrom(setup, { inPlace: false, dir: nested });
+        assert.equal(session.dirCanon, nested);
+        assert.equal(session.worktree, undefined);
+        assert.ok(!fs.existsSync(path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12')));
+    });
+
+    await test('--worktree in the watch worktree of another PR, reached through a symlink, works in place', async (t) => {
+        const setup = await setUp(t);
+        const env = setup.testEnv.env;
+        const clone = fs.realpathSync.native(setup.clone);
+        gitSync(env, ['-C', clone, 'checkout', '--quiet', 'main']);
+        const other = path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-7');
+        gitSync(env, ['-C', clone, 'worktree', 'add', '--quiet', other, BRANCH]);
+        fs.mkdirSync(path.join(other, 'deep'));
+        const link = path.join(setup.testEnv.root, 'link');
+        fs.symlinkSync(other, link);
+        const session = await sessionFrom(setup, { inPlace: false, dir: path.join(link, 'deep') });
+        assert.equal(session.dirCanon, path.join(other, 'deep'));
+        assert.equal(session.toplevel, other);
+        assert.equal(session.worktree, undefined);
+        assert.ok(!fs.existsSync(path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12')));
+    });
+
+    await test('--worktree in a name-alike worktree of a separate-git-dir clone works in place', async (t) => {
+        const setup = await setUp(t);
+        const env = setup.testEnv.env;
+        const clone = fs.realpathSync.native(setup.clone);
+        gitSync(env, ['-C', clone, 'checkout', '--quiet', 'main']);
+        // git lists the git directory first; next to the clone, its sibling has the watch worktree's path.
+        gitSync(env, ['-C', clone, 'init', '--quiet', `--separate-git-dir=${path.join(path.dirname(clone), 'G')}`]);
+        const alike = path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12');
+        gitSync(env, ['-C', clone, 'worktree', 'add', '--quiet', alike, BRANCH]);
+        const session = await sessionFrom(setup, { inPlace: false, dir: alike });
+        assert.equal(session.dirCanon, alike);
+        assert.equal(session.worktree, undefined);
+    });
+
+    await test('--worktree started inside the watch worktree keeps using it as the watch worktree', async (t) => {
+        const setup = await setUp(t);
+        const clone = fs.realpathSync.native(setup.clone);
+        gitSync(setup.testEnv.env, ['-C', clone, 'checkout', '--quiet', 'main']);
+        const first = await runPreflight(setup, { inPlace: false });
+        const { worktree } = sessionOf(first.result);
+        assert.ok(worktree !== undefined);
+        const second = await runPreflight(setup, { inPlace: false, dir: worktree.path });
+        const inside = sessionOf(second.result);
+        assert.deepEqual(inside.worktree, { path: worktree.path, source: clone });
+    });
+
     await test('--worktree refuses while the clone has the head branch checked out', async (t) => {
         const setup = await setUp(t);
         const reason = await refusalOf(setup, { inPlace: false });

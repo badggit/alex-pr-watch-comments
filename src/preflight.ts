@@ -7,11 +7,12 @@ import { fetchPrInfo } from './githubPoll.ts';
 import { currentBranch, findRemote, gitIn } from './guards.ts';
 import { syncIgnoredLinks } from './ignoredLinks.ts';
 import { getArray, getRecord } from './json.ts';
+import { confirmedMainTree, gitDirsOf, isLinked, type GitDirs } from './linkedWorktree.ts';
 import { readJsonFile, resolveStateDir, worktreeKey } from './stateStore.ts';
 import { parseTmuxEnv, tmuxInit } from './tmuxControl.ts';
 import type { CliOptions, Deps, Env, PrInfo, PrRef, Session, TmuxContext, ToolPaths, WatchWorktree } from './types.ts';
 import { isSafeAbsPath, isSafeRunPath, isValidBranch, isValidName, readEnvSeconds, safeText } from './validate.ts';
-import { prepareWatchWorktree } from './watchWorktree.ts';
+import { prepareWatchWorktree, samePath, watchWorktreePath } from './watchWorktree.ts';
 
 export type PreflightDeps = Pick<Deps, 'runner' | 'env' | 'log'>;
 
@@ -297,6 +298,21 @@ async function checkClone(
     return { ok: true, value: { dirCanon, toplevel, remote: found.remote } };
 }
 
+async function checkHeadBranch(
+    deps: PreflightDeps,
+    gitPath: string,
+    checkout: Checkout,
+    pr: PrRef,
+    info: PrInfo
+): Promise<Checked<Checkout>> {
+    const branch = await currentBranch(deps, gitPath, checkout.dirCanon);
+    if (branch !== info.headRef) {
+        const shown = branch === undefined ? 'a detached HEAD' : safeText(branch);
+        return refuse(`${shown} is checked out, not ${info.headRef} (switch with: gh pr checkout ${pr.number})`);
+    }
+    return { ok: true, value: checkout };
+}
+
 async function checkCheckout(
     deps: PreflightDeps,
     gitPath: string,
@@ -305,29 +321,45 @@ async function checkCheckout(
     info: PrInfo
 ): Promise<Checked<Checkout>> {
     const clone = await checkClone(deps, gitPath, dir, pr, info);
-    if (!clone.ok) {
-        return clone;
-    }
-    const branch = await currentBranch(deps, gitPath, clone.value.dirCanon);
-    if (branch !== info.headRef) {
-        const shown = branch === undefined ? 'a detached HEAD' : safeText(branch);
-        return refuse(`${shown} is checked out, not ${info.headRef} (switch with: gh pr checkout ${pr.number})`);
-    }
-    return clone;
+    return clone.ok ? checkHeadBranch(deps, gitPath, clone.value, pr, info) : clone;
+}
+
+// Only the folder next to the main working tree counts: a linked worktree that merely has the watch worktree's
+// name elsewhere is the owner's, and the watcher must never sync into it or remove it.
+async function isOwnWatchWorktree(
+    deps: PreflightDeps,
+    gitPath: string,
+    toplevel: string,
+    dirs: GitDirs,
+    prNumber: number
+): Promise<boolean> {
+    const main = await confirmedMainTree(deps, gitPath, toplevel, dirs.commonDir);
+    return main !== undefined && samePath(toplevel, watchWorktreePath(main, prNumber));
 }
 
 // The watch worktree next to the clone, created when missing, checked like an in-place clone and with the clone's
-// ignored paths linked into it.
+// ignored paths linked into it. Started inside another linked worktree, it works there in place instead, so
+// worktrees do not multiply; worktree is then undefined.
 async function checkWorktree(
     deps: PreflightDeps,
     gitPath: string,
     dir: string,
     pr: PrRef,
     info: PrInfo
-): Promise<Checked<{ checkout: Checkout; worktree: WatchWorktree }>> {
+): Promise<Checked<{ checkout: Checkout; worktree: WatchWorktree | undefined }>> {
     const clone = await checkClone(deps, gitPath, dir, pr, info);
     if (!clone.ok) {
         return clone;
+    }
+    const { toplevel } = clone.value;
+    const dirs = await gitDirsOf(deps, gitPath, toplevel);
+    if (dirs === undefined) {
+        return refuse(`cannot tell whether ${safeText(toplevel)} is a linked worktree`);
+    }
+    if (isLinked(dirs) && !(await isOwnWatchWorktree(deps, gitPath, toplevel, dirs, pr.number))) {
+        deps.log.info(`already in the worktree ${safeText(toplevel)}: --worktree works in place there`);
+        const inPlace = await checkHeadBranch(deps, gitPath, clone.value, pr, info);
+        return inPlace.ok ? { ok: true, value: { checkout: inPlace.value, worktree: undefined } } : inPlace;
     }
     const prepared = await prepareWatchWorktree(deps, {
         gitPath,
