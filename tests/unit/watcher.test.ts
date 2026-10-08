@@ -2287,3 +2287,232 @@ await describe('batches and run checks', async () => {
         assert.equal(rt.failures, 0);
     });
 });
+
+function recordText(setup: Setup, runId: string): string {
+    return fs.readFileSync(path.join(runDir(setup.stateDir, runId), 'record.json'), 'utf8');
+}
+
+// A retained run of a dead watcher, adopted again by reconcile with its tagged pane still there.
+async function adoptedRetained(setup: Setup): Promise<string> {
+    const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+    const runId = await seedRun(setup, {
+        dbId: 101,
+        claudePid,
+        events: ['prompt', 'stop'],
+        watcherPid: await deadPid(setup),
+        patch: { state: 'retained', outcome: 'completed', reason: 'done' },
+    });
+    setup.fake.respond('tmux', 'list-panes', { stdout: `%5 ${runId}\n` });
+    return runId;
+}
+
+await describe('closed pull request rules', async () => {
+    await test('a restarted watcher publishes its first poll when the PR is merged under a retained run', async (t) => {
+        const setup = await makeSetup(t);
+        const runId = await adoptedRetained(setup);
+        const reconciled = await reconcile(setup.deps, setup.session);
+        assert.equal(reconciled.inflightRunId, runId);
+        respondPoll(setup, [], { state: 'MERGED' });
+        const rt = createRuntime(TOKEN, '@1');
+        rt.inflightRunId = reconciled.inflightRunId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(launchResultOf(setup), 'firstPoll');
+        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 0);
+        await runCheckTick(setup, rt);
+        assert.equal(rt.inflightRunId, runId);
+        assert.equal(statusOf(setup).state, 'holding');
+        assert.equal(statusOf(setup).reason, 'completed-waiting-for-owner, PR merged');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+    });
+
+    await test('a first poll a failed write could not confirm is published by the next run check', async (t) => {
+        const setup = await makeSetup(t);
+        const runId = await adoptedRetained(setup);
+        const reconciled = await reconcile(setup.deps, setup.session);
+        assert.equal(reconciled.inflightRunId, runId);
+        const blocker = path.join(launchDirOf(setup), `${TOKEN}.json`);
+        fs.mkdirSync(blocker, { recursive: true });
+        respondPoll(setup, [], { state: 'MERGED' });
+        const rt = createRuntime(TOKEN, '@1');
+        rt.inflightRunId = reconciled.inflightRunId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(rt.published, false);
+        assert.equal(launchResultOf(setup), undefined);
+        fs.rmSync(blocker, { recursive: true });
+        await runCheckTick(setup, rt);
+        assert.equal(launchResultOf(setup), 'firstPoll');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 0);
+        assert.equal(rt.inflightRunId, runId);
+    });
+
+    await test('a run check before any successful poll never publishes the first poll', async (t) => {
+        const setup = await makeSetup(t);
+        const runId = await adoptedRetained(setup);
+        const reconciled = await reconcile(setup.deps, setup.session);
+        setup.fake.respond('gh', 'PrwcPoll', GH_FAIL);
+        const rt = createRuntime(TOKEN, '@1');
+        rt.inflightRunId = reconciled.inflightRunId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+        rt.lastPollAt = setup.now;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(launchResultOf(setup), undefined);
+        assert.equal(rt.inflightRunId, runId);
+    });
+
+    await test('a running run keeps the watcher waiting on a merged PR after its first poll', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, { dbId: 101, claudePid, events: ['prompt', 'tool'] });
+        const blocker = path.join(launchDirOf(setup), `${TOKEN}.json`);
+        // The run check's lookup blocks the launch result file and the poll frees it, so only the closed-PR
+        // branch of the same tick can confirm the first poll.
+        setup.fake.respond('gh', 'PrwcLookup', () => {
+            fs.mkdirSync(blocker, { recursive: true });
+            return { json: lookupJson(setup.now, [{ dbId: 101 }]) };
+        });
+        respondLookup(setup, [{ dbId: 101 }]);
+        setup.fake.respond('gh', 'PrwcPoll', () => {
+            fs.rmSync(blocker, { recursive: true });
+            return { json: pollJson(setup.now, [], { state: 'MERGED' }) };
+        });
+        const rt = createRuntime(TOKEN, '@1');
+        rt.inflightRunId = runId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(setup.fake.callCount('gh', 'PrwcLookup'), 1);
+        assert.equal(launchResultOf(setup), 'firstPoll');
+        await runCheckTick(setup, rt);
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assert.equal(rt.inflightRunId, runId);
+        assert.notEqual(statusOf(setup).state, 'exited');
+        assert.equal(stateOf(setup, runId), 'running');
+        assert.equal(worktreeLockHolder(setup.stateDir, setup.session.worktreeKey), runId);
+    });
+
+    await test('an unreadable run with a live pane keeps the watcher until its worker is gone', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, { dbId: 101, claudePid });
+        fs.writeFileSync(path.join(runDir(setup.stateDir, runId), 'record.json'), '{broken');
+        const pane = { live: true };
+        setup.fake.respond('tmux', 'list-panes', () => ({ stdout: pane.live ? `%5 ${runId}\n` : '' }));
+        respondPoll(setup, [], { state: 'CLOSED' });
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.notEqual(statusOf(setup).state, 'exited');
+        assert.equal(rt.inflightRunId, runId);
+        assert.equal(recordText(setup, runId), '{broken');
+        assert.equal(worktreeLockHolder(setup.stateDir, setup.session.worktreeKey), runId);
+
+        pane.live = false;
+        process.kill(claudePid, 'SIGKILL');
+        assert.ok(await waitUntil(5000, () => !pidAlive(claudePid)), 'the fake claude did not exit');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'prClosed');
+        assert.equal(rt.inflightRunId, undefined);
+        assert.deepEqual(listRunIds(setup.stateDir), []);
+        assert.equal(statusOf(setup).state, 'exited');
+        assert.equal(statusOf(setup).reason, 'pull request is CLOSED');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+    });
+
+    await test('a preparing run does not keep the watcher on a closed PR', async (t) => {
+        const setup = await makeSetup(t);
+        const runId = await seedRun(setup, {
+            dbId: 103,
+            patch: { state: 'preparing', paneId: '', panePid: undefined },
+            decision: 'none',
+        });
+        const before = recordText(setup, runId);
+        respondPoll(setup, [], { state: 'CLOSED' });
+        const rt = createRuntime(TOKEN, '@1');
+        rt.inflightRunId = runId;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'prClosed');
+        assert.equal(statusOf(setup).state, 'exited');
+        assert.equal(statusOf(setup).reason, 'pull request is CLOSED');
+        assert.equal(launchResultOf(setup), undefined);
+        assert.equal(recordText(setup, runId), before);
+        assert.equal(worktreeLockHolder(setup.stateDir, setup.session.worktreeKey), runId);
+        assert.equal(splits(setup.fake), 0);
+    });
+
+    await test('a preparing run and a PR closed before the first poll is published give a fatal launch', async (t) => {
+        const holder: { now: number } = { now: Math.floor(Date.now() / 1000) };
+        const setup = await makeSetup(t, {
+            env: { PRWC_LAUNCH_TOKEN: TOKEN },
+            prime: (fake) => {
+                fake.respond('gh', 'PrwcRemoveReaction', GH_FAIL);
+            },
+        });
+        holder.now = setup.now;
+        // The pacing wait only yields to the event loop, so the next tick follows at once.
+        setup.deps.sleep = () => delay(0);
+        markLaunchReady(setup.stateDir, PR_KEY, TOKEN);
+        const blocker = path.join(launchDirOf(setup), `${TOKEN}.json`);
+        const approved = rocketed(setup.now, 103, 100);
+        const controller = new AbortController();
+        // The first poll blocks the launch result file, so its first-poll write stays unconfirmed. A third poll
+        // means the watcher kept waiting on the closed PR, so it is stopped there.
+        setup.fake.respond('gh', 'PrwcPoll', () => {
+            fs.mkdirSync(blocker, { recursive: true });
+            return { json: pollJson(holder.now, [approved]) };
+        });
+        setup.fake.respond('gh', 'PrwcPoll', () => {
+            fs.rmSync(blocker, { recursive: true });
+            return { json: pollJson(holder.now, [], { state: 'CLOSED' }) };
+        });
+        setup.fake.respond('gh', 'PrwcPoll', () => {
+            controller.abort();
+            return { json: pollJson(holder.now, [], { state: 'CLOSED' }) };
+        });
+        respondLookup(setup, [approved]);
+        const watching = startWatch(setup, false, controller.signal);
+        setup.atCleanup(async () => {
+            controller.abort();
+            await watching;
+        });
+        assert.equal(await within(watching, 5000), 0);
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 2);
+        assert.equal(launchResultOf(setup), 'fatal');
+        assert.equal(launchMessageOf(setup), 'pull request is CLOSED');
+        const [runId] = listRunIds(setup.stateDir);
+        assert.ok(runId !== undefined, 'the preparing run is gone');
+        assert.equal(stateOf(setup, runId), 'preparing');
+        assert.equal(worktreeLockHolder(setup.stateDir, setup.session.worktreeKey), runId);
+        assert.equal(splits(setup.fake), 0);
+    });
+
+    await test('a closed PR with no run in flight is published as a fatal launch', async (t) => {
+        const setup = await makeSetup(t, { env: { PRWC_LAUNCH_TOKEN: TOKEN } });
+        markLaunchReady(setup.stateDir, PR_KEY, TOKEN);
+        respondPoll(setup, [], { state: 'CLOSED' });
+        assert.equal(await startWatch(setup, true), 0);
+        assert.equal(launchResultOf(setup), 'fatal');
+        assert.equal(launchMessageOf(setup), 'pull request is CLOSED');
+    });
+
+    await test('a stop during the merged notice still leaves the first poll published', async (t) => {
+        const setup = await makeSetup(t, { env: { PRWC_LAUNCH_TOKEN: TOKEN } });
+        markLaunchReady(setup.stateDir, PR_KEY, TOKEN);
+        const runId = await adoptedRetained(setup);
+        respondPoll(setup, [], { state: 'MERGED' });
+        const controller = new AbortController();
+        const atNotice: (string | undefined)[] = [];
+        const inner = setup.deps.runner;
+        setup.deps.runner = {
+            run: async (request) => {
+                if (request.args.at(-1)?.startsWith(NOTICE_PREFIX) === true) {
+                    atNotice.push(launchResultOf(setup));
+                    controller.abort();
+                }
+                return await inner.run(request);
+            },
+        };
+        assert.equal(await within(startWatch(setup, false, controller.signal), 5000), 0);
+        assert.deepEqual(atNotice, ['firstPoll']);
+        assert.deepEqual(notices(setup.fake), [MERGED_NOTICE]);
+        assert.equal(launchResultOf(setup), 'firstPoll');
+        assert.equal(stateOf(setup, runId), 'retained');
+        assert.equal(fs.existsSync(prLockDir(setup)), false);
+    });
+});

@@ -82,8 +82,9 @@ export interface TickHooks {
     beforePoll?(): void;
 }
 
-// A preparing run is resumed and never captured; any other in-flight run (an unreadable record too, without node
-// ids) is evaluated on the capture taken before its lookup.
+// A preparing run is resumed and never captured; it has no worker yet, so a closed PR ends the watcher. Any other
+// in-flight run (an unreadable record too, without node ids) may have a worker and is evaluated on the capture taken
+// before its lookup until that worker is proven gone, so a closed PR keeps the watcher waiting for it.
 type Inflight =
     | { kind: 'preparing'; runId: string; nodeIds: string[] }
     | { kind: 'evaluate'; runId: string; nodeIds: string[]; capture: Capture };
@@ -509,7 +510,8 @@ function pollDue(deps: Deps, session: Session, rt: WatcherRuntime): boolean {
 
 // Looks up the comments of the run in flight and evaluates it on the capture taken before the lookup. A lookup that
 // succeeded already counts as the startup checkpoint: ending a finished run can wait for claude to exit, and the
-// background start must not wait for that.
+// background start must not wait for that. Once a poll has seen the PR closed no further poll follows, so every run
+// check retries a first-poll write that was not confirmed, even without a lookup.
 async function checkInflight(
     deps: Deps,
     session: Session,
@@ -525,6 +527,9 @@ async function checkInflight(
         }
         lookup = looked.result;
         storeRate(rt, lookup.rate);
+        publishLaunch(deps.log, session.stateDir, session.pr.prKey, rt, 'firstPoll', 'first poll succeeded');
+    }
+    if (rt.closedPrState !== undefined) {
         publishLaunch(deps.log, session.stateDir, session.pr.prKey, rt, 'firstPoll', 'first poll succeeded');
     }
     if (ctx.stop.aborted) {
@@ -560,8 +565,11 @@ async function pollTick(
     if (poll.prState !== 'OPEN') {
         rt.closedPrState = poll.prState;
         rt.endMessage = `pull request is ${poll.prState}`;
-        if (inflight !== undefined) {
+        if (inflight?.kind === 'evaluate') {
             rt.waiting = undefined;
+            // The background start must not wait for the owner to close Claude, and a stop during the notice
+            // below must not turn this launch into a failed one.
+            publishLaunch(deps.log, stateDir, pr.prKey, rt, 'firstPoll', 'first poll succeeded');
             deps.log.info(`pull request is ${poll.prState}; waiting for the worker owner to close Claude`);
             // Replace a next-batch hint at once; no next batch follows a closed PR.
             await showRetained(deps, session, rt, inflight.runId);
