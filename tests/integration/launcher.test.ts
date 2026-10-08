@@ -6,8 +6,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { PS_PATH } from '../../src/constants.ts';
 import { createProcessRunner, LINUX_BOOT_ID_FILE, pidAlive, processStart } from '../../src/proc.ts';
+import { removeRun } from '../../src/runRemoval.ts';
 import { claimLaunch, createRun, launchDecision } from '../../src/runStore.ts';
-import type { Env, RecordPatch, RunRecord } from '../../src/types.ts';
+import type { Env, Logger, RecordPatch, RunRecord } from '../../src/types.ts';
 import { buildHookScript, buildLauncherScript, writeWorkerKit } from '../../src/workerKit.ts';
 import { createTestEnv, waitUntil, type ObservedResult, type TestEnv } from '../support/testEnv.ts';
 
@@ -152,6 +153,13 @@ function assertClaudeNeverStarted(kit: Kit): void {
 function runHook(env: TestEnv, hook: string, kind: string, input = '', hookEnv?: Env): Promise<ObservedResult> {
     const observed = env.spawnObserved('/bin/sh', [hook, kind], { input, env: hookEnv });
     return observed.result;
+}
+
+function silentLogger(): Logger {
+    const ignore = (): void => {
+        // Removal warnings are not asserted here.
+    };
+    return { info: ignore, warn: ignore, error: ignore };
 }
 
 function writeScript(file: string, lines: readonly string[]): void {
@@ -504,5 +512,28 @@ await describe('launch handshake', async () => {
         assert.ok(!fs.existsSync(stubFile(kit, 'claude.argv')));
         assert.ok(!fs.existsSync(stubFile(kit, 'claude.selfpid')));
         assert.ok(!fs.existsSync(kit.rd));
+    });
+
+    await test('late writers recreate nothing after the run is removed', async (t) => {
+        const kit = await prepareKit(t);
+        const hook = path.join(kit.env.root, 'hook.sh');
+        fs.writeFileSync(hook, buildHookScript(kit.rd));
+        const observed = kit.env.spawnObserved('/bin/sh', [path.join(kit.rd, 'launcher.sh')], {
+            env: launcherEnv(kit, { STUB_CLAUDE_WAIT: '1' }),
+        });
+        assert.ok(await waitUntil(15_000, () => fs.existsSync(path.join(kit.rd, 'claude.pid'))));
+        assert.ok(await waitUntil(15_000, () => fs.existsSync(stubFile(kit, 'claude.selfpid'))));
+        const pid = Number.parseInt(readText(stubFile(kit, 'claude.selfpid')), 10);
+        removeRun(kit.env.stateDir, RUN_ID, silentLogger());
+        assert.ok(!fs.existsSync(kit.rd));
+        process.kill(pid, 'SIGTERM');
+        await observed.result;
+        const runs = path.join(kit.env.stateDir, 'runs');
+        assert.ok(!fs.existsSync(kit.rd));
+        assert.deepEqual(fs.readdirSync(runs, { recursive: true }), []);
+        const result = await runHook(kit.env, hook, 'stop', '{"stop_hook_active":false}');
+        assert.equal(result.code, 0);
+        assert.ok(!fs.existsSync(kit.rd));
+        assert.deepEqual(fs.readdirSync(runs, { recursive: true }), []);
     });
 });
