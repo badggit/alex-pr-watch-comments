@@ -251,7 +251,7 @@ export async function gatherFacts(
             target: target.path,
             branch: target.branch,
             baseGiven,
-            targetIsOwnTree: samePath(target.path, repo.main) || samePath(target.path, current),
+            targetIsOwnTree: samePath(target.path, repo.main),
             targetState: targetStateOf(target.path),
             registered: entry === undefined ? undefined : describeRegistered(entry),
             holder: holder?.path,

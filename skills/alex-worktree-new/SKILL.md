@@ -1,12 +1,12 @@
 ---
-name: new-worktree
+name: alex-worktree-new
 description: Creates a sibling git worktree of the current project, with copy-on-write clones of dependency folders and links to other ignored paths, and switches the session into it. Use only when the user runs this skill, optionally with a worktree name, a ticket key, a pull request, task words, --branch or --base.
 argument-hint: [NAME | TICKET | PR | task words] [--branch BRANCH] [--base REF]
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/bin/alex-pr-watch-comments new-worktree *)
 disable-model-invocation: true
 ---
 
-# new-worktree
+# alex-worktree-new
 
 This skill is a thin wrapper around the `new-worktree` subcommand of the standalone `alex-pr-watch-comments` command. It runs exactly one command, relays its output and then switches the session into the new worktree. The command does every check itself and prints the absolute worktree path on success.
 
@@ -43,8 +43,9 @@ login-form  ->  'login-form'
    Put each value in as one single-quoted argument. Include `--branch` and `--base` only when you have them.
 2. Relay the command's output to the user verbatim: your reply starts with the output exactly as printed. Never capitalize, summarize, reword or translate it. After the output you may add at most one short sentence, and only in these cases:
    - the command failed: name the exit code, then stop;
-   - the command succeeded for a pull request without a known head branch: say that the branch is new from HEAD, not the pull request head branch.
-3. On success (exit code 0), find PATH. The Bash output mixes stdout and stderr in no guaranteed order; log lines on stderr start with an ISO timestamp, for example `2026-10-08T10:00:00Z info ...`. PATH is the one output line that starts with `/`. If there is not exactly one such line, do not switch: give the two lines from step 4 with the literal placeholder `PATH`, and say that the worktree path is in the output above. Otherwise switch the session into PATH with the `EnterWorktree` tool, setting its `path` parameter to PATH. When `EnterWorktree` is deferred, load it first through tool search (`select:EnterWorktree`). Claude Code normally shows the owner one approval prompt for this switch, because the path is outside the project.
+   - the command created or reused a worktree for a pull request without a known head branch: say that the branch is new from HEAD, not the pull request head branch;
+   - the output has an `info already in the worktree ...` log line: say that the session is already in a worktree and no new one was created.
+3. On success (exit code 0), first look for a log line whose text right after the timestamp starts with `info already in the worktree `. If there is one, the session already works in a linked worktree and nothing was created: do not switch and stop here. Otherwise find PATH. The Bash output mixes stdout and stderr in no guaranteed order; log lines on stderr start with an ISO timestamp, for example `2026-10-08T10:00:00Z info ...`. PATH is the one output line that starts with `/`. If there is not exactly one such line, do not switch: give the two lines from step 4 with the literal placeholder `PATH`, and say that the worktree path is in the output above. Otherwise switch the session into PATH with the `EnterWorktree` tool, setting its `path` parameter to PATH. When `EnterWorktree` is deferred, load it first through tool search (`select:EnterWorktree`). Claude Code normally shows the owner one approval prompt for this switch, because the path is outside the project.
 4. If `EnterWorktree` is unavailable, refused (for example because the session is already in a worktree session) or declined by the owner, do not try anything else. Reply with:
    - `/cd PATH` to move this session into the worktree;
    - `cd 'PATH' && claude` to start a new session from a new terminal.

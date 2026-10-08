@@ -38,7 +38,7 @@ async function setUp(t: TestContext): Promise<Setup> {
         git: path.join(testEnv.toolsDir, 'git'),
         runner,
         deps: testEnv.deps(runner),
-        repo: { current: clone, main: clone, mainFound: true },
+        repo: { current: clone, main: clone, mainFound: true, linked: false },
     };
 }
 

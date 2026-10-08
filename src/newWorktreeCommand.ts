@@ -77,10 +77,15 @@ function isTooling(value: Tooling | NewWorktreeOutcome): value is Tooling {
     return 'deps' in value;
 }
 
+// A worktree started from another worktree would only multiply them, so a linked worktree is kept as the answer.
+function stayInLinked(log: Logger, repo: RepoLayout): NewWorktreeOutcome {
+    const from = repo.mainFound ? `; run it from the main working tree ${safeText(repo.main)} to create one` : '';
+    log.info(`already in the worktree ${safeText(repo.current)}: no new worktree is created${from}`);
+    return { kind: 'ok', path: repo.current };
+}
+
 function logNameBase(log: Logger, repo: RepoLayout): void {
-    const folder = safeText(path.basename(repo.main));
-    const which = repo.mainFound ? 'main' : 'current';
-    log.info(`name based on ${which} working tree folder ${folder}`);
+    log.info(`name based on main working tree folder ${safeText(path.basename(repo.main))}`);
 }
 
 async function stepFor(
@@ -131,6 +136,9 @@ export async function runNewWorktree(
         return refused(located.reason);
     }
     const { repo } = located;
+    if (repo.linked) {
+        return stayInLinked(io.log, repo);
+    }
     const derived = deriveTarget(args, repo.main);
     if (!derived.ok) {
         return { kind: 'usage', message: derived.message };

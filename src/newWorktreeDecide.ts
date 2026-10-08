@@ -91,10 +91,7 @@ function decideBranch(facts: TargetFacts): ManualDecision {
 export function decideManualWorktree(facts: TargetFacts): ManualDecision {
     const target = safeText(facts.target);
     if (facts.targetIsOwnTree) {
-        return refuse(
-            `${target} is the working tree this command runs in or the main working tree; ` +
-                'run new-worktree from the main clone to refresh another worktree'
-        );
+        return refuse(`${target} is the main working tree`);
     }
     if (facts.targetState === 'symlink') {
         return refuse(`${target} is a symlink; refusing to follow it`);

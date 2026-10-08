@@ -73,6 +73,17 @@ function addLinked(setup: Setup, name: string, branch: string): string {
     return fs.realpathSync.native(linked);
 }
 
+function makeDir(dir: string): string {
+    fs.mkdirSync(dir, { recursive: true });
+    return fs.realpathSync.native(dir);
+}
+
+// The local branches and the worktree registrations, which a run from a linked worktree must leave alone.
+function snapshot(setup: Setup): string {
+    const branches = git(setup, setup.clone, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads']);
+    return `${branches}${git(setup, setup.clone, ['worktree', 'list', '--porcelain'])}`;
+}
+
 // Copies every cp call with fs.cpSync and forwards everything else, so copy-on-write works on any file system.
 function emulatedRunner(inner: CommandRunner, calls: string[][]): CommandRunner {
     return {
@@ -191,27 +202,58 @@ await describe('runNewWorktree', async () => {
         assert.ok(setup.deps.logLines.includes('info name based on main working tree folder clone'));
     });
 
-    await test('from a linked worktree the name and links come from the main clone, the start from HEAD', async (t) => {
+    await test('from a linked worktree or its subdirectory no worktree is created and the linked one is returned', async (t) => {
         const setup = await setUp(t);
         seedIgnored(setup);
         const linked = addLinked(setup, 'linked', 'feature');
-        assert.notEqual(headOf(setup.env, linked), headOf(setup.env, setup.clone));
-        const result = await run(setup, { task: 't2' }, { cwd: linked });
-        const created = okPath(result.outcome);
-        assert.equal(created, path.join(setup.parent, 'clone-t2'));
-        assert.equal(headOf(setup.env, created), headOf(setup.env, linked));
-        assert.equal(linkText(path.join(created, '.env')), path.join(setup.clone, '.env'));
-        assert.ok(fs.lstatSync(path.join(created, 'node_modules')).isDirectory());
+        const before = snapshot(setup);
+        for (const cwd of [linked, makeDir(path.join(linked, 'deep'))]) {
+            const result = await run(setup, { task: 't2', base: 'main' }, { cwd });
+            assert.equal(okPath(result.outcome), linked);
+            assert.equal(result.cpRuns, 0);
+        }
+        assert.deepEqual(snapshot(setup), before);
+        assert.ok(!exists(path.join(setup.parent, 'clone-t2')));
+        assert.ok(
+            setup.deps.logLines.includes(
+                `info already in the worktree ${linked}: no new worktree is created; run it from the main working tree ${setup.clone} to create one`
+            ),
+            setup.deps.logLines.join('\n')
+        );
     });
 
-    await test('--base main starts the new branch at main', async (t) => {
+    await test('a linked worktree reached through a symlink is returned by its real path', async (t) => {
         const setup = await setUp(t);
         const linked = addLinked(setup, 'linked', 'feature');
-        const result = await run(setup, { name: 'hot', base: 'main' }, { cwd: linked });
+        const link = path.join(setup.root, 'link');
+        fs.symlinkSync(linked, link);
+        const result = await run(setup, { task: 'via-link' }, { cwd: link });
+        assert.equal(okPath(result.outcome), linked);
+        assert.ok(!exists(path.join(setup.parent, 'clone-via-link')));
+    });
+
+    await test('a linked worktree of a bare clone creates nothing', async (t) => {
+        const setup = await setUp(t);
+        const bare = path.join(setup.root, 'bare.git');
+        gitSync(setup.env, ['clone', '--quiet', '--bare', setup.clone, bare]);
+        const linked = path.join(fs.realpathSync.native(setup.root), 'bare-wt');
+        gitSync(setup.env, ['-C', bare, 'worktree', 'add', '--quiet', linked, 'main']);
+        const before = gitSync(setup.env, ['-C', bare, 'worktree', 'list', '--porcelain']);
+        const result = await run(setup, { task: 'bare' }, { cwd: linked });
+        assert.equal(okPath(result.outcome), linked);
+        assert.equal(gitSync(setup.env, ['-C', bare, 'worktree', 'list', '--porcelain']), before);
+        assert.ok(setup.deps.logLines.includes(`info already in the worktree ${linked}: no new worktree is created`));
+    });
+
+    await test('--base starts the new branch at that commit instead of HEAD', async (t) => {
+        const setup = await setUp(t);
+        const feature = git(setup, setup.clone, ['rev-parse', 'feature']).trim();
+        assert.notEqual(feature, headOf(setup.env, setup.clone));
+        const result = await run(setup, { name: 'hot', base: 'feature' });
         const created = okPath(result.outcome);
         assert.equal(created, path.join(setup.parent, 'hot'));
         assert.equal(git(setup, created, ['branch', '--show-current']).trim(), 'hot');
-        assert.equal(headOf(setup.env, created), git(setup, setup.clone, ['rev-parse', 'main']).trim());
+        assert.equal(headOf(setup.env, created), feature);
     });
 
     await test('a second run with the same arguments reuses the worktree without cloning again', async (t) => {
@@ -240,23 +282,19 @@ await describe('runNewWorktree', async () => {
     await test('no git or cp from the project trees runs, also when the run is refused', async (t) => {
         const setup = await setUp(t);
         seedIgnored(setup);
-        const linked = addLinked(setup, 'linked', 'feature');
         const marker = path.join(setup.root, 'marker');
         const cloneBin = path.join(setup.clone, 'bin');
-        const linkedBin = path.join(linked, 'bin');
         writeMarkerTool(cloneBin, 'git', marker);
         writeMarkerTool(cloneBin, 'cp', marker);
-        writeMarkerTool(linkedBin, 'cp', marker);
-        const env: Env = { ...setup.env, PATH: [cloneBin, linkedBin, setup.env.PATH ?? ''].join(':') };
+        const env: Env = { ...setup.env, PATH: [cloneBin, setup.env.PATH ?? ''].join(':') };
         // On Linux the cloner and its probe run a bare cp looked up on PATH; elsewhere the platform default applies.
         const cloner = process.platform === 'linux' ? createCloner({ platform: 'linux' }) : createCloner();
-        const options: RunOptions = { cwd: linked, env, emulateCp: false, cloner };
+        const options: RunOptions = { env, emulateCp: false, cloner };
         const ok = await run(setup, { task: 'clean' }, options);
         okPath(ok.outcome);
         assert.ok(ok.envs.length > 0);
         for (const used of ok.envs) {
-            const entries = pathEntries(used);
-            assert.ok(!entries.includes(cloneBin) && !entries.includes(linkedBin), used.PATH);
+            assert.ok(!pathEntries(used).includes(cloneBin), used.PATH);
         }
         assert.ok(!exists(marker), 'no fake tool ran');
         if (process.platform === 'linux') {
@@ -267,10 +305,28 @@ await describe('runNewWorktree', async () => {
         const refused = await run(setup, { task: 'foreign' }, options);
         assert.equal(refused.outcome.kind, 'refused');
         for (const used of refused.envs) {
+            assert.ok(!pathEntries(used).includes(cloneBin), used.PATH);
+        }
+        assert.ok(!exists(marker), 'no fake tool ran on refusal');
+    });
+
+    await test('from a linked worktree no git from it or from the main clone runs', async (t) => {
+        const setup = await setUp(t);
+        const linked = addLinked(setup, 'linked', 'feature');
+        const marker = path.join(setup.root, 'marker');
+        const cloneBin = path.join(setup.clone, 'bin');
+        const linkedBin = path.join(linked, 'bin');
+        writeMarkerTool(cloneBin, 'git', marker);
+        writeMarkerTool(linkedBin, 'git', marker);
+        const env: Env = { ...setup.env, PATH: [cloneBin, linkedBin, setup.env.PATH ?? ''].join(':') };
+        const result = await run(setup, { task: 'clean' }, { cwd: linked, env });
+        assert.equal(okPath(result.outcome), linked);
+        assert.ok(result.envs.length > 0);
+        for (const used of result.envs) {
             const entries = pathEntries(used);
             assert.ok(!entries.includes(cloneBin) && !entries.includes(linkedBin), used.PATH);
         }
-        assert.ok(!exists(marker), 'no fake tool ran on refusal');
+        assert.ok(!exists(marker), 'no fake tool ran');
     });
 
     await test('a derived name over the length limit is a usage error', async (t) => {
@@ -342,18 +398,22 @@ await describe('runNewWorktree', async () => {
         );
     });
 
-    await test('a linked worktree of a separate-git-dir repository names the target after itself', async (t) => {
+    await test('a linked worktree of a separate-git-dir repository is returned without a main tree hint', async (t) => {
         const setup = await setUp(t);
         const repo = path.join(setup.root, 'separate');
         gitSync(setup.env, ['init', '--quiet', `--separate-git-dir=${path.join(setup.root, 'G')}`, repo]);
         fs.writeFileSync(path.join(repo, 'file.txt'), 'x\n');
         git(setup, repo, ['add', 'file.txt']);
         git(setup, repo, ['commit', '--quiet', '-m', 'one']);
-        const linked = path.join(setup.root, 'separate-linked');
-        git(setup, repo, ['worktree', 'add', '--quiet', '-b', 'side', linked]);
-        const result = await run(setup, { task: 'sep' }, { cwd: linked });
-        const created = okPath(result.outcome);
-        assert.equal(created, path.join(fs.realpathSync.native(setup.root), 'separate-linked-sep'));
-        assert.ok(setup.deps.logLines.includes('info name based on current working tree folder separate-linked'));
+        const root = fs.realpathSync.native(setup.root);
+        const current = path.join(root, 'separate-linked');
+        git(setup, repo, ['worktree', 'add', '--quiet', '-b', 'side', current]);
+        const result = await run(setup, { task: 'sep' }, { cwd: current });
+        assert.equal(okPath(result.outcome), current);
+        assert.ok(!exists(path.join(root, 'separate-linked-sep')));
+        assert.ok(
+            setup.deps.logLines.includes(`info already in the worktree ${current}: no new worktree is created`),
+            setup.deps.logLines.join('\n')
+        );
     });
 });

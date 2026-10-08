@@ -78,9 +78,7 @@ await describe('decideManualWorktree outcomes', async () => {
 await describe('decideManualWorktree refusals', async () => {
     await test('own tree refuses before anything else', () => {
         const reason = reasonOf(decideManualWorktree(facts({ targetIsOwnTree: true, registered: registered({}) })));
-        assert.ok(reason.includes('main working tree'));
-        assert.ok(reason.includes('run new-worktree from the main clone'));
-        assert.ok(reason.includes(TARGET));
+        assert.equal(reason, `${TARGET} is the main working tree`);
     });
 
     await test('a symlink refuses even when registered is set', () => {
