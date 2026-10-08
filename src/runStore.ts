@@ -45,8 +45,6 @@ const RUN_STATES: ReadonlySet<string> = new Set<RunState>([
     'running',
     'needs_attention',
     'retained',
-    'completed',
-    'failed',
     'exited',
     'abandoned',
 ]);
@@ -233,12 +231,16 @@ export function writeRecord(stateDir: string, record: RunRecord): void {
     writeJsonAtomic(recordPath(stateDir, record.runId), record);
 }
 
+// A retained record is final: a patch that changes its state or outcome throws and nothing is written.
 export function mergeRecord(stateDir: string, runId: string, patch: RecordPatch): RunRecord | undefined {
     const read = readRecord(stateDir, runId);
     if (read.kind !== 'ok') {
         return;
     }
     const merged: RunRecord = { ...read.record, ...patch };
+    if (read.record.state === 'retained' && (merged.state !== 'retained' || merged.outcome !== read.record.outcome)) {
+        throw new Error(`run ${runId} is retained with a fixed outcome; refusing to change its state or outcome`);
+    }
     writeJsonAtomic(recordPath(stateDir, runId), merged);
     return merged;
 }

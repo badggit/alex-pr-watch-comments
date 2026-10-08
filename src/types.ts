@@ -192,8 +192,7 @@ export interface Session {
 
 export type GuardResult = { ok: true; headSha: string } | { ok: false; reason: string; hint: string };
 
-export type RunState =
-    'preparing' | 'running' | 'needs_attention' | 'retained' | 'completed' | 'failed' | 'exited' | 'abandoned';
+export type RunState = 'preparing' | 'running' | 'needs_attention' | 'retained' | 'exited' | 'abandoned';
 
 // How a retained run settled; fixed once the run enters the retained state.
 export type RunOutcome = 'completed' | 'failed';

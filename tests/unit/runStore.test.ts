@@ -22,7 +22,7 @@ import {
     writeStatus,
 } from '../../src/runStore.ts';
 import { initState, runDir } from '../../src/stateStore.ts';
-import type { RunRecord } from '../../src/types.ts';
+import type { RecordPatch, RunRecord } from '../../src/types.ts';
 import { createTestEnv, waitUntil, type TestEnv } from '../support/testEnv.ts';
 
 const PR_KEY = 'o+r+12';
@@ -230,6 +230,74 @@ await describe('records', async () => {
             const record: RunRecord = { ...sampleRecord(RUN_A, PR_KEY), state: 'retained', outcome };
             writeRecord(fixture.stateDir, record);
             assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record });
+        }
+    });
+
+    await test('mergeRecord rewrites a legacy completed record in the retained form', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const file = path.join(dir, 'record.json');
+        fs.writeFileSync(file, JSON.stringify({ ...sampleRecord(RUN_A, PR_KEY), state: 'completed', reason: 'done' }));
+        const merged = mergeRecord(fixture.stateDir, RUN_A, { watcherPid: 77 });
+        assert.equal(merged?.state, 'retained');
+        assert.equal(merged.outcome, 'completed');
+        const raw: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.ok(typeof raw === 'object' && raw !== null);
+        assert.equal(Reflect.get(raw, 'state'), 'retained');
+        assert.equal(Reflect.get(raw, 'outcome'), 'completed');
+        assert.equal(Reflect.get(raw, 'watcherPid'), 77);
+        assert.equal(Reflect.get(raw, 'reason'), 'done');
+    });
+
+    await test('mergeRecord keeps a retained record when the patch keeps its state and outcome', async (t) => {
+        const fixture = await newFixture(t);
+        createRun(fixture.stateDir, RUN_A);
+        const target = { nodeId: 'PRRC_1', dbId: 1, eyesOn: false };
+        const record: RunRecord = {
+            ...sampleRecord(RUN_A, PR_KEY),
+            state: 'retained',
+            outcome: 'failed',
+            pendingFailures: [target],
+        };
+        writeRecord(fixture.stateDir, record);
+        mergeRecord(fixture.stateDir, RUN_A, { state: 'retained', outcome: 'failed', pendingFailures: undefined });
+        const read = readRecord(fixture.stateDir, RUN_A);
+        assert.ok(read.kind === 'ok');
+        assert.equal(read.record.state, 'retained');
+        assert.equal(read.record.outcome, 'failed');
+        assert.equal(read.record.pendingFailures, undefined);
+    });
+
+    await test('mergeRecord refuses to change the state or outcome of a retained record', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const file = path.join(dir, 'record.json');
+        const sample = sampleRecord(RUN_A, PR_KEY);
+        // Each stored value is paired with the outcome it reads with; a legacy failed file carries it in the state.
+        const stored = [
+            { value: { ...sample, state: 'retained', outcome: 'failed' }, outcome: 'failed' },
+            { value: { ...sample, state: 'retained', outcome: 'completed' }, outcome: 'completed' },
+            { value: { ...sample, state: 'failed', reason: 'claude-took-failure-path' }, outcome: 'failed' },
+        ];
+        const patches: RecordPatch[] = [
+            { state: 'running' },
+            { outcome: 'completed' },
+            { outcome: 'failed' },
+            { outcome: undefined },
+        ];
+        for (const { value, outcome } of stored) {
+            for (const patch of patches) {
+                if (patch.outcome === outcome) {
+                    continue;
+                }
+                const bytes = JSON.stringify(value);
+                fs.writeFileSync(file, bytes);
+                assert.throws(
+                    () => mergeRecord(fixture.stateDir, RUN_A, patch),
+                    (error: unknown) => error instanceof Error && error.message.includes(RUN_A)
+                );
+                assert.equal(fs.readFileSync(file, 'utf8'), bytes);
+            }
         }
     });
 
