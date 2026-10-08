@@ -4,6 +4,8 @@ Turn inline review comments on a GitHub pull request into commits, hands-free.
 
 Leave comments on lines of the PR diff, approve them with a `rocket` reaction, and a watcher picks them up. It opens a new tmux pane, starts [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) in your project and gives it every approved comment to resolve, one after another. For each comment Claude fixes the code if needed, commits and pushes to the PR branch, replies in the comment thread and marks the comment as done.
 
+The plugin also has a small helper for parallel work: `new-worktree` creates a git worktree next to your clone, with copy-on-write clones of the dependency folders and links to your other ignored files, and switches the Claude Code session into it. See [New worktree](#new-worktree).
+
 ## How it works
 
 1. You start the watcher for one PR from a tmux session, for a local clone of the PR's repository with the PR branch checked out. By default it works in that clone. Pass `--worktree` to use a separate git worktree next to the clone and keep your clone available for other work. See [Watch worktree](#watch-worktree).
@@ -56,6 +58,8 @@ If your Claude Code settings define their own Stop hooks, they may make Claude c
 - The working tree trusted in Claude Code once, including the separate watch worktree when using `--worktree`, see [Trust and permissions](#trust-and-permissions).
 - macOS is the main target. Linux works too.
 
+`new-worktree` needs only Node.js, `git` and `cp`. It does not need `gh`, `tmux` or `claude`, and it works outside tmux.
+
 ## Installation
 
 The repository is a Claude Code plugin marketplace with a single plugin. In Claude Code:
@@ -93,6 +97,39 @@ The skill is a thin wrapper. It runs exactly one command and shows its output:
 
 The skill uses the directory Claude Code runs in as the clone and works there by default. It accepts `--worktree` after the PR URL to use a [watch worktree](#watch-worktree); it has no `--dir` or other watcher options.
 
+The second skill creates a worktree for parallel work and moves the session into it. It runs only when you call it; Claude never picks it on its own. It does not need tmux:
+
+```text
+/alex-pr-watch-comments:new-worktree ABC-123
+/alex-pr-watch-comments:new-worktree #42 --branch feature/login
+/alex-pr-watch-comments:new-worktree fix login form --base origin/main
+/alex-pr-watch-comments:new-worktree app-hotfix
+/alex-pr-watch-comments:new-worktree
+```
+
+The argument is read in this order, the first match wins:
+
+- a ticket key in uppercase letters and digits, a dash and digits (`ABC-123`) becomes `--task abc-123`; lowercase `app-2` is not a ticket key;
+- a pull request (`#42` or a URL ending in `/pull/42`) becomes `--task pr-42`. The skill passes the PR head branch as `--branch` only when the conversation already names it; otherwise the branch is `pr-42`, which the command checks out when it already exists locally or as a remote-tracking branch, or else creates from HEAD (or `--base`). The skill never asks GitHub;
+- several words (`fix login form`) become `--task` with a 1-2 word kebab-case summary (`login-form`);
+- one word is the literal worktree name (`app-hotfix`). The skill passes it as is and lets the command refuse a name that is not a safe folder name;
+- nothing: the skill takes a ticket key, a PR or a short summary of the task from the conversation. When the conversation has no task, it asks you one short question for the task or the name.
+
+`--branch BRANCH` and `--base REF` are passed through unchanged in every form. The skill runs exactly one command, `alex-pr-watch-comments new-worktree ...` from the current project directory, shows its output as printed and does no git checks of its own.
+
+On success the skill takes the path from the one output line that starts with `/` and switches the session into the new worktree with Claude Code's `EnterWorktree` tool. When the output has no such line or more than one, it does not switch and gives the two lines below with the placeholder `PATH`. Claude Code normally asks you once to approve this switch, because the path is outside the project. When the switch is not available, is refused (for example because the session is already in a worktree session) or you decline it, the skill gives two lines instead:
+
+- `/cd PATH` to move this session into the worktree;
+- `cd 'PATH' && claude` to start a new session from a new terminal.
+
+After the switch:
+
+- the main clone is off-limits for the rest of that session; Claude works only in the worktree;
+- Claude Code works from the worktree folder, so the instruction files it loads (`CLAUDE.md`, `CLAUDE.local.md` and the like, as linked or checked out there) are the worktree's; this is Claude Code's behavior, not something the skill controls;
+- leaving with "exit the worktree" only moves the session back. The worktree stays on disk until you remove it, see [New worktree](#new-worktree).
+
+A new worktree is a new folder for Claude Code, so it may show the folder trust dialog once, as for the watch worktree. The command never trusts a folder for you.
+
 ### Console use
 
 The same command works directly from a shell, without the skill. Use the launcher from a clone of this repository:
@@ -120,6 +157,22 @@ alex-pr-watch-comments --list
 
 # Stop the watcher of one PR.
 alex-pr-watch-comments --stop https://github.com/OWNER/REPO/pull/123
+
+# Create a worktree next to the main clone and change into it.
+cd "$(alex-pr-watch-comments new-worktree --task abc-123)"
+
+# The same with a literal name, a branch and a start point.
+alex-pr-watch-comments new-worktree app-hotfix --branch hotfix/login --base origin/main
+```
+
+`new-worktree` prints only the absolute worktree path on stdout, so `cd "$(alex-pr-watch-comments new-worktree NAME)"` works. Progress and warnings go to stderr as log lines; on failure stdout is empty. For example:
+
+```text
+$ cd /path/to/app && alex-pr-watch-comments new-worktree --task abc-123
+2026-10-08T10:00:00Z info name based on main working tree folder app
+2026-10-08T10:00:00Z info created worktree /path/to/app-abc-123 on new branch abc-123 from 1a2b3c4
+2026-10-08T10:00:01Z info cloning node_modules into the worktree with copy-on-write
+/path/to/app-abc-123
 ```
 
 ## Options
@@ -129,8 +182,23 @@ alex-pr-watch-comments <PR URL> [options]               watch in the foreground 
 alex-pr-watch-comments <PR URL> --background [options]  watch in a detached tmux window
 alex-pr-watch-comments --list                           list watchers and runs
 alex-pr-watch-comments --stop <PR URL>                  stop the watcher for a PR (a running worker is kept)
+alex-pr-watch-comments new-worktree NAME [--branch BRANCH] [--base REF]
+alex-pr-watch-comments new-worktree --task SLUG [--branch BRANCH] [--base REF]
+    create or reuse a worktree next to the main clone and print its path
 alex-pr-watch-comments --help                           show this help
 ```
+
+The options in the table below are for the watcher. `new-worktree` takes only its own:
+
+| Option            | Meaning                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NAME`            | The worktree folder name. 1 to 100 letters, digits, `.`, `_` or `-`, not starting with `.` or `-`, and not starting with `alex-pr-watch-comments-pr-`.                                                                                                                                                                                                      |
+| `--task SLUG`     | Name the worktree `MAIN-SLUG`, where `MAIN` is the folder name of the main clone. `SLUG` takes 1 to 100 letters, digits, `.`, `_` or `-`, not starting with `.` or `-`; the combined `MAIN-SLUG` must then pass every `NAME` rule, so a long slug or main folder name can still end in a usage error (exit 2). Exactly one of `NAME` or `--task` is needed. |
+| `--branch BRANCH` | The branch of the worktree, default: `SLUG` with `--task`, else `NAME`. Must be a valid branch name; values starting with `-` or `refs/` are refused.                                                                                                                                                                                                       |
+| `--base REF`      | The start commit of a new branch, default: `HEAD` of the working tree the command runs in. Refused when the branch already exists or the worktree is reused.                                                                                                                                                                                                |
+| `--help`          | Show the usage text.                                                                                                                                                                                                                                                                                                                                        |
+
+`--task`, `--branch` and `--base` can each be given once. `--help` anywhere prints the usage text and exits 0.
 
 | Option               | Meaning                                                                                                                                                                                       |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -188,6 +256,9 @@ All values are whole seconds unless noted. A value that is not a positive whole 
 | foreground watcher | `already watched by pid PID (window @N)`                                                                                                                                                                                                                                                                                               | 0                                                                                                                                                       |
 | foreground watcher | a start-up refusal or a state directory refusal                                                                                                                                                                                                                                                                                        | 1                                                                                                                                                       |
 | foreground watcher | log lines in the pane                                                                                                                                                                                                                                                                                                                  | 0 when the PR is closed or merged or the watcher is stopped, 1 on a fatal error; with `--once`, 0 after a good pass and 1 after a failed GitHub request |
+| `new-worktree`     | the absolute worktree path on stdout (created or reused), log lines on stderr                                                                                                                                                                                                                                                          | 0                                                                                                                                                       |
+| `new-worktree`     | `alex-pr-watch-comments: REASON` on stderr for a refusal (see [New worktree](#new-worktree)) or a git error, with nothing on stdout                                                                                                                                                                                                    | 1                                                                                                                                                       |
+| `new-worktree`     | `alex-pr-watch-comments: MESSAGE` plus the usage text for a wrong option, a bad name or an invalid branch name                                                                                                                                                                                                                         | 2                                                                                                                                                       |
 | any                | `alex-pr-watch-comments: MESSAGE` plus the usage text for a wrong option or argument                                                                                                                                                                                                                                                   | 2                                                                                                                                                       |
 | any                | `alex-pr-watch-comments: MESSAGE` for an unexpected error                                                                                                                                                                                                                                                                              | 1                                                                                                                                                       |
 
@@ -208,6 +279,51 @@ By default the watcher works in your clone on its checked-out PR branch. With `-
 - A new worktree is a new folder for Claude Code, so trust it once, see [Trust and permissions](#trust-and-permissions).
 
 Time Machine backs up each cloned dependency folder as full data. Exclude watch worktrees from Time Machine if your backups grow too large.
+
+## New worktree
+
+`alex-pr-watch-comments new-worktree` (and the `new-worktree` skill, which runs it) creates a git worktree for your own parallel work, or reuses one that is already there, and prints its path. It never fetches and never talks to GitHub.
+
+Placement and names:
+
+- The worktree goes into the directory that holds the main clone (the original clone, not a linked worktree), at `<that directory>/NAME`. With `--task SLUG` the name is `MAIN-SLUG`, where `MAIN` is the folder name of the main clone, so running it inside a linked worktree still gives `app-abc-123`, not `app-foo-abc-123`. The log says which folder the name is based on.
+- When the main clone cannot be determined (for example a bare clone with worktrees, or a linked worktree of a repository with a separate git dir), the working tree the command runs in is used as the name base and as the source of the sync, and the log says so. A bare repository with no working tree and a repository inside a superproject (a submodule) are refused.
+- The branch is `--branch BRANCH`, else the `--task` slug, else the name.
+
+What it does, the first matching rule wins:
+
+1. Refusals: the target is the working tree the command runs in or the main clone (so the command cannot refresh the worktree it runs in; run it from the main clone for that), the target is a symbolic link, or its state cannot be read.
+2. A worktree is already registered at the target: it is reused when it is on the branch. It is refused when it is a watch worktree (folder name starting with `alex-pr-watch-comments-pr-`), when its folder is missing (run `git worktree prune` first), when it is locked, detached or on another branch, and when `--base` is given.
+3. Anything else at the target, an empty folder included, is refused. So is a branch checked out in another working tree; the reason names it.
+4. A local branch with that name is checked out in the new worktree. `--base` is refused.
+5. A remote-tracking branch `REMOTE/BRANCH` that is already fetched (no fetch is done) gives a new local branch tracking it. Matches on several remotes are refused with the candidates; create the branch locally first. `--base` is refused.
+6. Otherwise a new branch is created from the `HEAD` of the working tree the command runs in, or from `--base REF`, resolved to a commit first. The new branch has no upstream.
+
+The branch is created explicitly before `git worktree add`, never with `git worktree add -b`. If `git worktree add` fails, the command deletes the branch it has just created, only while it still points where it was created and is not checked out anywhere; a branch that existed before is never touched. If git registered the worktree but reported an error (for example a failing `post-checkout` hook of your repository), nothing is removed: the command exits 1 and names the worktree path and its branch so you can inspect it.
+
+After creating or reusing the worktree, the command syncs ignored paths from the main clone into it, the same way as for the [watch worktree](#watch-worktree):
+
+- Ignored `node_modules` folders are cloned with copy-on-write where the filesystem supports it, else linked; there is never a full copy.
+- Other ignored paths (`.env`, `CLAUDE.local.md`, `docs.local` and the like) are linked. Build and cache outputs (`dist`, `build`, `.next` and the rest of the list there) are not linked.
+- Each linked path and cloned dependency folder is added as an anchored pattern to the shared `.git/info/exclude`.
+- Only missing paths are added; existing paths, earlier clones included, are left as they are. The one exception is a `node_modules` link that points exactly at the main clone's folder (made by an earlier run where copy-on-write was unavailable): it is replaced with a copy-on-write clone when that works now. A nested ignored path is skipped unless its parent already exists as a real folder in the worktree. Ignored paths whose names contain line breaks or other control characters are skipped with a warning, because they cannot be written as one exclude line; this applies to the watch worktree too.
+- Sync problems are only warnings: the worktree exists and its path is printed, and you can install dependencies by hand.
+
+Things to know:
+
+- Dependency folders are cloned from the main clone as they are. Nothing checks that they match the new branch's lockfile; reinstall when the branch changes dependencies.
+- An ignored parent folder that contains `node_modules` (for example a fully ignored `vendor/`) is listed by git as one path and linked as a whole, so its dependencies are shared with the main clone, not cloned.
+- Do not run two invocations for the same name at once. Git refuses a second creator at the same path, but the second one may reuse the worktree while the first one's hook or sync is still running and report success too early.
+- Before any `git` runs, the command drops every `PATH` entry inside the project folders it can find from the file system alone (the current tree, the main clone, the shared git dir and the expected target) and checks that `git` and `cp` do not resolve into them, so a `git` or `cp` planted in the project cannot run. After git has located the repository, it repeats the check against the actual main tree and target; in unusual layouts (a bare clone with worktrees, a separate git dir) that second check is the first one to know those folders. The copy runs with the same cleaned `PATH`.
+
+Removal is manual. When you are done with the work:
+
+```sh
+git worktree remove /path/to/app-abc-123
+git branch -d abc-123
+```
+
+A fresh worktree with links and cloned dependency folders is removed by a plain `git worktree remove`, because the exclude patterns hide them. If the command warned that it could not update the exclude file, the links show as untracked: remove them first, then run `git worktree remove`. The exclude patterns stay in `.git/info/exclude` after the worktree is gone, as for the watch worktree.
 
 ## Working tree checks
 
