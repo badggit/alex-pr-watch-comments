@@ -171,8 +171,26 @@ await describe('resolveStartCommit', async () => {
 await describe('isGitBranchName', async () => {
     await test('accepts a valid branch and rejects an invalid one', async (t) => {
         const setup = await setUp(t);
-        assert.ok(await isGitBranchName(setup.deps, setup.git, setup.clone, 'feature/x'));
-        assert.ok(!(await isGitBranchName(setup.deps, setup.git, setup.clone, 'x..y')));
+        assert.deepEqual(await isGitBranchName(setup.deps, setup.git, setup.clone, 'feature/x'), { kind: 'valid' });
+        assert.deepEqual(await isGitBranchName(setup.deps, setup.git, setup.clone, 'x..y'), { kind: 'invalid' });
+    });
+
+    await test('a check that cannot start git is an error, not an invalid name', async (t) => {
+        const setup = await setUp(t);
+        const runner: CommandRunner = {
+            run: () => Promise.resolve({ code: 127, stdout: '', stderr: '', spawnError: 'ENOENT' }),
+        };
+        const checked = await isGitBranchName(setup.testEnv.deps(runner), setup.git, setup.clone, 'feature/x');
+        assert.deepEqual(checked, { kind: 'error', reason: 'cannot check branch name feature/x: ENOENT' });
+    });
+
+    await test('a fatal check is an error with the first stderr line', async (t) => {
+        const setup = await setUp(t);
+        const runner: CommandRunner = {
+            run: () => Promise.resolve({ code: 128, stdout: '', stderr: 'fatal: broken\nmore\n' }),
+        };
+        const checked = await isGitBranchName(setup.testEnv.deps(runner), setup.git, setup.clone, 'feature/x');
+        assert.deepEqual(checked, { kind: 'error', reason: 'cannot check branch name feature/x: fatal: broken' });
     });
 });
 

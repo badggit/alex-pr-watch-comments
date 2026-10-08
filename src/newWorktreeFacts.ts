@@ -25,8 +25,18 @@ const OBJECT_ID = /^(?:[\da-f]{40}|[\da-f]{64})$/u;
 // show-ref --verify --quiet exits 1 for a ref that does not exist; every other nonzero exit is an error.
 const REF_ABSENT_CODE = 1;
 
+const BRANCH_REJECTED_CODE = 1;
+
 function errorCode(error: unknown): unknown {
     return error instanceof Error && 'code' in error ? error.code : undefined;
+}
+
+function failureLine(result: CommandResult): string {
+    const line = result.stderr.split('\n', 1)[0]?.trim() ?? '';
+    if (result.spawnError !== undefined) {
+        return result.spawnError;
+    }
+    return line.length > 0 ? line : `git exited with ${result.code}`;
 }
 
 // The base, or HEAD of the working tree at current when no base is given, peeled to a commit.
@@ -58,14 +68,26 @@ export async function resolveStartCommit(
         : { ok: false, reason: `unknown commit: ${safeText(base)}` };
 }
 
+export type BranchNameCheck = { kind: 'valid' } | { kind: 'invalid' } | { kind: 'error'; reason: string };
+
+// check-ref-format exits 1 for a name it rejects; any other failure means git itself could not run the check.
 export async function isGitBranchName(
     deps: LinkDeps,
     gitPath: string,
     current: string,
     branch: string
-): Promise<boolean> {
+): Promise<BranchNameCheck> {
     const result = await gitIn(deps, gitPath, canonical(current), ['check-ref-format', `refs/heads/${branch}`]);
-    return result.code === 0;
+    if (result.spawnError === undefined && result.code === 0) {
+        return { kind: 'valid' };
+    }
+    if (result.spawnError === undefined && result.code === BRANCH_REJECTED_CODE) {
+        return { kind: 'invalid' };
+    }
+    return {
+        kind: 'error',
+        reason: `cannot check branch name ${safeText(branch)}: ${safeText(failureLine(result))}`,
+    };
 }
 
 // The real path of the longest existing ancestor joined with the rest, so a path through a symlinked parent and its
@@ -158,14 +180,6 @@ function describeRegistered(entry: WorktreeEntry): RegisteredWorktree {
         locked: entry.locked || (!missing && lockedByAdminDir(entry.path) !== 'unlocked'),
         missing,
     };
-}
-
-function failureLine(result: CommandResult): string {
-    const line = result.stderr.split('\n', 1)[0]?.trim() ?? '';
-    if (result.spawnError !== undefined) {
-        return result.spawnError;
-    }
-    return line.length > 0 ? line : `git exited with ${result.code}`;
 }
 
 async function checkRef(
