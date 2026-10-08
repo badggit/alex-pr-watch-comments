@@ -20,6 +20,7 @@ import type {
     RecordPatch,
     RunComment,
     RunFailureTarget,
+    RunOutcome,
     RunRecord,
     RunState,
     WatcherState,
@@ -43,6 +44,7 @@ const RUN_STATES: ReadonlySet<string> = new Set<RunState>([
     'preparing',
     'running',
     'needs_attention',
+    'retained',
     'completed',
     'failed',
     'exited',
@@ -59,10 +61,15 @@ const WATCHER_STATES: ReadonlySet<string> = new Set<WatcherState>([
     'exited',
     'fatal',
 ]);
+const RUN_OUTCOMES: ReadonlySet<string> = new Set<RunOutcome>(['completed', 'failed']);
 const EVENT_KINDS: ReadonlySet<string> = new Set<EventKind>(['prompt', 'stop', 'permission', 'tool']);
 
 function isRunState(value: string | undefined): value is RunState {
     return value !== undefined && RUN_STATES.has(value);
+}
+
+function isRunOutcome(value: string | undefined): value is RunOutcome {
+    return value !== undefined && RUN_OUTCOMES.has(value);
 }
 
 function isWatcherState(value: string | undefined): value is WatcherState {
@@ -135,14 +142,32 @@ function narrowPendingFailures(value: unknown, comments: readonly RunComment[]):
     return { valid: true, targets };
 }
 
+type OutcomeRead = { valid: true; outcome?: RunOutcome } | { valid: false };
+
+// outcome is required for a retained record and rejected for every other state.
+function narrowOutcome(value: unknown, state: RunState): OutcomeRead {
+    const raw = getPath(value, 'outcome');
+    if (state !== 'retained') {
+        return raw === undefined ? { valid: true } : { valid: false };
+    }
+    const outcome = getString(value, 'outcome');
+    return isRunOutcome(outcome) ? { valid: true, outcome } : { valid: false };
+}
+
 function narrowRecord(value: unknown): RunRecord | undefined {
     const state = getString(value, 'state');
     const comments = narrowComments(value);
     if (getPath(value, 'format') !== RECORD_FORMAT || !isRunState(state) || comments === undefined) {
         return;
     }
+    const outcome = narrowOutcome(value, state);
+    if (!outcome.valid) {
+        return;
+    }
+    // A legacy failed record may still carry targets until the read-time mapping to retained lands.
+    const failedOutcome = state === 'failed' || (state === 'retained' && outcome.outcome === 'failed');
     const pending = narrowPendingFailures(value, comments);
-    if (!pending.valid || (pending.targets !== undefined && state !== 'failed')) {
+    if (!pending.valid || (pending.targets !== undefined && !failedOutcome)) {
         return;
     }
     const read = createFieldReader(value);
@@ -167,6 +192,7 @@ function narrowRecord(value: unknown): RunRecord | undefined {
         callerPath: read.text('callerPath'),
         claudeArgs: read.texts('claudeArgs'),
         state,
+        ...(outcome.outcome === undefined ? {} : { outcome: outcome.outcome }),
         reason: read.text('reason'),
         paneId: read.text('paneId'),
         panePid: read.optionalNumber('panePid'),

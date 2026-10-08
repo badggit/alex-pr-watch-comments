@@ -192,7 +192,11 @@ export interface Session {
 
 export type GuardResult = { ok: true; headSha: string } | { ok: false; reason: string; hint: string };
 
-export type RunState = 'preparing' | 'running' | 'needs_attention' | 'completed' | 'failed' | 'exited' | 'abandoned';
+export type RunState =
+    'preparing' | 'running' | 'needs_attention' | 'retained' | 'completed' | 'failed' | 'exited' | 'abandoned';
+
+// How a retained run settled; fixed once the run enters the retained state.
+export type RunOutcome = 'completed' | 'failed';
 
 // One approved comment of a run. rocketAt is the viewer's rocket time, the baseline a +1 must be newer than to count
 // as done; eyesAdded says the watcher's EYES add succeeded.
@@ -234,6 +238,8 @@ export interface RunRecord {
     callerPath: string;
     claudeArgs: string[];
     state: RunState;
+    // Present exactly when state is retained.
+    outcome?: RunOutcome;
     reason: string;
     paneId: string;
     panePid: number | undefined;
