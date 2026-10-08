@@ -6,13 +6,14 @@ import { HOST_PATTERN, isUintString, isValidName, safeText } from './validate.ts
 
 export type ParseResult = { kind: 'ok'; options: CliOptions } | { kind: 'help' } | { kind: 'error'; message: string };
 
+type WorkingTreeMode = 'in-place' | 'worktree' | 'conflict';
+
 interface Draft {
     background: boolean;
     list: boolean;
     once: boolean;
-    inPlace: boolean;
-    inPlaceExplicit: boolean;
-    worktreeExplicit: boolean;
+    // 'conflict' is sticky: once both options were given, no later option can clear it.
+    workingTreeMode: WorkingTreeMode | undefined;
     stop: string | undefined;
     positionals: string[];
     dir: string;
@@ -140,6 +141,16 @@ function applyValue(draft: Draft, name: string, value: string, cwd: string): str
     }
 }
 
+function nextWorkingTreeMode(
+    current: WorkingTreeMode | undefined,
+    requested: 'in-place' | 'worktree'
+): WorkingTreeMode {
+    if (current === undefined || current === requested) {
+        return requested;
+    }
+    return 'conflict';
+}
+
 function applyFlag(draft: Draft, name: string): void {
     switch (name) {
         case '--background': {
@@ -155,13 +166,11 @@ function applyFlag(draft: Draft, name: string): void {
             break;
         }
         case '--in-place': {
-            draft.inPlace = true;
-            draft.inPlaceExplicit = true;
+            draft.workingTreeMode = nextWorkingTreeMode(draft.workingTreeMode, 'in-place');
             break;
         }
         case '--worktree': {
-            draft.inPlace = false;
-            draft.worktreeExplicit = true;
+            draft.workingTreeMode = nextWorkingTreeMode(draft.workingTreeMode, 'worktree');
             break;
         }
     }
@@ -169,7 +178,7 @@ function applyFlag(draft: Draft, name: string): void {
 
 function findConflict(draft: Draft): string | undefined {
     const stop = draft.stop !== undefined;
-    if (draft.inPlaceExplicit && draft.worktreeExplicit) {
+    if (draft.workingTreeMode === 'conflict') {
         return '--in-place cannot be combined with --worktree';
     }
     if (draft.list && stop) {
@@ -210,7 +219,7 @@ function toResult(draft: Draft, mode: CliMode, pr?: PrRef): ParseResult {
             keepPanes: draft.keepPanes,
             batchMax: draft.batchMax,
             once: draft.once,
-            inPlace: draft.inPlace,
+            inPlace: draft.workingTreeMode !== 'worktree',
         },
     };
 }
@@ -245,9 +254,7 @@ export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
         background: false,
         list: false,
         once: false,
-        inPlace: true,
-        inPlaceExplicit: false,
-        worktreeExplicit: false,
+        workingTreeMode: undefined,
         stop: undefined,
         positionals: [],
         dir: cwd,
