@@ -360,8 +360,8 @@ await describe('createCloner', async () => {
             timeoutMs: 600_000,
         });
         assert.deepEqual(logs, [
-            'info cloning node_modules into the watch worktree with copy-on-write',
-            'info cloned node_modules into the watch worktree in 2.5 s',
+            'info cloning node_modules into the worktree with copy-on-write',
+            'info cloned node_modules into the worktree in 2.5 s',
         ]);
         fs.writeFileSync(path.join(fixture.dest, 'pkg', 'index.js'), 'private edit');
         assert.equal(fs.readFileSync(path.join(fixture.own, 'pkg', 'index.js'), 'utf8'), 'export const value = 42;');
@@ -458,7 +458,7 @@ await describe('createCloner', async () => {
             kind: 'skipped',
         });
         assert.equal(calls.length, count);
-        assert.deepEqual(logs, ['info cloning node_modules into the watch worktree with copy-on-write']);
+        assert.deepEqual(logs, ['info cloning node_modules into the worktree with copy-on-write']);
     });
 
     await test('memos failure when git cannot resolve the private directory', async (t) => {
