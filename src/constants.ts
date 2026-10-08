@@ -81,3 +81,6 @@ export const ENV_NAMES = {
     readyWait: 'PRWC_READY_WAIT',
     runCheck: 'PRWC_RUN_CHECK',
 } as const;
+
+// How long a retained run waits before the owner is reminded again of approved comments or a closed PR.
+export const RETAINED_REMINDER_SECONDS = 1800;
