@@ -5,17 +5,19 @@ import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 
 import {
+    ensureTrashDir,
     initState,
     readJsonFile,
     readStateFormat,
     resolveStateDir,
+    trashDir,
     worktreeKey,
     writeJsonAtomic,
     writeTextAtomic,
 } from '../../src/stateStore.ts';
 import { createTestEnv, type TestEnv } from '../support/testEnv.ts';
 
-const FIXED_CHILDREN = ['runs', 'watchers', 'worktrees'];
+const FIXED_CHILDREN = ['runs', 'trash', 'watchers', 'worktrees'];
 
 async function newEnv(t: TestContext): Promise<TestEnv> {
     const env = await createTestEnv();
@@ -190,6 +192,53 @@ await describe('initState', async () => {
         const reason = unsafeReason(path.join(env.root, 'with space', 'state'));
         assert.ok(reason.includes('PRWC_STATE_DIR'), reason);
         assert.equal(fs.existsSync(path.join(env.root, 'with space')), false);
+    });
+});
+
+await describe('trash directory', async () => {
+    await test('trashDir is the trash child of the state directory', () => {
+        assert.equal(trashDir('/path/to/state'), '/path/to/state/trash');
+    });
+
+    await test('initState recreates a trash child missing from an initialized directory', async (t) => {
+        const env = await newEnv(t);
+        assert.ok(initState(env.stateDir).ok);
+        fs.rmdirSync(trashDir(env.stateDir));
+        assert.ok(initState(env.stateDir).ok);
+        assert.ok(fs.lstatSync(trashDir(env.stateDir)).isDirectory());
+        assert.equal(modeOf(trashDir(env.stateDir)), 0o700);
+    });
+
+    await test('ensureTrashDir creates a missing trash child with mode 700', async (t) => {
+        const env = await newEnv(t);
+        assert.ok(initState(env.stateDir).ok);
+        fs.rmdirSync(trashDir(env.stateDir));
+        assert.equal(ensureTrashDir(env.stateDir), true);
+        assert.ok(fs.lstatSync(trashDir(env.stateDir)).isDirectory());
+        assert.equal(modeOf(trashDir(env.stateDir)), 0o700);
+        assert.equal(ensureTrashDir(env.stateDir), true);
+    });
+
+    await test('a trash child replaced by a symlink is refused', async (t) => {
+        const env = await newEnv(t);
+        assert.ok(initState(env.stateDir).ok);
+        const other = makeDir(path.join(env.root, 'other'), 0o700);
+        fs.rmdirSync(trashDir(env.stateDir));
+        fs.symlinkSync(other, trashDir(env.stateDir));
+        const reason = unsafeReason(env.stateDir);
+        assert.ok(reason.includes(`${trashDir(env.stateDir)} is a symlink`), reason);
+        assert.equal(ensureTrashDir(env.stateDir), false);
+        assert.ok(fs.lstatSync(trashDir(env.stateDir)).isSymbolicLink());
+    });
+
+    await test('a trash child with mode 770 is refused', async (t) => {
+        const env = await newEnv(t);
+        assert.ok(initState(env.stateDir).ok);
+        fs.chmodSync(trashDir(env.stateDir), 0o770);
+        const reason = unsafeReason(env.stateDir);
+        assert.ok(reason.includes(`chmod 700 ${trashDir(env.stateDir)}`), reason);
+        assert.equal(ensureTrashDir(env.stateDir), false);
+        assert.equal(modeOf(trashDir(env.stateDir)), 0o770);
     });
 });
 

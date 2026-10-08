@@ -10,7 +10,8 @@ import { ghGraphql } from '../../src/gh.ts';
 import { getArray, getBoolean, getNumber, getPath, getString, parseJson } from '../../src/json.ts';
 import { normalizeCallerPath, resolveExecutable } from '../../src/preflight.ts';
 import { createProcessRunner } from '../../src/proc.ts';
-import { worktreeKey } from '../../src/stateStore.ts';
+import { readStatus, workerAlive } from '../../src/runStore.ts';
+import { runDir, worktreeKey } from '../../src/stateStore.ts';
 import type { CommandRequest, CommandResult, CommandRunner, Env } from '../../src/types.ts';
 import { visibleText } from '../../src/untrustedText.ts';
 import { isValidBranch, isValidName, safeText } from '../../src/validate.ts';
@@ -56,8 +57,16 @@ interface ReviewComment {
 }
 
 interface RecordState {
+    runId: string;
     state: string;
+    outcome: string;
     reason: string;
+}
+
+interface WorkerPane {
+    pane: string;
+    runId: string;
+    dead: boolean;
 }
 
 type PaneLookup = { kind: 'found'; pane: string; dead: boolean } | { kind: 'absent' } | { kind: 'unknown' };
@@ -65,8 +74,12 @@ type PaneLookup = { kind: 'found'; pane: string; dead: boolean } | { kind: 'abse
 interface Observation {
     log: string;
     watcherGone: boolean;
+    watcherState: string;
     records: RecordState[];
     lockGone: boolean;
+    kitRunIds: string[];
+    liveRunIds: string[];
+    visibleRunIds: string[];
 }
 
 // Everything created so far, so cleanup knows what to stop, close, remove or report as kept.
@@ -629,16 +642,7 @@ async function startWatcher(ctx: Ctx, target: Target): Promise<void> {
     const codeFile = path.join(workArea, 'background.code');
     const env = ['/usr/bin/env', `PATH=${target.callerPath}`, `PRWC_STATE_DIR=${target.stateDir}`];
     const shell = ['/bin/sh', '-c', PANE_SCRIPT, 'sh', out, codeFile];
-    const watch = [
-        '--background',
-        '--in-place',
-        '--dir',
-        target.clone,
-        '--interval',
-        WATCHER_INTERVAL,
-        '--claude',
-        tools.claude,
-    ];
+    const watch = ['--background', '--dir', target.clone, '--interval', WATCHER_INTERVAL, '--claude', tools.claude];
     const command = [...env, ...shell, BIN, target.pr.url, ...watch];
     ctx.trace.serverStarted = true;
     const session = ['-f', '/dev/null', 'new-session', '-d', '-s', SESSION, '-x', '200', '-y', '50'];
@@ -685,8 +689,39 @@ function recordStates(stateDir: string): RecordState[] {
     const runsDir = path.join(stateDir, 'runs');
     return listDir(runsDir).map((runId) => {
         const value = parseJson(readText(path.join(runsDir, runId, 'record.json')) ?? '');
-        return { state: getString(value, 'state') ?? 'unreadable', reason: getString(value, 'reason') ?? '' };
+        return {
+            runId,
+            state: getString(value, 'state') ?? 'unreadable',
+            outcome: getString(value, 'outcome') ?? '',
+            reason: getString(value, 'reason') ?? '',
+        };
     });
+}
+
+function workerKitPresent(stateDir: string, runId: string): boolean {
+    const dir = runDir(stateDir, runId);
+    return ['hook.sh', 'launcher.sh', 'prompt.txt', 'settings.json'].every((file) => !pathAbsent(path.join(dir, file)));
+}
+
+// The worker panes are the panes tagged with a run id; a failed listing yields none, the next poll tries again.
+async function workerPanes(ctx: Ctx, target: Target): Promise<WorkerPane[]> {
+    const result = await tmuxOn(ctx.runner, target.tools, target.serverName, [
+        'list-panes',
+        '-a',
+        '-F',
+        '#{pane_id} #{pane_dead} #{@prwc_run}',
+    ]);
+    if (result.code !== 0) {
+        return [];
+    }
+    const panes: WorkerPane[] = [];
+    for (const line of result.stdout.split('\n')) {
+        const [pane = '', dead = '', runId = ''] = line.split(' ');
+        if (pane.length > 0 && runId.length > 0) {
+            panes.push({ pane, runId, dead: dead === '1' });
+        }
+    }
+    return panes;
 }
 
 // Read joined (-J), so a wrapped line still matches. Undefined when the capture failed.
@@ -705,39 +740,28 @@ async function observe(ctx: Ctx, target: Target, previousLog: string): Promise<O
         fs.writeFileSync(path.join(target.workArea, 'watcher.log'), captured);
     }
     const lockDir = path.join(target.stateDir, 'worktrees', worktreeKey(target.clone), 'lock');
+    const records = recordStates(target.stateDir);
+    const panes = await workerPanes(ctx, target);
     return {
         log: captured ?? previousLog,
         watcherGone: found.kind === 'absent' || (found.kind === 'found' && found.dead),
-        records: recordStates(target.stateDir),
+        watcherState: readStatus(target.stateDir, target.pr.key)?.state ?? 'unreadable',
+        records,
         lockGone: pathAbsent(lockDir),
+        kitRunIds: records
+            .filter((record) => workerKitPresent(target.stateDir, record.runId))
+            .map((record) => record.runId),
+        liveRunIds: records
+            .filter((record) => workerAlive(target.stateDir, record.runId))
+            .map((record) => record.runId),
+        visibleRunIds: panes.filter((pane) => !pane.dead).map((pane) => pane.runId),
     };
-}
-
-// The worker panes are the panes tagged with a run id; a failed listing yields none, the next poll tries again.
-async function workerPanes(ctx: Ctx, target: Target): Promise<string[]> {
-    const result = await tmuxOn(ctx.runner, target.tools, target.serverName, [
-        'list-panes',
-        '-a',
-        '-F',
-        '#{pane_id} #{@prwc_run}',
-    ]);
-    if (result.code !== 0) {
-        return [];
-    }
-    const panes: string[] = [];
-    for (const line of result.stdout.split('\n')) {
-        const [pane = '', run = ''] = line.split(' ');
-        if (pane.length > 0 && run.length > 0) {
-            panes.push(pane);
-        }
-    }
-    return panes;
 }
 
 // A real claude that waits at the folder trust dialog never submits its prompt, so the run would only surface as
 // claude-did-not-start after the start timeout; the visible screen of each worker pane shows the dialog at once.
 async function trustDialogWaiting(ctx: Ctx, target: Target): Promise<boolean> {
-    for (const pane of await workerPanes(ctx, target)) {
+    for (const { pane } of await workerPanes(ctx, target)) {
         const captured = await tmuxOn(ctx.runner, target.tools, target.serverName, [
             'capture-pane',
             '-p',
@@ -752,8 +776,22 @@ async function trustDialogWaiting(ctx: Ctx, target: Target): Promise<boolean> {
     return false;
 }
 
+function retainedSuccessRecord(obs: Observation): RecordState | undefined {
+    const [record] = obs.records;
+    const success = record?.state === 'retained' && record.outcome === 'completed' && record.reason === 'done';
+    return obs.records.length === 1 && success ? record : undefined;
+}
+
 function settled(obs: Observation, mode: Mode): boolean {
-    const runDone = obs.log.includes('event stop') && obs.records.length === 0 && obs.lockGone;
+    const record = retainedSuccessRecord(obs);
+    const runDone =
+        record !== undefined &&
+        !obs.lockGone &&
+        obs.watcherState === 'holding' &&
+        obs.kitRunIds.includes(record.runId) &&
+        obs.liveRunIds.includes(record.runId) &&
+        obs.visibleRunIds.includes(record.runId) &&
+        obs.log.includes('event stop');
     return runDone && (mode === 'real' || obs.log.includes('edited after approval'));
 }
 
@@ -764,6 +802,10 @@ function failFast(obs: Observation): void {
     const attention = obs.records.find((record) => record.state === 'needs_attention');
     if (attention !== undefined) {
         throw new Error(`needs_attention ${safeText(attention.reason)}`);
+    }
+    const failed = obs.records.find((record) => record.state === 'retained' && record.outcome === 'failed');
+    if (failed !== undefined) {
+        throw new Error(`failed ${safeText(failed.reason)}`);
     }
 }
 
@@ -796,10 +838,15 @@ async function awaitRun(ctx: Ctx, target: Target): Promise<{ obs: Observation; t
 }
 
 function localChecks(obs: Observation, target: Target): Check[] {
+    const record = retainedSuccessRecord(obs);
     const common: Check[] = [
         [obs.log.includes('event permission'), 'permission prompt'],
-        [!obs.lockGone, 'the worktree lock directory still exists'],
-        [obs.records.length > 0, 'a run record remains'],
+        [record === undefined, 'no successful retained run record remains'],
+        [obs.lockGone, 'the worktree lock directory is gone'],
+        [obs.watcherState !== 'holding', `the watcher state is ${safeText(obs.watcherState)}, not holding`],
+        [record !== undefined && !obs.kitRunIds.includes(record.runId), 'the retained worker kit is incomplete'],
+        [record !== undefined && !obs.liveRunIds.includes(record.runId), 'the retained Claude process is not live'],
+        [record !== undefined && !obs.visibleRunIds.includes(record.runId), 'the retained Claude pane is not visible'],
         [!obs.log.includes('event prompt'), 'the watcher log has no event prompt'],
         [!obs.log.includes('event stop'), 'the watcher log has no event stop'],
         [obs.log.includes('launch cancelled'), 'the watcher log has launch cancelled'],
@@ -1075,9 +1122,9 @@ function sayKept(cleanup: Cleanup): void {
     say(`kept PR: ${pr} branch: ${branch} work area: ${trace.workArea ?? 'none'}`);
 }
 
-// Always kills the isolated server, whatever failed before. On a pass without --keep it also stops the watcher,
-// closes the PR, deletes the branch and, when all of that worked, removes the work area; otherwise it saves the
-// panes, keeps everything and says where it is. Returns the problems met.
+// --keep leaves the watcher, Claude, tmux server and worker kit usable. Otherwise the isolated server is always
+// killed. On a pass, cleanup stops the watcher before killing its owned test server, then removes the remote and
+// local artifacts. On a failure it saves pane output before killing the server and keeps the remaining artifacts.
 async function cleanUp(trace: Trace, options: Options, passed: boolean, stop: AbortSignal): Promise<string[]> {
     const cleanup: Cleanup = {
         trace,
@@ -1088,7 +1135,11 @@ async function cleanUp(trace: Trace, options: Options, passed: boolean, stop: Ab
         prClosed: false,
         branchDeleted: false,
     };
-    const removeAll = passed && !options.keep;
+    if (options.keep) {
+        sayKept(cleanup);
+        return cleanup.problems;
+    }
+    const removeAll = passed;
     await (removeAll
         ? outward(cleanup, '--stop', () => stopWatcher(cleanup))
         : outward(cleanup, 'saving the panes', () => savePanes(cleanup)));

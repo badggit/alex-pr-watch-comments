@@ -436,7 +436,10 @@ await describe('preflight', async () => {
         sessionOf(user.result);
         assert.ok(
             warnings(user.deps).some(
-                (line) => line.includes('owner Stop hooks found (user)') && line.includes('PRWC_STOP_QUIET (10 s)')
+                (line) =>
+                    line.includes('owner Stop hooks found (user)') &&
+                    line.includes('completion waits for PRWC_STOP_QUIET (10 s) without hook activity') &&
+                    line.includes('completed Claude and its lock stay open until you close Claude')
             ),
             user.deps.logLines.join('\n')
         );
@@ -514,7 +517,7 @@ await describe('preflight', async () => {
         assert.ok(!reason.includes(';'));
     });
 
-    await test('outside --in-place works in the watch worktree next to the clone', async (t) => {
+    await test('--worktree works in the watch worktree next to the clone', async (t) => {
         const setup = await setUp(t);
         const { testEnv } = setup;
         const clone = fs.realpathSync.native(setup.clone);
@@ -539,7 +542,7 @@ await describe('preflight', async () => {
         assert.equal(inPlace.dirCanon, worktree);
     });
 
-    await test('outside --in-place refuses while the clone has the head branch checked out', async (t) => {
+    await test('--worktree refuses while the clone has the head branch checked out', async (t) => {
         const setup = await setUp(t);
         const reason = await refusalOf(setup, { inPlace: false });
         assert.ok(reason.startsWith('feature is checked out in '), reason);

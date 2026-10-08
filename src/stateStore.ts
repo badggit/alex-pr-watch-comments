@@ -29,7 +29,7 @@ interface Violation {
     hint: string;
 }
 
-const FIXED_CHILDREN: readonly string[] = ['watchers', 'worktrees', 'runs'];
+const FIXED_CHILDREN: readonly string[] = ['watchers', 'worktrees', 'runs', 'trash'];
 const FORMAT_FILE = 'format';
 const GROUP_OTHER_WRITE = 0o022;
 const GROUP_OTHER_ANY = 0o077;
@@ -57,6 +57,10 @@ export function worktreeDir(stateDir: string, wtKey: string): string {
 
 export function runDir(stateDir: string, runId: string): string {
     return path.join(stateDir, 'runs', runId);
+}
+
+export function trashDir(stateDir: string): string {
+    return path.join(stateDir, 'trash');
 }
 
 export function worktreeKey(canonToplevel: string): string {
@@ -314,6 +318,20 @@ function createChildren(canonical: string, uid: number): Violation | undefined {
         }
     }
     return firstViolation(children, (child) => ownedDirViolation(child, uid));
+}
+
+// Returns true only when the trash child exists afterwards and passes the same owner-only check as the other fixed
+// children; a concurrent create is tolerated.
+export function ensureTrashDir(stateDir: string): boolean {
+    const trash = trashDir(stateDir);
+    try {
+        fs.mkdirSync(trash, { mode: 0o700 });
+    } catch (error) {
+        if (errorCode(error) !== 'EEXIST') {
+            return false;
+        }
+    }
+    return ownedDirViolation(trash, currentUid()) === undefined;
 }
 
 type FormatRead = { kind: 'absent' } | { kind: 'found'; format: string } | { kind: 'unreadable'; code: string };

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
-import { anchoredPattern, isLinkExcluded } from '../../src/ignoredLinks.ts';
+import { anchoredPattern, isDependencyDir, isLinkExcluded } from '../../src/ignoredLinks.ts';
 import { parseWorktreeList, watchWorktreePath } from '../../src/watchWorktree.ts';
 
 await describe('watchWorktreePath', async () => {
@@ -58,6 +58,25 @@ await describe('isLinkExcluded', async () => {
         assert.equal(isLinkExcluded('tsconfig.tsbuildinfo'), true);
         for (const rel of ['node_modules', '.env', 'CLAUDE.local.md', 'docs.local', 'packages/app/node_modules']) {
             assert.equal(isLinkExcluded(rel), false, rel);
+        }
+    });
+});
+
+await describe('isDependencyDir', async () => {
+    await test('only a node_modules folder at any depth is a dependency folder', () => {
+        assert.equal(isDependencyDir('node_modules'), true);
+        assert.equal(isDependencyDir('packages/app/node_modules'), true);
+        const others = [
+            '.venv',
+            'venv',
+            'node_modules_backup',
+            'my_node_modules',
+            'alex-pr-watch-comments-clone-1-1',
+            '.env',
+            '',
+        ];
+        for (const rel of others) {
+            assert.equal(isDependencyDir(rel), false, rel);
         }
     });
 });

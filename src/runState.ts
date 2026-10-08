@@ -1,13 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { DEFAULT_START_TIMEOUT, DEFAULT_STOP_QUIET, DEFAULT_TERM_WAIT, ENV_NAMES } from './constants.ts';
+import { DEFAULT_START_TIMEOUT, DEFAULT_STOP_QUIET, ENV_NAMES } from './constants.ts';
 import { releaseWorktreeLock, worktreeLockHolder } from './locks.ts';
-import { pidAlive, processStart, signalIfSame } from './proc.ts';
+import { pidAlive, processStart } from './proc.ts';
 import { markFailed, type FailTarget } from './reactions.ts';
+import { removeRun } from './runRemoval.ts';
 import {
     claimLaunch,
-    clearRun,
     launchDecision,
     mergeRecord,
     readEvents,
@@ -28,9 +28,10 @@ import type {
     LookupResult,
     RunComment,
     RunDecision,
+    RunFailureTarget,
+    RunOutcome,
     RunRecord,
     Session,
-    SignalOutcome,
 } from './types.ts';
 import { isUintString, readEnvSeconds } from './validate.ts';
 
@@ -68,13 +69,10 @@ interface RunContext {
     stop: AbortSignal;
 }
 
-type TermOutcome = SignalOutcome | 'noStart' | 'pidUnreadable';
-
-type WaitOutcome = 'gone' | 'alive' | 'aborted';
+type RetainFate = 'alive' | 'gone' | 'mismatch' | 'unverifiable' | 'vetoed' | 'noStart' | 'pidUnreadable';
 
 type ClaudeFate = 'gone' | 'never' | 'alive' | 'mismatch' | 'unknown';
 
-const TERM_POLL_MS = 1000;
 // The reason of the last owner notice per unreadable run of this process, so an unreadable or missing record is
 // announced once and not on every tick.
 const unreadableNotices = new Map<string, string>();
@@ -268,7 +266,7 @@ async function finishRun(ctx: RunContext): Promise<EvaluateResult | undefined> {
     if (!releaseRunLock(deps, session.stateDir, record.worktreeKey, record.runId)) {
         return deferred('lock-release-failed');
     }
-    clearRun(session.stateDir, record.runId);
+    removeRun(session.stateDir, record.runId, deps.log);
 }
 
 // absent: claude.pid does not exist, claude never started; unreadable: the file exists but holds no pid.
@@ -287,14 +285,14 @@ function readClaudePid(dir: string): number | 'absent' | 'unreadable' {
     return isUintString(text) ? Number.parseInt(text, 10) : 'unreadable';
 }
 
-// Without claude.pid there is no claude process to signal; the TERM wait then decides on the worker alone. A pid that
-// is this watcher or the pane process can never be claude (claude runs in a child of the launcher), so it is refused.
-async function terminateClaude(ctx: RunContext): Promise<TermOutcome> {
+// Verifies the live Claude identity before fixing the outcome. A pid that is this watcher or the pane process can
+// never be Claude, and an event arriving during the asynchronous identity check vetoes the transition.
+async function retainFate(ctx: RunContext): Promise<RetainFate> {
     const { deps, session, record, capture, stop } = ctx;
     const dir = runDir(session.stateDir, record.runId);
     const pid = readClaudePid(dir);
     if (pid === 'absent') {
-        return 'gone';
+        return workerAlive(session.stateDir, record.runId) ? 'alive' : 'gone';
     }
     if (pid === 'unreadable') {
         return 'pidUnreadable';
@@ -306,75 +304,17 @@ async function terminateClaude(ctx: RunContext): Promise<TermOutcome> {
     if (start.length === 0) {
         return 'noStart';
     }
-    const guard = (): boolean =>
-        !stop.aborted && readEvents(session.stateDir, record.runId).count === capture.events.count;
-    return await signalIfSame(deps.runner, pid, start, 'SIGTERM', guard);
-}
-
-async function waitWorkerGone(ctx: RunContext): Promise<WaitOutcome> {
-    const { deps, session, record, stop } = ctx;
-    const seconds = readEnvSeconds(deps.env, ENV_NAMES.termWait, DEFAULT_TERM_WAIT);
-    for (let waited = 0; ; waited += 1) {
-        if (stop.aborted) {
-            return 'aborted';
-        }
-        if (!workerAlive(session.stateDir, record.runId)) {
-            return 'gone';
-        }
-        if (waited >= seconds) {
-            return 'alive';
-        }
-        await deps.sleep(TERM_POLL_MS, stop);
+    if (!pidAlive(pid)) {
+        return workerAlive(session.stateDir, record.runId) ? 'alive' : 'gone';
     }
-}
-
-// claude is ended first; only once it is gone are the comments it did not finish marked as failed.
-async function endRun(ctx: RunContext, decision: RunDecision, targets: readonly FailTarget[]): Promise<EvaluateResult> {
-    const { deps, session, record } = ctx;
-    const outcome = await terminateClaude(ctx);
-    switch (outcome) {
-        case 'vetoed': {
-            return deferred('events-changed');
-        }
-        case 'unverifiable': {
-            if (ctx.stop.aborted) {
-                return deferred('stop-requested');
-            }
-            deps.log.warn(`could not verify claude pid for run ${record.runId}`);
-            return deferred('claude-pid-unverifiable');
-        }
-        case 'mismatch':
-        case 'noStart': {
-            return await recordAttention(ctx, 'claude-pid-reused');
-        }
-        case 'pidUnreadable': {
-            return await recordAttention(ctx, 'claude-pid-unreadable');
-        }
-        case 'sent':
-        case 'gone': {
-            break;
-        }
+    const actual = await processStart(deps.runner, pid);
+    if (stop.aborted || readEvents(session.stateDir, record.runId).count !== capture.events.count) {
+        return 'vetoed';
     }
-    const waited = await waitWorkerGone(ctx);
-    if (waited === 'aborted') {
-        return deferred('stop-requested');
+    if (actual === undefined) {
+        return pidAlive(pid) ? 'unverifiable' : workerAlive(session.stateDir, record.runId) ? 'alive' : 'gone';
     }
-    if (waited === 'alive') {
-        return await recordAttention(ctx, 'claude-did-not-exit');
-    }
-    await markFailed(deps, session, targets, ctx.stop);
-    if (ctx.stop.aborted) {
-        return deferred('stop-requested');
-    }
-    const interrupted = await finishRun(ctx);
-    if (interrupted !== undefined) {
-        return interrupted;
-    }
-    deps.log.info(`run ${record.runId} ${decision.state}: ${decision.reason}`);
-    if (decision.state === 'failed') {
-        await notifyOwner(deps, session, `run ${record.runId} failed: ${decision.reason}, comments ${idList(targets)}`);
-    }
-    return decision;
+    return actual === start ? 'alive' : 'mismatch';
 }
 
 async function endExited(
@@ -393,6 +333,101 @@ async function endExited(
     }
     deps.log.info(`run ${record.runId} exited: ${decision.reason}`);
     return decision;
+}
+
+function retainedReason(outcome: RunOutcome): string {
+    return `${outcome}-waiting-for-owner`;
+}
+
+// The results that free the in-flight slot.
+const CLEARED_RESULTS: ReadonlySet<EvaluateState> = new Set(['completed', 'failed', 'exited']);
+
+export function isClearedResult(state: EvaluateState): boolean {
+    return CLEARED_RESULTS.has(state);
+}
+
+async function applyPendingFailures(ctx: RunContext, targets: readonly RunFailureTarget[]): Promise<boolean> {
+    const { deps, session, record, stop } = ctx;
+    await markFailed(deps, session, targets, stop);
+    if (stop.aborted) {
+        return false;
+    }
+    mergeRecord(session.stateDir, record.runId, { pendingFailures: undefined });
+    await notifyOwner(deps, session, `run ${record.runId} failed: ${record.reason}, comments ${idList(targets)}`);
+    return true;
+}
+
+// A settled batch keeps its interactive worker, kit and lock until the owner closes Claude. The record stores the
+// fixed batch outcome, so later prompts, tools or GitHub changes cannot reclassify it.
+async function retainRun(
+    ctx: RunContext,
+    decision: { state: RunOutcome; reason: string },
+    targets: readonly FailTarget[]
+): Promise<EvaluateResult> {
+    const { deps, session, record, stop } = ctx;
+    const fate = await retainFate(ctx);
+    switch (fate) {
+        case 'vetoed': {
+            return deferred(stop.aborted ? 'stop-requested' : 'events-changed');
+        }
+        case 'unverifiable': {
+            deps.log.warn(`could not verify claude pid for run ${record.runId}`);
+            return deferred('claude-pid-unverifiable');
+        }
+        case 'mismatch':
+        case 'noStart': {
+            return await recordAttention(ctx, 'claude-pid-reused');
+        }
+        case 'pidUnreadable': {
+            return await recordAttention(ctx, 'claude-pid-unreadable');
+        }
+        case 'alive':
+        case 'gone': {
+            break;
+        }
+    }
+    const settledFields = { state: 'retained', outcome: decision.state, reason: decision.reason } as const;
+    const patch = decision.state === 'failed' ? { ...settledFields, pendingFailures: [...targets] } : settledFields;
+    const frozen = mergeRecord(session.stateDir, record.runId, patch);
+    if (frozen === undefined) {
+        return deferred('record-unreadable');
+    }
+    if (
+        frozen.pendingFailures !== undefined &&
+        !(await applyPendingFailures({ ...ctx, record: frozen }, frozen.pendingFailures))
+    ) {
+        return deferred('stop-requested');
+    }
+    if (fate === 'gone' && !workerAlive(session.stateDir, record.runId)) {
+        const interrupted = await finishRun({ ...ctx, record: frozen });
+        if (interrupted !== undefined) {
+            return interrupted;
+        }
+        deps.log.info(`run ${record.runId} ${decision.state}: owner already closed Claude`);
+        return decision;
+    }
+    deps.log.info(`run ${record.runId} ${decision.state}: ${decision.reason}; waiting for owner to close Claude`);
+    return { state: 'retained', reason: retainedReason(decision.state) };
+}
+
+// Sending pending marks takes time, so liveness is checked again after them instead of trusting the capture: an owner
+// who closed Claude meanwhile must not leave the run waiting for one more evaluation.
+async function evaluateRetained(ctx: RunContext, outcome: RunOutcome): Promise<EvaluateResult> {
+    const { deps, session, record } = ctx;
+    const marked = record.pendingFailures !== undefined;
+    if (record.pendingFailures !== undefined && !(await applyPendingFailures(ctx, record.pendingFailures))) {
+        return deferred('stop-requested');
+    }
+    const alive = marked ? workerAlive(session.stateDir, record.runId) : ctx.capture.alive;
+    if (alive) {
+        return { state: 'retained', reason: retainedReason(outcome) };
+    }
+    const interrupted = await finishRun(ctx);
+    if (interrupted !== undefined) {
+        return interrupted;
+    }
+    deps.log.info(`run ${record.runId} ${outcome}: owner closed Claude`);
+    return { state: outcome, reason: record.reason };
 }
 
 function recordRunning(ctx: RunContext, decision: RunDecision): EvaluateResult {
@@ -416,7 +451,7 @@ function finishAbandoned(deps: Deps, session: Session, record: RunRecord, stop: 
     if (!releaseRunLock(deps, session.stateDir, record.worktreeKey, record.runId)) {
         return deferred('lock-release-failed');
     }
-    clearRun(session.stateDir, record.runId);
+    removeRun(session.stateDir, record.runId, deps.log);
     deps.log.info(`run ${record.runId} cleared: abandoned`);
     return { state: 'exited', reason: 'abandoned' };
 }
@@ -493,7 +528,7 @@ async function recoverUnreadable(
     if (!releaseRunLock(deps, session.stateDir, session.worktreeKey, runId)) {
         return deferred('lock-release-failed');
     }
-    clearRun(session.stateDir, runId);
+    removeRun(session.stateDir, runId, deps.log);
     deps.log.warn(`run ${runId} with an unreadable record has exited; EYES reactions on its comments may remain`);
     return { state: 'exited', reason: 'record-unreadable' };
 }
@@ -545,6 +580,12 @@ export async function evaluateRun(
     if (record.state === 'abandoned') {
         return finishAbandoned(deps, session, record, stop);
     }
+    if (record.state === 'retained') {
+        // readRecord guarantees the outcome of a retained record.
+        return record.outcome === undefined
+            ? deferred('record-unreadable')
+            : await evaluateRetained({ deps, session, record, capture, stop }, record.outcome);
+    }
     if (readEvents(session.stateDir, runId).count !== capture.events.count) {
         return deferred('events-changed');
     }
@@ -578,7 +619,7 @@ export async function evaluateRun(
         }
         case 'completed':
         case 'failed': {
-            return await endRun(ctx, decision, failTargets(states));
+            return await retainRun(ctx, { state: decision.state, reason: decision.reason }, failTargets(states));
         }
     }
 }

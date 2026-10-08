@@ -36,8 +36,6 @@ export const DEFAULT_LAUNCH_WAIT = 60;
 
 export const DEFAULT_START_TIMEOUT = 120;
 
-export const DEFAULT_TERM_WAIT = 10;
-
 export const DEFAULT_RATE_RESERVE = 500;
 
 export const DEFAULT_BG_TIMEOUT = 60;
@@ -75,7 +73,6 @@ export const ENV_NAMES = {
     stateDir: 'PRWC_STATE_DIR',
     launchWait: 'PRWC_LAUNCH_WAIT',
     startTimeout: 'PRWC_START_TIMEOUT',
-    termWait: 'PRWC_TERM_WAIT',
     rateReserve: 'PRWC_RATE_RESERVE',
     bgTimeout: 'PRWC_BG_TIMEOUT',
     launchToken: 'PRWC_LAUNCH_TOKEN',
@@ -84,3 +81,6 @@ export const ENV_NAMES = {
     readyWait: 'PRWC_READY_WAIT',
     runCheck: 'PRWC_RUN_CHECK',
 } as const;
+
+// How long a retained run waits before the owner is reminded again of approved comments or a closed PR.
+export const RETAINED_REMINDER_SECONDS = 1800;

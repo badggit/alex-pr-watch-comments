@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 
+import { CLONE_TEMP_PREFIX, createCloner } from '../../src/cowClone.ts';
 import { runGuards } from '../../src/guards.ts';
 import { syncIgnoredLinks } from '../../src/ignoredLinks.ts';
 import { acquireWorktreeLock, releaseWorktreeLock } from '../../src/locks.ts';
@@ -28,6 +30,7 @@ const PR: PrRef = {
     prKey: 'o+r+12',
 };
 const IGNORE_RULES = ['node_modules/', '.env', 'dist/', '*.local.md', 'docs.local', '*.tsbuildinfo', ''].join('\n');
+const linkOnly = createCloner({ platform: 'aix' });
 
 interface Setup {
     testEnv: TestEnv;
@@ -257,8 +260,8 @@ await describe('ignored links', async () => {
         const setup = await setUp(t);
         seedIgnored(setup);
         const worktree = await prepared(setup);
-        const created = await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path);
-        assert.equal(created, 4);
+        const created = await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, linkOnly);
+        assert.deepEqual(created, { linked: 4, cloned: 0 });
         for (const rel of ['node_modules', '.env', 'CLAUDE.local.md', 'docs.local']) {
             assert.equal(linkText(path.join(worktree.path, rel)), path.join(setup.clone, rel), rel);
         }
@@ -272,7 +275,10 @@ await describe('ignored links', async () => {
         for (const pattern of ['/node_modules', '/.env', '/CLAUDE.local.md', '/docs.local']) {
             assert.ok(before.split('\n').includes(pattern), pattern);
         }
-        assert.equal(await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path), 0);
+        assert.deepEqual(await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, linkOnly), {
+            linked: 0,
+            cloned: 0,
+        });
         assert.equal(fs.readFileSync(exclude, 'utf8'), before, 'a second sync adds no pattern');
     });
 
@@ -284,7 +290,7 @@ await describe('ignored links', async () => {
         fs.writeFileSync(path.join(setup.clone, 'only-here', 'plain.txt'), 'untracked, not ignored\n');
         const worktree = await prepared(setup);
         fs.writeFileSync(path.join(worktree.path, '.env'), 'OWN=1\n');
-        await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path);
+        await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, linkOnly);
         assert.equal(fs.readFileSync(path.join(worktree.path, '.env'), 'utf8'), 'OWN=1\n');
         assert.equal(linkText(path.join(worktree.path, '.env')), undefined);
         assert.ok(!exists(path.join(worktree.path, 'only-here')));
@@ -294,9 +300,333 @@ await describe('ignored links', async () => {
 async function linkedWorktree(setup: Setup): Promise<WatchWorktree> {
     seedIgnored(setup);
     const worktree = await prepared(setup);
-    await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path);
+    await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, linkOnly);
     return worktree;
 }
+
+function emulatedRunner(
+    setup: Setup,
+    options: { failClone?: boolean } = {}
+): { runner: CommandRunner; calls: string[][] } {
+    const calls: string[][] = [];
+    return {
+        calls,
+        runner: {
+            async run(request) {
+                if (request.file !== 'cp') {
+                    return setup.runner.run(request);
+                }
+                calls.push([...request.args]);
+                if (options.failClone && request.args.includes('-R')) {
+                    return { code: 1, stdout: '', stderr: 'cp: cannot create\n' };
+                }
+                const source = request.args.at(-2);
+                const target = request.args.at(-1);
+                assert.ok(source);
+                assert.ok(target);
+                fs.cpSync(source, target, { recursive: true, verbatimSymlinks: true });
+                return { code: 0, stdout: '', stderr: '' };
+            },
+        },
+    };
+}
+
+function assertClean(setup: Setup, worktree: WatchWorktree): void {
+    for (const root of [setup.clone, worktree.path]) {
+        assert.equal(git(setup, root, ['status', '--porcelain', '--untracked-files=all']), '');
+    }
+}
+
+function assertNoCloneTemps(setup: Setup, worktree: WatchWorktree): void {
+    const privateGitDir = git(setup, worktree.path, ['rev-parse', '--absolute-git-dir']);
+    for (const root of [worktree.path, privateGitDir]) {
+        assert.deepEqual(
+            fs.readdirSync(root).filter((name) => name.startsWith(CLONE_TEMP_PREFIX)),
+            []
+        );
+    }
+}
+
+await describe('dependency clones', async () => {
+    await test('copy-on-write sync counts in-place calls and preserves failed listing behavior', async (t) => {
+        const setup = await setUp(t);
+        const deps = setup.testEnv.deps({
+            run: () => Promise.resolve({ code: 1, stdout: '', stderr: 'git failed\n' }),
+        });
+        assert.deepEqual(await syncIgnoredLinks(deps, setup.git, setup.clone, setup.clone, linkOnly), {
+            linked: 0,
+            cloned: 0,
+        });
+        assert.deepEqual([...deps.logLines], []);
+        assert.equal(await syncIgnoredLinks(deps, setup.git, setup.clone, setup.target, linkOnly), undefined);
+        assert.equal(deps.logLines.length, 1);
+        assert.ok(deps.logLines[0]?.startsWith('warn cannot list the ignored files of '));
+        assert.ok(deps.logLines[0]?.endsWith('; nothing linked into the worktree'));
+        assert.ok(!exists(setup.target));
+    });
+
+    await test('emulated copy-on-write clones node_modules and links the rest', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        fs.appendFileSync(path.join(setup.clone, '.git', 'info', 'exclude'), '.venv/\n');
+        fs.mkdirSync(path.join(setup.clone, '.venv', 'bin'), { recursive: true });
+        fs.writeFileSync(path.join(setup.clone, '.venv', 'bin', 'python'), 'interpreter\n');
+        const worktree = await prepared(setup);
+        const emulated = emulatedRunner(setup);
+        const deps = setup.testEnv.deps(emulated.runner);
+        const cloner = createCloner({ platform: 'linux' });
+        assert.deepEqual(await syncIgnoredLinks(deps, setup.git, worktree.source, worktree.path, cloner), {
+            linked: 4,
+            cloned: 1,
+        });
+        assert.ok(fs.lstatSync(path.join(worktree.path, 'node_modules')).isDirectory());
+        const dependency = path.join(worktree.path, 'node_modules', 'pkg', 'index.js');
+        assert.equal(fs.readFileSync(dependency, 'utf8'), 'kept\n');
+        for (const rel of ['.env', 'CLAUDE.local.md', 'docs.local', '.venv']) {
+            assert.equal(linkText(path.join(worktree.path, rel)), path.join(setup.clone, rel), rel);
+        }
+        assert.ok(
+            fs
+                .readFileSync(path.join(setup.clone, '.git', 'info', 'exclude'), 'utf8')
+                .split('\n')
+                .includes('/node_modules')
+        );
+        assertClean(setup, worktree);
+        assertNoCloneTemps(setup, worktree);
+        assert.ok(deps.logLines.includes('info cloning node_modules into the watch worktree with copy-on-write'));
+        assert.ok(
+            deps.logLines.some((line) => /^info cloned node_modules into the watch worktree in \d+\.\d s$/u.test(line))
+        );
+        fs.writeFileSync(dependency, 'changed in the worktree\n');
+        assert.equal(fs.readFileSync(path.join(setup.clone, 'node_modules', 'pkg', 'index.js'), 'utf8'), 'kept\n');
+        const before = emulated.calls.length;
+        assert.deepEqual(await syncIgnoredLinks(deps, setup.git, worktree.source, worktree.path, cloner), {
+            linked: 0,
+            cloned: 0,
+        });
+        assert.equal(emulated.calls.length, before, 'an existing clone is not refreshed');
+        assert.equal(fs.readFileSync(dependency, 'utf8'), 'changed in the worktree\n');
+    });
+
+    await test('copy-on-write converts an existing own node_modules link', async (t) => {
+        const setup = await setUp(t);
+        const worktree = await linkedWorktree(setup);
+        assert.equal(linkText(path.join(worktree.path, 'node_modules')), path.join(setup.clone, 'node_modules'));
+        const emulated = emulatedRunner(setup);
+        const deps = setup.testEnv.deps(emulated.runner);
+        assert.deepEqual(
+            await syncIgnoredLinks(
+                deps,
+                setup.git,
+                worktree.source,
+                worktree.path,
+                createCloner({ platform: 'linux' })
+            ),
+            { linked: 0, cloned: 1 }
+        );
+        assert.ok(fs.lstatSync(path.join(worktree.path, 'node_modules')).isDirectory());
+        assert.equal(fs.readFileSync(path.join(worktree.path, 'node_modules', 'pkg', 'index.js'), 'utf8'), 'kept\n');
+        assertClean(setup, worktree);
+        assertNoCloneTemps(setup, worktree);
+    });
+
+    await test('copy-on-write leaves an existing dependency directory alone and excludes it', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const worktree = await prepared(setup);
+        fs.mkdirSync(path.join(worktree.path, 'node_modules', 'pkg'), { recursive: true });
+        const dependency = path.join(worktree.path, 'node_modules', 'pkg', 'index.js');
+        fs.writeFileSync(dependency, 'existing installation\n');
+        const emulated = emulatedRunner(setup);
+        const deps = setup.testEnv.deps(emulated.runner);
+        const cloner = createCloner({ platform: 'linux' });
+        assert.deepEqual(await syncIgnoredLinks(deps, setup.git, worktree.source, worktree.path, cloner), {
+            linked: 3,
+            cloned: 0,
+        });
+        assert.equal(fs.readFileSync(dependency, 'utf8'), 'existing installation\n');
+        assert.deepEqual(emulated.calls, []);
+        const exclude = path.join(setup.clone, '.git', 'info', 'exclude');
+        assert.ok(fs.readFileSync(exclude, 'utf8').split('\n').includes('/node_modules'));
+        fs.writeFileSync(exclude, fs.readFileSync(exclude, 'utf8').replace('/node_modules\n', ''));
+        assert.deepEqual(await syncIgnoredLinks(deps, setup.git, worktree.source, worktree.path, cloner), {
+            linked: 0,
+            cloned: 0,
+        });
+        assert.ok(fs.readFileSync(exclude, 'utf8').split('\n').includes('/node_modules'));
+        assertClean(setup, worktree);
+    });
+
+    await test('copy-on-write leaves a foreign dependency link alone', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const worktree = await prepared(setup);
+        const foreign = path.join(setup.testEnv.root, 'foreign-dependencies');
+        fs.mkdirSync(foreign);
+        const dest = path.join(worktree.path, 'node_modules');
+        fs.symlinkSync(foreign, dest);
+        const emulated = emulatedRunner(setup);
+        const deps = setup.testEnv.deps(emulated.runner);
+        assert.deepEqual(
+            await syncIgnoredLinks(
+                deps,
+                setup.git,
+                worktree.source,
+                worktree.path,
+                createCloner({ platform: 'linux' })
+            ),
+            { linked: 3, cloned: 0 }
+        );
+        assert.equal(linkText(dest), foreign);
+        assert.deepEqual(emulated.calls, []);
+        assert.ok(
+            !fs
+                .readFileSync(path.join(setup.clone, '.git', 'info', 'exclude'), 'utf8')
+                .split('\n')
+                .includes('/node_modules')
+        );
+    });
+
+    await test('copy-on-write skipped cloning falls back to a new link without logging', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const worktree = await prepared(setup);
+        assert.deepEqual(
+            await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, {
+                cloneDependency: () => Promise.resolve({ kind: 'skipped' }),
+            }),
+            { linked: 4, cloned: 0 }
+        );
+        assert.equal(linkText(path.join(worktree.path, 'node_modules')), path.join(setup.clone, 'node_modules'));
+        assert.deepEqual(setup.deps.logLines, []);
+        assertClean(setup, worktree);
+    });
+
+    await test('copy-on-write failure without an own link does not claim it linked instead', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const worktree = await prepared(setup);
+        const dest = path.join(worktree.path, 'node_modules');
+        assert.deepEqual(
+            await syncIgnoredLinks(setup.deps, setup.git, worktree.source, worktree.path, {
+                cloneDependency: () => {
+                    fs.mkdirSync(dest);
+                    return Promise.resolve({ kind: 'failed', reason: 'another writer\ncreated the directory' });
+                },
+            }),
+            { linked: 3, cloned: 0 }
+        );
+        assert.ok(fs.lstatSync(dest).isDirectory());
+        assert.deepEqual(setup.deps.logLines, [
+            'warn cannot clone node_modules into the watch worktree (another writer?created the directory)',
+        ]);
+        assertClean(setup, worktree);
+    });
+
+    await test('a failing copy-on-write clone keeps a link and is not retried', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const worktree = await prepared(setup);
+        const emulated = emulatedRunner(setup, { failClone: true });
+        const deps = setup.testEnv.deps(emulated.runner);
+        const cloner = createCloner({ platform: 'linux' });
+        assert.deepEqual(await syncIgnoredLinks(deps, setup.git, worktree.source, worktree.path, cloner), {
+            linked: 4,
+            cloned: 0,
+        });
+        assert.equal(linkText(path.join(worktree.path, 'node_modules')), path.join(setup.clone, 'node_modules'));
+        const warnings = deps.logLines.filter((line) => line.startsWith('warn cannot clone'));
+        assert.deepEqual(warnings, [
+            'warn cannot clone node_modules into the watch worktree (cp exited with 1: cp: cannot create); linked it instead',
+        ]);
+        assertClean(setup, worktree);
+        assertNoCloneTemps(setup, worktree);
+        const before = emulated.calls.length;
+        assert.deepEqual(await syncIgnoredLinks(deps, setup.git, worktree.source, worktree.path, cloner), {
+            linked: 0,
+            cloned: 0,
+        });
+        assert.equal(emulated.calls.length, before);
+        assert.deepEqual(
+            deps.logLines.filter((line) => line.startsWith('warn cannot clone')),
+            warnings
+        );
+    });
+
+    await test('copy-on-write with the real cp on this machine', { skip: process.platform !== 'linux' }, async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const worktree = await prepared(setup);
+        const probe = path.join(setup.testEnv.root, 'reflink-probe');
+        const actual = spawnSync(
+            'cp',
+            ['--reflink=always', path.join(setup.clone, 'node_modules', 'pkg', 'index.js'), probe],
+            {
+                env: setup.testEnv.env,
+                encoding: 'utf8',
+            }
+        );
+        fs.rmSync(probe, { force: true });
+        const cloned = actual.status === 0;
+        assert.deepEqual(
+            await syncIgnoredLinks(
+                setup.deps,
+                setup.git,
+                worktree.source,
+                worktree.path,
+                createCloner({ platform: 'linux' })
+            ),
+            { linked: cloned ? 3 : 4, cloned: cloned ? 1 : 0 }
+        );
+        const dependency = path.join(worktree.path, 'node_modules');
+        if (cloned) {
+            assert.ok(fs.lstatSync(dependency).isDirectory());
+        } else {
+            assert.equal(linkText(dependency), path.join(setup.clone, 'node_modules'));
+            assert.ok(
+                setup.deps.logLines.includes(
+                    'info linked node_modules: no copy-on-write between the clone and the worktree'
+                )
+            );
+        }
+        assert.equal(fs.readFileSync(path.join(dependency, 'pkg', 'index.js'), 'utf8'), 'kept\n');
+        assertClean(setup, worktree);
+        assertNoCloneTemps(setup, worktree);
+        const logs = [...setup.deps.logLines];
+        assert.deepEqual(
+            await syncIgnoredLinks(
+                setup.deps,
+                setup.git,
+                worktree.source,
+                worktree.path,
+                createCloner({ platform: 'linux' })
+            ),
+            { linked: 0, cloned: 0 }
+        );
+        assert.deepEqual(setup.deps.logLines, logs, 'reuse is quiet when no link or clone is created');
+    });
+
+    await test('cleanup removes a worktree with a copy-on-write node_modules', async (t) => {
+        const setup = await setUp(t);
+        seedIgnored(setup);
+        const worktree = await prepared(setup);
+        const emulated = emulatedRunner(setup);
+        const deps = setup.testEnv.deps(emulated.runner);
+        assert.deepEqual(
+            await syncIgnoredLinks(
+                deps,
+                setup.git,
+                worktree.source,
+                worktree.path,
+                createCloner({ platform: 'linux' })
+            ),
+            { linked: 3, cloned: 1 }
+        );
+        assert.equal(await removeWatchWorktree(deps, sessionFor(setup, worktree)), true);
+        assert.ok(!exists(worktree.path));
+        assert.equal(fs.readFileSync(path.join(setup.clone, 'node_modules', 'pkg', 'index.js'), 'utf8'), 'kept\n');
+    });
+});
 
 await describe('removeWatchWorktree', async () => {
     await test('removes a clean, pushed worktree without touching the linked clone files', async (t) => {
@@ -319,6 +649,44 @@ await describe('removeWatchWorktree', async () => {
         fs.rmSync(path.join(setup.clone, '.env'));
         assert.equal(await removeWatchWorktree(setup.deps, sessionFor(setup, worktree)), true);
         assert.ok(!exists(worktree.path));
+    });
+
+    await test('removes a worktree with reinstalled node_modules without touching the clone dependencies', async (t) => {
+        const setup = await setUp(t);
+        const worktree = await linkedWorktree(setup);
+        fs.unlinkSync(path.join(worktree.path, 'node_modules'));
+        fs.mkdirSync(path.join(worktree.path, 'node_modules', 'pkg'), { recursive: true });
+        fs.writeFileSync(path.join(worktree.path, 'node_modules', 'pkg', 'index.js'), 'reinstalled\n');
+        assert.equal(await removeWatchWorktree(setup.deps, sessionFor(setup, worktree)), true);
+        assert.ok(!exists(worktree.path));
+        assert.equal(fs.readFileSync(path.join(setup.clone, 'node_modules', 'pkg', 'index.js'), 'utf8'), 'kept\n');
+    });
+
+    await test('keeps a worktree with a real ignored Python venv', async (t) => {
+        const setup = await setUp(t);
+        const worktree = await linkedWorktree(setup);
+        fs.appendFileSync(path.join(setup.clone, '.git', 'info', 'exclude'), '\n.venv/\n');
+        fs.mkdirSync(path.join(worktree.path, '.venv', 'lib'), { recursive: true });
+        fs.writeFileSync(path.join(worktree.path, '.venv', 'lib', 'x.py'), 'local venv\n');
+        assert.equal(await removeWatchWorktree(setup.deps, sessionFor(setup, worktree)), false);
+        assert.equal(fs.readFileSync(path.join(worktree.path, '.venv', 'lib', 'x.py'), 'utf8'), 'local venv\n');
+        const kept = setup.deps.logLines.find((line) => line.includes('kept the watch worktree'));
+        assert.ok(kept?.includes('it holds ignored files: .venv'), kept);
+    });
+
+    await test('keeps ignored notes alongside real node_modules and names only the notes', async (t) => {
+        const setup = await setUp(t);
+        const worktree = await linkedWorktree(setup);
+        fs.unlinkSync(path.join(worktree.path, 'node_modules'));
+        fs.mkdirSync(path.join(worktree.path, 'node_modules', 'pkg'), { recursive: true });
+        fs.writeFileSync(path.join(worktree.path, 'node_modules', 'pkg', 'index.js'), 'reinstalled\n');
+        fs.writeFileSync(path.join(worktree.path, 'notes.local.md'), 'only here\n');
+        assert.equal(await removeWatchWorktree(setup.deps, sessionFor(setup, worktree)), false);
+        assert.equal(fs.readFileSync(path.join(worktree.path, 'notes.local.md'), 'utf8'), 'only here\n');
+        const kept = setup.deps.logLines.find((line) => line.includes('kept the watch worktree'));
+        assert.ok(kept);
+        assert.ok(kept.includes('it holds ignored files: notes.local.md'), kept);
+        assert.ok(!kept.includes('node_modules'), kept);
     });
 
     await test('keeps a worktree with uncommitted changes, unpushed commits or untracked files', async (t) => {

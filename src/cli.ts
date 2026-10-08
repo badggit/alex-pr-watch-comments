@@ -6,11 +6,14 @@ import { HOST_PATTERN, isUintString, isValidName, safeText } from './validate.ts
 
 export type ParseResult = { kind: 'ok'; options: CliOptions } | { kind: 'help' } | { kind: 'error'; message: string };
 
+type WorkingTreeMode = 'in-place' | 'worktree' | 'conflict';
+
 interface Draft {
     background: boolean;
     list: boolean;
     once: boolean;
-    inPlace: boolean;
+    // 'conflict' is sticky: once both options were given, no later option can clear it.
+    workingTreeMode: WorkingTreeMode | undefined;
     stop: string | undefined;
     positionals: string[];
     dir: string;
@@ -26,7 +29,7 @@ const PR_URL = new RegExp(
     'iu'
 );
 const LINE_BREAK = /[\n\r]/u;
-const FLAG_OPTIONS: ReadonlySet<string> = new Set(['--background', '--list', '--once', '--in-place']);
+const FLAG_OPTIONS: ReadonlySet<string> = new Set(['--background', '--list', '--once', '--in-place', '--worktree']);
 const VALUE_OPTIONS: ReadonlySet<string> = new Set([
     '--stop',
     '--dir',
@@ -138,6 +141,16 @@ function applyValue(draft: Draft, name: string, value: string, cwd: string): str
     }
 }
 
+function nextWorkingTreeMode(
+    current: WorkingTreeMode | undefined,
+    requested: 'in-place' | 'worktree'
+): WorkingTreeMode {
+    if (current === undefined || current === requested) {
+        return requested;
+    }
+    return 'conflict';
+}
+
 function applyFlag(draft: Draft, name: string): void {
     switch (name) {
         case '--background': {
@@ -153,7 +166,11 @@ function applyFlag(draft: Draft, name: string): void {
             break;
         }
         case '--in-place': {
-            draft.inPlace = true;
+            draft.workingTreeMode = nextWorkingTreeMode(draft.workingTreeMode, 'in-place');
+            break;
+        }
+        case '--worktree': {
+            draft.workingTreeMode = nextWorkingTreeMode(draft.workingTreeMode, 'worktree');
             break;
         }
     }
@@ -161,6 +178,9 @@ function applyFlag(draft: Draft, name: string): void {
 
 function findConflict(draft: Draft): string | undefined {
     const stop = draft.stop !== undefined;
+    if (draft.workingTreeMode === 'conflict') {
+        return '--in-place cannot be combined with --worktree';
+    }
     if (draft.list && stop) {
         return '--list cannot be combined with --stop';
     }
@@ -199,7 +219,7 @@ function toResult(draft: Draft, mode: CliMode, pr?: PrRef): ParseResult {
             keepPanes: draft.keepPanes,
             batchMax: draft.batchMax,
             once: draft.once,
-            inPlace: draft.inPlace,
+            inPlace: draft.workingTreeMode !== 'worktree',
         },
     };
 }
@@ -234,7 +254,7 @@ export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
         background: false,
         list: false,
         once: false,
-        inPlace: false,
+        workingTreeMode: undefined,
         stop: undefined,
         positionals: [],
         dir: cwd,
@@ -280,7 +300,8 @@ export function usageText(): string {
         '',
         'Options:',
         '  --dir <path>          your clone of the repository (default: current directory)',
-        '  --in-place            work in the clone itself on the checked-out PR branch, not in the watch worktree',
+        '  --in-place            work in the clone itself (default; retained for compatibility)',
+        '  --worktree            work in a dedicated watch worktree next to the clone',
         `  --interval <seconds>  how often to look for new rockets, 1 to ${MAX_INTERVAL} (default ${DEFAULT_INTERVAL})`,
         '  --claude <path>       claude executable (default: found on PATH at start)',
         '  --claude-arg <arg>    extra claude argument, repeatable, passed literally',

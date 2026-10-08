@@ -19,6 +19,8 @@ import type {
     LaunchDecision,
     RecordPatch,
     RunComment,
+    RunFailureTarget,
+    RunOutcome,
     RunRecord,
     RunState,
     WatcherState,
@@ -42,8 +44,7 @@ const RUN_STATES: ReadonlySet<string> = new Set<RunState>([
     'preparing',
     'running',
     'needs_attention',
-    'completed',
-    'failed',
+    'retained',
     'exited',
     'abandoned',
 ]);
@@ -58,10 +59,15 @@ const WATCHER_STATES: ReadonlySet<string> = new Set<WatcherState>([
     'exited',
     'fatal',
 ]);
+const RUN_OUTCOMES: ReadonlySet<string> = new Set<RunOutcome>(['completed', 'failed']);
 const EVENT_KINDS: ReadonlySet<string> = new Set<EventKind>(['prompt', 'stop', 'permission', 'tool']);
 
 function isRunState(value: string | undefined): value is RunState {
     return value !== undefined && RUN_STATES.has(value);
+}
+
+function isRunOutcome(value: string | undefined): value is RunOutcome {
+    return value !== undefined && RUN_OUTCOMES.has(value);
 }
 
 function isWatcherState(value: string | undefined): value is WatcherState {
@@ -102,10 +108,78 @@ function narrowComments(value: unknown): RunComment[] | undefined {
     return comments.length > 0 && comments.length === items?.length ? comments : undefined;
 }
 
-function narrowRecord(value: unknown): RunRecord | undefined {
+function narrowFailureTarget(value: unknown): RunFailureTarget | undefined {
+    const read = createFieldReader(value);
+    const target: RunFailureTarget = {
+        nodeId: read.text('nodeId'),
+        dbId: read.integer('dbId'),
+        eyesOn: read.flag('eyesOn'),
+    };
+    return read.failed() ? undefined : target;
+}
+
+type PendingFailuresRead = { valid: true; targets?: RunFailureTarget[] } | { valid: false };
+
+function narrowPendingFailures(value: unknown, comments: readonly RunComment[]): PendingFailuresRead {
+    const raw = getPath(value, 'pendingFailures');
+    if (raw === undefined) {
+        return { valid: true };
+    }
+    const items = getArray(value, 'pendingFailures');
+    if (items === undefined) {
+        return { valid: false };
+    }
+    const targets = items.map((item) => narrowFailureTarget(item)).filter((item) => item !== undefined);
+    const keys = targets.map((target) => `${target.nodeId}\n${target.dbId}`);
+    const known = targets.every((target) =>
+        comments.some((comment) => comment.nodeId === target.nodeId && comment.dbId === target.dbId)
+    );
+    if (targets.length !== items.length || new Set(keys).size !== keys.length || !known) {
+        return { valid: false };
+    }
+    return { valid: true, targets };
+}
+
+type OutcomeRead = { valid: true; outcome?: RunOutcome } | { valid: false };
+
+interface StateFields {
+    state: string | undefined;
+    outcome: unknown;
+}
+
+// A legacy settled record stored its outcome as the state (completed or failed, without an outcome field); it reads
+// as retained with that outcome. Such a state next to an outcome field is unreadable.
+function narrowStateFields(value: unknown): StateFields | undefined {
     const state = getString(value, 'state');
+    const outcome = getPath(value, 'outcome');
+    if (state !== 'completed' && state !== 'failed') {
+        return { state, outcome };
+    }
+    return outcome === undefined ? { state: 'retained', outcome: state } : undefined;
+}
+
+// outcome is required for a retained record and rejected for every other state.
+function narrowOutcome(raw: unknown, state: RunState): OutcomeRead {
+    if (state !== 'retained') {
+        return raw === undefined ? { valid: true } : { valid: false };
+    }
+    return typeof raw === 'string' && isRunOutcome(raw) ? { valid: true, outcome: raw } : { valid: false };
+}
+
+function narrowRecord(value: unknown): RunRecord | undefined {
+    const fields = narrowStateFields(value);
+    const state = fields?.state;
     const comments = narrowComments(value);
     if (getPath(value, 'format') !== RECORD_FORMAT || !isRunState(state) || comments === undefined) {
+        return;
+    }
+    const outcome = narrowOutcome(fields?.outcome, state);
+    if (!outcome.valid) {
+        return;
+    }
+    const failedOutcome = state === 'retained' && outcome.outcome === 'failed';
+    const pending = narrowPendingFailures(value, comments);
+    if (!pending.valid || (pending.targets !== undefined && !failedOutcome)) {
         return;
     }
     const read = createFieldReader(value);
@@ -118,6 +192,7 @@ function narrowRecord(value: unknown): RunRecord | undefined {
         number: read.integer('number'),
         prUrl: read.text('prUrl'),
         comments,
+        ...(pending.targets === undefined ? {} : { pendingFailures: pending.targets }),
         headSha: read.text('headSha'),
         remote: read.text('remote'),
         branch: read.text('branch'),
@@ -129,6 +204,7 @@ function narrowRecord(value: unknown): RunRecord | undefined {
         callerPath: read.text('callerPath'),
         claudeArgs: read.texts('claudeArgs'),
         state,
+        ...(outcome.outcome === undefined ? {} : { outcome: outcome.outcome }),
         reason: read.text('reason'),
         paneId: read.text('paneId'),
         panePid: read.optionalNumber('panePid'),
@@ -155,12 +231,16 @@ export function writeRecord(stateDir: string, record: RunRecord): void {
     writeJsonAtomic(recordPath(stateDir, record.runId), record);
 }
 
+// A retained record is final: a patch that changes its state or outcome throws and nothing is written.
 export function mergeRecord(stateDir: string, runId: string, patch: RecordPatch): RunRecord | undefined {
     const read = readRecord(stateDir, runId);
     if (read.kind !== 'ok') {
         return;
     }
     const merged: RunRecord = { ...read.record, ...patch };
+    if (read.record.state === 'retained' && (merged.state !== 'retained' || merged.outcome !== read.record.outcome)) {
+        throw new Error(`run ${runId} is retained with a fixed outcome; refusing to change its state or outcome`);
+    }
     writeJsonAtomic(recordPath(stateDir, runId), merged);
     return merged;
 }
@@ -182,10 +262,6 @@ export function runIdsForPr(stateDir: string, prKey: string): string[] {
         const read = readRecord(stateDir, runId);
         return read.kind === 'ok' && read.record.prKey === prKey;
     });
-}
-
-export function clearRun(stateDir: string, runId: string): void {
-    fs.rmSync(runDir(stateDir, runId), { recursive: true, force: true });
 }
 
 // Only newline-terminated lines count; a line that is not KIND EPOCH with a known kind is listed as unknown.

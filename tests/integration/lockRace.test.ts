@@ -15,7 +15,7 @@ const WT_KEY = '0123456789abcdef';
 const HOLDER = '20261002120000-1';
 const RACERS = 8;
 const INIT_ROUNDS = 5;
-const FIXED_ENTRIES = ['format', 'runs', 'watchers', 'worktrees'];
+const FIXED_ENTRIES = ['format', 'runs', 'trash', 'watchers', 'worktrees'];
 
 interface Fixture {
     env: TestEnv;

@@ -6,7 +6,6 @@ import { describe, test, type TestContext } from 'node:test';
 import { pidAlive } from '../../src/proc.ts';
 import {
     claimLaunch,
-    clearRun,
     createRun,
     launchDecision,
     listRunIds,
@@ -22,7 +21,7 @@ import {
     writeStatus,
 } from '../../src/runStore.ts';
 import { initState, runDir } from '../../src/stateStore.ts';
-import type { RunRecord } from '../../src/types.ts';
+import type { RecordPatch, RunRecord } from '../../src/types.ts';
 import { createTestEnv, waitUntil, type TestEnv } from '../support/testEnv.ts';
 
 const PR_KEY = 'o+r+12';
@@ -163,7 +162,185 @@ await describe('records', async () => {
         );
     });
 
-    await test('runIdsForPr lists only runs of that PR and clearRun removes a run', async (t) => {
+    await test('pending failure targets round-trip only for failed comments of the same run', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const sample = sampleRecord(RUN_A, PR_KEY);
+        const target = { nodeId: 'PRRC_1', dbId: 1, eyesOn: true };
+        const write = (value: unknown): void => {
+            fs.writeFileSync(path.join(dir, 'record.json'), JSON.stringify(value));
+        };
+
+        const failed = { ...sample, state: 'failed', pendingFailures: [target] };
+        write(failed);
+        const mapped: RunRecord = { ...sample, state: 'retained', outcome: 'failed', pendingFailures: [target] };
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record: mapped });
+
+        for (const pendingFailures of [
+            [{ ...target, nodeId: 'PRRC_other' }],
+            [{ ...target, dbId: 2 }],
+            [{ ...target, eyesOn: 'yes' }],
+            [target, target],
+        ]) {
+            write({ ...failed, pendingFailures });
+            assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+        }
+        write({ ...sample, state: 'completed', pendingFailures: [target] });
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+        write({ ...failed, pendingFailures: 'broken' });
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+    });
+
+    await test('a legacy settled record without an outcome reads as retained with that outcome', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const sample = sampleRecord(RUN_A, PR_KEY);
+        const write = (value: unknown): void => {
+            fs.writeFileSync(path.join(dir, 'record.json'), JSON.stringify(value));
+        };
+        const target = { nodeId: 'PRRC_1', dbId: 1, eyesOn: false };
+
+        write({ ...sample, state: 'completed', reason: 'done' });
+        const completed: RunRecord = { ...sample, state: 'retained', outcome: 'completed', reason: 'done' };
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record: completed });
+
+        write({ ...sample, state: 'failed', reason: 'claude-took-failure-path', pendingFailures: [target] });
+        const read = readRecord(fixture.stateDir, RUN_A);
+        assert.ok(read.kind === 'ok');
+        assert.equal(read.record.state, 'retained');
+        assert.equal(read.record.outcome, 'failed');
+        assert.equal(read.record.reason, 'claude-took-failure-path');
+        assert.deepEqual(read.record.pendingFailures, [target]);
+
+        for (const value of [
+            { ...sample, state: 'completed', reason: 'done', pendingFailures: [target] },
+            { ...sample, state: 'failed', reason: 'claude-took-failure-path', outcome: 'failed' },
+            { ...sample, state: 'completed', reason: 'done', outcome: 'completed' },
+        ]) {
+            write(value);
+            assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+        }
+    });
+
+    await test('a retained record round-trips with either outcome', async (t) => {
+        const fixture = await newFixture(t);
+        createRun(fixture.stateDir, RUN_A);
+        for (const outcome of ['completed', 'failed'] as const) {
+            const record: RunRecord = { ...sampleRecord(RUN_A, PR_KEY), state: 'retained', outcome };
+            writeRecord(fixture.stateDir, record);
+            assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record });
+        }
+    });
+
+    await test('mergeRecord rewrites a legacy completed record in the retained form', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const file = path.join(dir, 'record.json');
+        fs.writeFileSync(file, JSON.stringify({ ...sampleRecord(RUN_A, PR_KEY), state: 'completed', reason: 'done' }));
+        const merged = mergeRecord(fixture.stateDir, RUN_A, { watcherPid: 77 });
+        assert.equal(merged?.state, 'retained');
+        assert.equal(merged.outcome, 'completed');
+        const raw: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.ok(typeof raw === 'object' && raw !== null);
+        assert.equal(Reflect.get(raw, 'state'), 'retained');
+        assert.equal(Reflect.get(raw, 'outcome'), 'completed');
+        assert.equal(Reflect.get(raw, 'watcherPid'), 77);
+        assert.equal(Reflect.get(raw, 'reason'), 'done');
+    });
+
+    await test('mergeRecord keeps a retained record when the patch keeps its state and outcome', async (t) => {
+        const fixture = await newFixture(t);
+        createRun(fixture.stateDir, RUN_A);
+        const target = { nodeId: 'PRRC_1', dbId: 1, eyesOn: false };
+        const record: RunRecord = {
+            ...sampleRecord(RUN_A, PR_KEY),
+            state: 'retained',
+            outcome: 'failed',
+            pendingFailures: [target],
+        };
+        writeRecord(fixture.stateDir, record);
+        mergeRecord(fixture.stateDir, RUN_A, { state: 'retained', outcome: 'failed', pendingFailures: undefined });
+        const read = readRecord(fixture.stateDir, RUN_A);
+        assert.ok(read.kind === 'ok');
+        assert.equal(read.record.state, 'retained');
+        assert.equal(read.record.outcome, 'failed');
+        assert.equal(read.record.pendingFailures, undefined);
+    });
+
+    await test('mergeRecord refuses to change the state or outcome of a retained record', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const file = path.join(dir, 'record.json');
+        const sample = sampleRecord(RUN_A, PR_KEY);
+        // Each stored value is paired with the outcome it reads with; a legacy failed file carries it in the state.
+        const stored = [
+            { value: { ...sample, state: 'retained', outcome: 'failed' }, outcome: 'failed' },
+            { value: { ...sample, state: 'retained', outcome: 'completed' }, outcome: 'completed' },
+            { value: { ...sample, state: 'failed', reason: 'claude-took-failure-path' }, outcome: 'failed' },
+        ];
+        const patches: RecordPatch[] = [
+            { state: 'running' },
+            { outcome: 'completed' },
+            { outcome: 'failed' },
+            { outcome: undefined },
+        ];
+        for (const { value, outcome } of stored) {
+            for (const patch of patches) {
+                if (patch.outcome === outcome) {
+                    continue;
+                }
+                const bytes = JSON.stringify(value);
+                fs.writeFileSync(file, bytes);
+                assert.throws(
+                    () => mergeRecord(fixture.stateDir, RUN_A, patch),
+                    (error: unknown) => error instanceof Error && error.message.includes(RUN_A)
+                );
+                assert.equal(fs.readFileSync(file, 'utf8'), bytes);
+            }
+        }
+    });
+
+    await test('pending failure targets are kept only for a retained record with the failed outcome', async (t) => {
+        const fixture = await newFixture(t);
+        createRun(fixture.stateDir, RUN_A);
+        const target = { nodeId: 'PRRC_1', dbId: 1, eyesOn: false };
+        const record: RunRecord = {
+            ...sampleRecord(RUN_A, PR_KEY),
+            state: 'retained',
+            outcome: 'failed',
+            pendingFailures: [target],
+        };
+        writeRecord(fixture.stateDir, record);
+        const read = readRecord(fixture.stateDir, RUN_A);
+        assert.ok(read.kind === 'ok');
+        assert.deepEqual(read.record.pendingFailures, [target]);
+        assert.deepEqual(read.record, record);
+        writeRecord(fixture.stateDir, { ...record, outcome: 'completed' });
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+    });
+
+    await test('outcome is required for a retained record and rejected elsewhere', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const sample = sampleRecord(RUN_A, PR_KEY);
+        const write = (value: unknown): void => {
+            fs.writeFileSync(path.join(dir, 'record.json'), JSON.stringify(value));
+        };
+        for (const value of [
+            { ...sample, state: 'retained' },
+            { ...sample, state: 'running', outcome: 'completed' },
+            { ...sample, state: 'failed', outcome: 'failed' },
+            { ...sample, state: 'retained', outcome: 'done' },
+            { ...sample, state: 'retained', outcome: 1 },
+            { ...sample, state: 'held' },
+            { ...sample, state: 'held', outcome: 'completed' },
+        ]) {
+            write(value);
+            assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'unreadable', format: '2' });
+        }
+    });
+
+    await test('runIdsForPr lists only runs of that PR', async (t) => {
         const fixture = await newFixture(t);
         for (const [runId, prKey] of [
             [RUN_A, PR_KEY],
@@ -174,9 +351,8 @@ await describe('records', async () => {
         }
         assert.deepEqual(listRunIds(fixture.stateDir), [RUN_A, RUN_B]);
         assert.deepEqual(runIdsForPr(fixture.stateDir, PR_KEY), [RUN_A]);
-        clearRun(fixture.stateDir, RUN_A);
-        assert.deepEqual(listRunIds(fixture.stateDir), [RUN_B]);
-        assert.equal(fs.existsSync(runDir(fixture.stateDir, RUN_A)), false);
+        assert.deepEqual(runIdsForPr(fixture.stateDir, 'o+r+13'), [RUN_B]);
+        assert.deepEqual(runIdsForPr(fixture.stateDir, 'o+r+14'), []);
     });
 });
 

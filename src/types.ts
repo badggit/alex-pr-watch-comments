@@ -192,7 +192,10 @@ export interface Session {
 
 export type GuardResult = { ok: true; headSha: string } | { ok: false; reason: string; hint: string };
 
-export type RunState = 'preparing' | 'running' | 'needs_attention' | 'completed' | 'failed' | 'exited' | 'abandoned';
+export type RunState = 'preparing' | 'running' | 'needs_attention' | 'retained' | 'exited' | 'abandoned';
+
+// How a retained run settled; fixed once the run enters the retained state.
+export type RunOutcome = 'completed' | 'failed';
 
 // One approved comment of a run. rocketAt is the viewer's rocket time, the baseline a +1 must be newer than to count
 // as done; eyesAdded says the watcher's EYES add succeeded.
@@ -206,6 +209,12 @@ export interface RunComment {
     eyesAdded: boolean;
 }
 
+export interface RunFailureTarget {
+    nodeId: string;
+    dbId: number;
+    eyesOn: boolean;
+}
+
 // comments holds the run's batch in the order the worker resolves them (oldest rocket first), never empty.
 export interface RunRecord {
     format: 2;
@@ -216,6 +225,7 @@ export interface RunRecord {
     number: number;
     prUrl: string;
     comments: RunComment[];
+    pendingFailures?: RunFailureTarget[];
     headSha: string;
     remote: string;
     branch: string;
@@ -227,6 +237,8 @@ export interface RunRecord {
     callerPath: string;
     claudeArgs: string[];
     state: RunState;
+    // Present exactly when state is retained.
+    outcome?: RunOutcome;
     reason: string;
     paneId: string;
     panePid: number | undefined;
@@ -317,6 +329,6 @@ export interface RunDecision {
     reason: string;
 }
 
-export type EvaluateState = RunDecision['state'] | 'preparing' | 'deferred';
+export type EvaluateState = RunDecision['state'] | 'preparing' | 'retained' | 'deferred';
 
 export type PaceMode = 'normal' | 'backoff' | 'throttled';

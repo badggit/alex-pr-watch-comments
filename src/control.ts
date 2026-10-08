@@ -10,7 +10,6 @@ import {
     DEFAULT_START_TIMEOUT,
     DEFAULT_STOP_QUIET,
     DEFAULT_STOP_WAIT,
-    DEFAULT_TERM_WAIT,
     ENV_NAMES,
     GH_STRIP_VARS,
     PS_PATH,
@@ -44,6 +43,10 @@ interface RunEntry {
     read: RecordRead;
 }
 
+export interface ListHooks {
+    afterListing?: (_runIds: readonly string[]) => void;
+}
+
 type WatcherEnd = 'gone' | 'exited' | 'failed';
 
 // exited: the watcher pane died before any result of this launch was written.
@@ -53,7 +56,6 @@ type LaunchOutcome = LaunchResult | 'exited' | undefined;
 // environment never survives; the state directory and the launch token are set separately.
 const FORWARDED_OVERRIDES: readonly (readonly [string, number])[] = [
     [ENV_NAMES.startTimeout, DEFAULT_START_TIMEOUT],
-    [ENV_NAMES.termWait, DEFAULT_TERM_WAIT],
     [ENV_NAMES.launchWait, DEFAULT_LAUNCH_WAIT],
     [ENV_NAMES.rateReserve, DEFAULT_RATE_RESERVE],
     [ENV_NAMES.stopQuiet, DEFAULT_STOP_QUIET],
@@ -146,7 +148,7 @@ function watcherCommand(session: Session, entry: BackgroundEntry): string[] {
         session.pr.prUrl,
         '--dir',
         session.worktree?.source ?? session.dirCanon,
-        ...(session.worktree === undefined ? ['--in-place'] : []),
+        session.worktree === undefined ? '--in-place' : '--worktree',
         '--interval',
         String(session.interval),
         '--keep-panes',
@@ -342,12 +344,28 @@ function runLine(stateDir: string, run: RunEntry, now: number): string {
     }
     const { record } = run.read;
     const comments = record.comments.map((comment) => comment.dbId).join(',');
-    const fields = [`state=${record.state}`, `comments=${comments}`, `age=${ageText(now, record.startedAt)}`];
+    const fields = [
+        `state=${record.state}`,
+        ...(record.state === 'retained' && record.outcome !== undefined ? [`outcome=${record.outcome}`] : []),
+        `comments=${comments}`,
+        `age=${ageText(now, record.startedAt)}`,
+    ];
     return `run ${safeText(run.runId)} ${fields.join(' ')}\n`;
 }
 
 function readRuns(stateDir: string): RunEntry[] {
     return listRunIds(stateDir).map((runId) => ({ runId, read: readRecord(stateDir, runId) }));
+}
+
+// A run removed between the listing and the read (a cleanup finishing meanwhile) is skipped instead of being shown
+// as an unreadable record.
+function readListedRuns(stateDir: string, hooks: ListHooks): RunEntry[] {
+    const runIds = listRunIds(stateDir);
+    hooks.afterListing?.(runIds);
+    return runIds.flatMap((runId) => {
+        const read = readRecord(stateDir, runId);
+        return read.kind === 'unreadable' && !entryPresent(runDir(stateDir, runId)) ? [] : [{ runId, read }];
+    });
 }
 
 function watcherKeys(stateDir: string): string[] {
@@ -362,7 +380,7 @@ function runOf(run: RunEntry, prKey: string): boolean {
     return run.read.kind === 'ok' && run.read.record.prKey === prKey;
 }
 
-function listState(deps: Deps, stateDir: string): number {
+function listState(deps: Deps, stateDir: string, hooks: ListHooks): number {
     const state = initState(stateDir);
     if (!state.ok) {
         deps.out(stateRefusal(state));
@@ -371,7 +389,7 @@ function listState(deps: Deps, stateDir: string): number {
     const dir = state.stateDir;
     const now = deps.nowSeconds();
     const prKeys = watcherKeys(dir);
-    const runs = readRuns(dir);
+    const runs = readListedRuns(dir, hooks);
     if (prKeys.length === 0) {
         deps.out('no watchers\n');
     }
@@ -389,9 +407,9 @@ function listState(deps: Deps, stateDir: string): number {
 
 // Lists every watcher with its status and runs, plus runs of no listed watcher and unreadable records. A throw while
 // listing becomes a rejection.
-export function runList(deps: Deps, stateDir: string): Promise<number> {
+export function runList(deps: Deps, stateDir: string, hooks: ListHooks = {}): Promise<number> {
     return new Promise((resolve) => {
-        resolve(listState(deps, stateDir));
+        resolve(listState(deps, stateDir, hooks));
     });
 }
 

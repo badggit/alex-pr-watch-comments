@@ -63,7 +63,6 @@ const OLD_START = 'Mon Jan  1 00:00:00 2001';
 const TOKEN_ITEM = 'PRWC_LAUNCH_TOKEN=';
 const FORWARDED = [
     'PRWC_START_TIMEOUT',
-    'PRWC_TERM_WAIT',
     'PRWC_LAUNCH_WAIT',
     'PRWC_RATE_RESERVE',
     'PRWC_STOP_QUIET',
@@ -346,25 +345,61 @@ function assertNoControl(text: string): void {
     }
 }
 
-// A zombie: sh starts a short child and replaces itself with sleep, which never reaps that child.
+async function cleanupZombieChild(
+    runner: CommandRunner,
+    pidFile: string,
+    parent: number,
+    parentStart: string | undefined
+): Promise<void> {
+    try {
+        const child = Number.parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+        if (!Number.isInteger(child) || child <= 1 || parentStart === undefined) {
+            return;
+        }
+        const owner = await runner.run({ file: '/bin/ps', args: ['-o', 'ppid=', '-p', String(child)] });
+        if (
+            owner.code === 0 &&
+            Number.parseInt(owner.stdout.trim(), 10) === parent &&
+            (await processStart(runner, parent)) === parentStart
+        ) {
+            process.kill(child, 'SIGKILL');
+        }
+    } catch {
+        return;
+    }
+}
+
+// Terminate the child only after its parent execs sleep, so the shell cannot reap it first.
 async function spawnZombie(setup: Setup): Promise<number> {
     const pidFile = path.join(setup.testEnv.root, 'zombie.pid');
-    const script = `sleep 0 & echo $! > ${pidFile}; exec sleep 300`;
-    setup.testEnv.spawnOrphan('/bin/sh', ['-c', script]);
-    let zombie = 0;
-    const ready = await waitUntil(10_000, async () => {
-        zombie = Number.parseInt(fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : '', 10);
-        if (!Number.isInteger(zombie)) {
-            return false;
-        }
-        const state = await createProcessRunner(setup.testEnv.env).run({
-            file: '/bin/ps',
-            args: ['-o', 'stat=', '-p', String(zombie)],
+    const script = '/bin/sleep 300 & echo $! > "$1"; exec /bin/sleep 300';
+    const parent = setup.testEnv.spawnOrphan('/bin/sh', ['-c', script, 'sh', pidFile]);
+    const runner = createProcessRunner(setup.testEnv.env);
+    const parentStart = await processStart(runner, parent);
+    try {
+        const parentReady = await waitUntil(10_000, async () => {
+            const command = await runner.run({
+                file: '/bin/ps',
+                args: ['-o', 'comm=', '-p', String(parent)],
+            });
+            return command.code === 0 && path.basename(command.stdout.trim()) === 'sleep';
         });
-        return state.stdout.trim().startsWith('Z');
-    });
-    assert.ok(ready, 'no zombie appeared');
-    return zombie;
+        assert.ok(parentReady, 'zombie parent did not exec sleep');
+        const zombie = Number.parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+        assert.ok(Number.isInteger(zombie) && zombie > 1, 'invalid zombie child pid');
+        process.kill(zombie, 'SIGTERM');
+        const ready = await waitUntil(10_000, async () => {
+            const state = await runner.run({
+                file: '/bin/ps',
+                args: ['-o', 'stat=', '-p', String(zombie)],
+            });
+            return state.stdout.trim().startsWith('Z');
+        });
+        assert.ok(ready, 'no zombie appeared');
+        return zombie;
+    } finally {
+        await cleanupZombieChild(runner, pidFile, parent, parentStart);
+    }
 }
 
 function stop(setup: Setup, pr = PR): Promise<number> {
@@ -437,7 +472,7 @@ await describe('background start', async () => {
         assert.deepEqual(launchFiles(setup), []);
     });
 
-    await test('a worktree start passes the clone, not the worktree, and no --in-place', async (t) => {
+    await test('a worktree start passes the clone and explicit --worktree', async (t) => {
         const setup = await makeSetup(t);
         gitSync(setup.testEnv.env, ['-C', setup.clone, 'checkout', '--quiet', 'main']);
         answerAtOnce(setup, 'firstPoll');
@@ -446,6 +481,7 @@ await describe('background start', async () => {
         const clone = fs.realpathSync.native(setup.clone);
         assert.equal(call.args[call.args.indexOf('--dir') + 1], clone);
         assert.ok(!call.args.includes('--in-place'));
+        assert.ok(call.args.includes('--worktree'));
         const worktree = path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12');
         assert.equal(gitSync(setup.testEnv.env, ['-C', worktree, 'branch', '--show-current']).trim(), BRANCH);
         assert.ok(printed(setup).includes(`created the watch worktree ${worktree}`), printed(setup));
@@ -509,13 +545,14 @@ await describe('background start', async () => {
     });
 
     await test('every override is forwarded with its effective value, defaults included', async (t) => {
-        const setup = await makeSetup(t, { env: { PRWC_TERM_WAIT: 'abc' } });
+        const setup = await makeSetup(t);
         answerAtOnce(setup, 'firstPoll');
         assert.equal(await startBackground(setup), 0, printed(setup));
         const items = envItems(onlyWindow(setup));
-        for (const expected of ['PRWC_LAUNCH_WAIT=60', 'PRWC_STOP_QUIET=10', 'PRWC_TERM_WAIT=10']) {
+        for (const expected of ['PRWC_LAUNCH_WAIT=60', 'PRWC_STOP_QUIET=10']) {
             assert.ok(items.includes(expected), `${expected} missing from ${items.join(' ')}`);
         }
+        assert.ok(!items.some((item) => item.startsWith('PRWC_TERM_WAIT=')), items.join(' '));
         for (const name of FORWARDED) {
             assert.equal(items.filter((item) => item.startsWith(`${name}=`)).length, 1, name);
         }
@@ -745,6 +782,42 @@ await describe('list', async () => {
         const runId = seedUnreadableRecord(setup);
         assert.equal(await runList(setup.deps, setup.stateDir), 0);
         const expected = `unreadable record ${path.join(runDir(setup.stateDir, runId), 'record.json')} (format 9)`;
+        assert.ok(setup.deps.outText().includes(expected), setup.deps.outText());
+    });
+
+    await test('a retained run shows its outcome', async (t) => {
+        const setup = await makeSetup(t);
+        seedRecord(setup, '20261002120000-101', { state: 'retained', outcome: 'failed', startedAt: setup.now - 90 });
+        assert.equal(await runList(setup.deps, setup.stateDir), 0);
+        const output = setup.deps.outText();
+        assert.ok(output.includes('state=retained outcome=failed comments=101,102 age=90s\n'), output);
+    });
+
+    await test('a run removed while listing prints nothing', async (t) => {
+        const setup = await makeSetup(t);
+        seedRecord(setup, '20261002120000-101', { startedAt: setup.now - 90 });
+        seedRecord(setup, '20261002120000-102', { startedAt: setup.now - 60 });
+        let listed: readonly string[] = [];
+        const hooks = {
+            afterListing: (runIds: readonly string[]): void => {
+                listed = runIds;
+                fs.rmSync(runDir(setup.stateDir, '20261002120000-101'), { recursive: true, force: true });
+            },
+        };
+        assert.equal(await runList(setup.deps, setup.stateDir, hooks), 0);
+        const output = setup.deps.outText();
+        assert.deepEqual(listed, ['20261002120000-101', '20261002120000-102']);
+        assert.ok(!output.includes('20261002120000-101'), output);
+        assert.ok(!output.includes('unreadable record'), output);
+        assert.ok(output.includes('run 20261002120000-102 state=running comments=101,102 age=60s\n'), output);
+    });
+
+    await test('a run directory without a record is reported as unreadable', async (t) => {
+        const setup = await makeSetup(t);
+        const runId = '20261002120000-103';
+        fs.mkdirSync(runDir(setup.stateDir, runId), { recursive: true, mode: 0o700 });
+        assert.equal(await runList(setup.deps, setup.stateDir), 0);
+        const expected = `unreadable record ${path.join(runDir(setup.stateDir, runId), 'record.json')} (format unknown)`;
         assert.ok(setup.deps.outText().includes(expected), setup.deps.outText());
     });
 

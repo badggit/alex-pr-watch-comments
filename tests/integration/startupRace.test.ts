@@ -119,29 +119,34 @@ await describe('startup race', async () => {
         assertClaudeNeverRan(fixture);
     });
 
-    await test('a preparing run of a dead watcher is cleared and its launcher exits', async (t) => {
-        const fixture = await newRunFixture(t);
-        const watcher = await deadPid(fixture.env);
-        await seedRun(fixture, {
-            patch: {
-                state: 'preparing',
-                paneId: '',
-                panePid: undefined,
-                comments: [baseComment({ eyesAdded: false })],
-                watcherPid: watcher,
-            },
-            decision: 'none',
-            lockWatcherPid: watcher,
-        });
-        const launcher = startLauncher(fixture);
+    await test('preparing runs of dead watchers clear while their launchers exit', async (t) => {
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+            const fixture = await newRunFixture(t);
+            const watcher = await deadPid(fixture.env);
+            await seedRun(fixture, {
+                patch: {
+                    state: 'preparing',
+                    paneId: '',
+                    panePid: undefined,
+                    comments: [baseComment({ eyesAdded: false })],
+                    watcherPid: watcher,
+                },
+                decision: 'none',
+                lockWatcherPid: watcher,
+            });
+            const launcher = startLauncher(fixture);
 
-        const result = await reconcile(fixture.deps, fixture.session);
-        assert.equal(result.inflightRunId, undefined);
-        assert.equal(runExists(fixture), false);
-        assert.equal(lockExists(fixture, SESSION_KEY), false);
+            const result = await reconcile(fixture.deps, fixture.session);
+            assert.equal(result.inflightRunId, undefined, `attempt ${attempt}`);
+            assert.equal(runExists(fixture), false, `attempt ${attempt}`);
+            assert.equal(lockExists(fixture, SESSION_KEY), false, `attempt ${attempt}`);
 
-        assert.ok(await waitUntil(10_000, () => !pidAlive(launcher)), 'the launcher did not exit');
-        assertClaudeNeverRan(fixture);
+            assert.ok(
+                await waitUntil(10_000, () => !pidAlive(launcher)),
+                `launcher did not exit on attempt ${attempt}`
+            );
+            assertClaudeNeverRan(fixture);
+        }
     });
 
     await test('positive control: the same launcher starts the stub claude on go', async (t) => {
