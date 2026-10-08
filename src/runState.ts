@@ -5,9 +5,9 @@ import { DEFAULT_START_TIMEOUT, DEFAULT_STOP_QUIET, ENV_NAMES } from './constant
 import { releaseWorktreeLock, worktreeLockHolder } from './locks.ts';
 import { pidAlive, processStart } from './proc.ts';
 import { markFailed, type FailTarget } from './reactions.ts';
+import { removeRun } from './runRemoval.ts';
 import {
     claimLaunch,
-    clearRun,
     launchDecision,
     mergeRecord,
     readEvents,
@@ -266,7 +266,7 @@ async function finishRun(ctx: RunContext): Promise<EvaluateResult | undefined> {
     if (!releaseRunLock(deps, session.stateDir, record.worktreeKey, record.runId)) {
         return deferred('lock-release-failed');
     }
-    clearRun(session.stateDir, record.runId);
+    removeRun(session.stateDir, record.runId, deps.log);
 }
 
 // absent: claude.pid does not exist, claude never started; unreadable: the file exists but holds no pid.
@@ -451,7 +451,7 @@ function finishAbandoned(deps: Deps, session: Session, record: RunRecord, stop: 
     if (!releaseRunLock(deps, session.stateDir, record.worktreeKey, record.runId)) {
         return deferred('lock-release-failed');
     }
-    clearRun(session.stateDir, record.runId);
+    removeRun(session.stateDir, record.runId, deps.log);
     deps.log.info(`run ${record.runId} cleared: abandoned`);
     return { state: 'exited', reason: 'abandoned' };
 }
@@ -528,7 +528,7 @@ async function recoverUnreadable(
     if (!releaseRunLock(deps, session.stateDir, session.worktreeKey, runId)) {
         return deferred('lock-release-failed');
     }
-    clearRun(session.stateDir, runId);
+    removeRun(session.stateDir, runId, deps.log);
     deps.log.warn(`run ${runId} with an unreadable record has exited; EYES reactions on its comments may remain`);
     return { state: 'exited', reason: 'record-unreadable' };
 }

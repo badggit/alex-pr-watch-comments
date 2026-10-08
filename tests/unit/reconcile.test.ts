@@ -7,9 +7,10 @@ import { parseJson } from '../../src/json.ts';
 import { acquireWorktreeLock, worktreeLockHolder } from '../../src/locks.ts';
 import { pidAlive } from '../../src/proc.ts';
 import { reconcile } from '../../src/reconcile.ts';
+import type { RemovalHooks } from '../../src/runRemoval.ts';
 import { captureRun, evaluateRun } from '../../src/runState.ts';
-import { createRun, launchDecision, readRecord, writeRecord } from '../../src/runStore.ts';
-import { runDir } from '../../src/stateStore.ts';
+import { createRun, launchDecision, listRunIds, readRecord, writeRecord } from '../../src/runStore.ts';
+import { runDir, trashDir, worktreeDir } from '../../src/stateStore.ts';
 import {
     answerLookup,
     baseComment,
@@ -85,6 +86,23 @@ function breakRecord(fixture: RunFixture): void {
 
 function paneListings(fixture: RunFixture) {
     return fixture.fake.calls('tmux').filter((call) => call.key === 'list-panes');
+}
+
+function lockOwnerBytes(fixture: RunFixture, wtKey: string): Buffer {
+    return fs.readFileSync(path.join(worktreeDir(fixture.stateDir, wtKey), 'lock', 'owner.json'));
+}
+
+// Seeds a running run with a dead worker whose worktree lock is no longer held for it, as left by a crash between
+// the lock release and the removal.
+async function seedReleasedDeadRun(fixture: RunFixture, watcher: number): Promise<void> {
+    await seedRun(fixture, { patch: { state: 'running', watcherPid: watcher }, events: ['prompt'], lock: false });
+    answerLookup(fixture, { eyes: true });
+}
+
+function takeLockForOtherRun(fixture: RunFixture, watcher: number): Buffer {
+    const now = Math.floor(Date.now() / 1000);
+    assert.ok(acquireWorktreeLock(fixture.stateDir, SESSION_KEY, RUN_2, watcher, fixture.deps.log, now));
+    return lockOwnerBytes(fixture, SESSION_KEY);
 }
 
 await describe('reconcile', async () => {
@@ -723,5 +741,59 @@ await describe('reconcile', async () => {
         assert.equal(read.record.watcherPid, watcher);
         assert.equal(lockWatcherPid(fixture, OTHER_KEY), watcher);
         assert.ok(fixture.deps.logLines.some((line) => line.includes(`run ${RUN_2} also has a live worker`)));
+    });
+
+    await test('sweeps a leftover trash entry before listing runs', async (t) => {
+        const fixture = await newRunFixture(t);
+        const entry = path.join(trashDir(fixture.stateDir), RUN_2);
+        fs.mkdirSync(entry, { recursive: true });
+        fs.writeFileSync(path.join(entry, 'record.json'), '{}');
+        const result = await reconcile(fixture.deps, fixture.session);
+        assert.deepEqual(result, { inflightRunId: undefined, problem: undefined });
+        assert.equal(fs.existsSync(entry), false);
+        assert.deepEqual(fs.readdirSync(trashDir(fixture.stateDir)), []);
+        assert.equal(listRunIds(fixture.stateDir).includes(RUN_2), false);
+    });
+
+    await test('a run left after its lock release is removed through the trash; another lock is untouched', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        await seedReleasedDeadRun(fixture, watcher);
+        const before = takeLockForOtherRun(fixture, watcher);
+        const renames: [string, string][] = [];
+        const hooks: RemovalHooks = {
+            rename: (from, to) => {
+                renames.push([from, to]);
+                fs.renameSync(from, to);
+            },
+        };
+        const result = await reconcile(fixture.deps, fixture.session, undefined, hooks);
+        assert.deepEqual(result, { inflightRunId: undefined, problem: undefined });
+        assert.equal(runExists(fixture), false);
+        assert.equal(renames.length, 1);
+        assert.equal(renames[0]?.[0], runDir(fixture.stateDir, RUN_ID));
+        assert.equal(path.dirname(renames[0]?.[1] ?? ''), trashDir(fixture.stateDir));
+        assert.deepEqual(fs.readdirSync(trashDir(fixture.stateDir)), []);
+        assert.deepEqual(lockOwnerBytes(fixture, SESSION_KEY), before);
+    });
+
+    await test('a failed rename into the trash surfaces and the next start removes the run', async (t) => {
+        const fixture = await newRunFixture(t);
+        const watcher = await deadPid(fixture.env);
+        await seedRun(fixture, { patch: { watcherPid: watcher }, events: ['prompt'], lockWatcherPid: watcher });
+        answerLookup(fixture, { eyes: true });
+        const hooks: RemovalHooks = {
+            rename: () => {
+                throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+            },
+        };
+        await assert.rejects(reconcile(fixture.deps, fixture.session, undefined, hooks), { code: 'EACCES' });
+        assert.ok(listRunIds(fixture.stateDir).includes(RUN_ID));
+        assert.equal(lockExists(fixture, SESSION_KEY), false);
+        const before = takeLockForOtherRun(fixture, watcher);
+        const result = await reconcile(fixture.deps, fixture.session);
+        assert.deepEqual(result, { inflightRunId: undefined, problem: undefined });
+        assert.equal(listRunIds(fixture.stateDir).includes(RUN_ID), false);
+        assert.deepEqual(lockOwnerBytes(fixture, SESSION_KEY), before);
     });
 });

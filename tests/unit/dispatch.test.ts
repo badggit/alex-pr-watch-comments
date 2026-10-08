@@ -17,7 +17,7 @@ import {
     readRecord,
     writeRecord,
 } from '../../src/runStore.ts';
-import { initState, runDir, worktreeDir, worktreeKey } from '../../src/stateStore.ts';
+import { initState, runDir, trashDir, worktreeDir, worktreeKey } from '../../src/stateStore.ts';
 import type {
     Candidate,
     CommandRunner,
@@ -795,6 +795,20 @@ await describe('dispatch: failure paths', async () => {
         assert.deepEqual(listRunIds(setup.stateDir), []);
         assert.ok(setup.fake.calls('tmux').some((call) => call.key === 'display-message'));
         assert.ok(setup.deps.logLines.some((line) => line.includes('abandoned')));
+    });
+
+    await test('a run whose launch failed is removed through the trash and leaves no run directory', async (t) => {
+        const setup = await makeSetup(t, {
+            split: false,
+            prime: (fake) => {
+                fake.respond('tmux', 'split-window', NO_SPACE);
+                fake.respond('tmux', 'new-window', NO_SPACE);
+            },
+        });
+        const result = await runDispatch(setup);
+        assert.equal(result.outcome, 'abandoned');
+        assert.deepEqual(fs.readdirSync(path.join(setup.stateDir, 'runs')), []);
+        assert.deepEqual(fs.readdirSync(trashDir(setup.stateDir)), []);
     });
 
     await test('an unexpected exception abandons the run and frees the lock', async (t) => {

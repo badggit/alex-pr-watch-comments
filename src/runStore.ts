@@ -356,21 +356,6 @@ export function launchDecision(stateDir: string, runId: string): LaunchDecision 
     return value === 'go' || value === 'cancel' ? value : 'claimed';
 }
 
-// A cancelled launcher may write exit_status after the directory scan, so retry the entire removal.
-export function clearRun(stateDir: string, runId: string): void {
-    const retries = launchDecision(stateDir, runId) === 'cancel' ? 5 : 0;
-    for (let attempt = 0; attempt <= retries; attempt += 1) {
-        try {
-            fs.rmSync(runDir(stateDir, runId), { recursive: true, force: true });
-            return;
-        } catch (error) {
-            if (attempt === retries || !(error instanceof Error && 'code' in error && error.code === 'ENOTEMPTY')) {
-                throw error;
-            }
-        }
-    }
-}
-
 function statusPath(stateDir: string, prKey: string): string {
     return path.join(watcherDir(stateDir, prKey), STATUS_FILE);
 }

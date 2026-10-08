@@ -8,7 +8,8 @@ import { syncIgnoredLinks } from './ignoredLinks.ts';
 import { acquireWorktreeLock, releaseWorktreeLock, worktreeLockHolder } from './locks.ts';
 import { commentFiles } from './prompt.ts';
 import { markFailed, type FailTarget } from './reactions.ts';
-import { claimLaunch, clearRun, createRun, launchDecision, mergeRecord, readRecord, writeRecord } from './runStore.ts';
+import { removeRun } from './runRemoval.ts';
+import { claimLaunch, createRun, launchDecision, mergeRecord, readRecord, writeRecord } from './runStore.ts';
 import { runDir, writeTextAtomic } from './stateStore.ts';
 import { splitWorker, tmuxMessage } from './tmuxControl.ts';
 import type {
@@ -258,7 +259,7 @@ function lockReleased(deps: Deps, stateDir: string, wtKey: string, runId: string
 // id is returned.
 function freeRun(deps: Deps, stateDir: string, wtKey: string, runId: string): string | undefined {
     if (lockReleased(deps, stateDir, wtKey, runId)) {
-        clearRun(stateDir, runId);
+        removeRun(stateDir, runId, deps.log);
         return;
     }
     try {

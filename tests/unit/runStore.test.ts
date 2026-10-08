@@ -6,7 +6,6 @@ import { describe, test, type TestContext } from 'node:test';
 import { pidAlive } from '../../src/proc.ts';
 import {
     claimLaunch,
-    clearRun,
     createRun,
     launchDecision,
     listRunIds,
@@ -341,7 +340,7 @@ await describe('records', async () => {
         }
     });
 
-    await test('runIdsForPr lists only runs of that PR and clearRun removes a run', async (t) => {
+    await test('runIdsForPr lists only runs of that PR', async (t) => {
         const fixture = await newFixture(t);
         for (const [runId, prKey] of [
             [RUN_A, PR_KEY],
@@ -352,9 +351,8 @@ await describe('records', async () => {
         }
         assert.deepEqual(listRunIds(fixture.stateDir), [RUN_A, RUN_B]);
         assert.deepEqual(runIdsForPr(fixture.stateDir, PR_KEY), [RUN_A]);
-        clearRun(fixture.stateDir, RUN_A);
-        assert.deepEqual(listRunIds(fixture.stateDir), [RUN_B]);
-        assert.equal(fs.existsSync(runDir(fixture.stateDir, RUN_A)), false);
+        assert.deepEqual(runIdsForPr(fixture.stateDir, 'o+r+13'), [RUN_B]);
+        assert.deepEqual(runIdsForPr(fixture.stateDir, 'o+r+14'), []);
     });
 });
 
@@ -433,76 +431,6 @@ await describe('launch decision', async () => {
         assert.equal(launchDecision(fixture.stateDir, RUN_A), 'claimed');
         assert.equal(claimLaunch(fixture.stateDir, RUN_B, 'cancel'), false);
         assert.equal(fs.existsSync(runDir(fixture.stateDir, RUN_B)), false);
-    });
-});
-
-function lateStatusRmdir(dir: string, remove: typeof fs.rmSync): void {
-    for (const name of fs.readdirSync(dir)) {
-        remove(path.join(dir, name), { recursive: true, force: true });
-    }
-    fs.writeFileSync(path.join(dir, 'exit_status'), 'cancelled');
-    fs.rmdirSync(dir);
-}
-
-await describe('clearRun', async () => {
-    await test('removes a late launcher status after a cancelled removal is interrupted', async (t) => {
-        const fixture = await newFixture(t);
-        const dir = createRun(fixture.stateDir, RUN_A);
-        assert.ok(claimLaunch(fixture.stateDir, RUN_A, 'cancel'));
-        const original = fs.rmSync;
-        let attempts = 0;
-        t.mock.method(fs, 'rmSync', (target: fs.PathLike, options?: fs.RmOptions) => {
-            if (target === dir) {
-                attempts += 1;
-                if (attempts === 1) {
-                    lateStatusRmdir(dir, original);
-                }
-            }
-            return original(target, options);
-        });
-
-        clearRun(fixture.stateDir, RUN_A);
-        assert.equal(attempts, 2);
-        assert.equal(fs.existsSync(dir), false);
-    });
-
-    await test('retries only ENOTEMPTY with a confirmed cancel and stops at the bound', async (t) => {
-        const fixture = await newFixture(t);
-        const cases = [
-            { decision: 'none', code: 'ENOTEMPTY', attempts: 1 },
-            { decision: 'claimed', code: 'ENOTEMPTY', attempts: 1 },
-            { decision: 'go', code: 'ENOTEMPTY', attempts: 1 },
-            { decision: 'cancel', code: 'ENOTDIR', attempts: 1 },
-            { decision: 'cancel', code: 'ENOTEMPTY', attempts: 6 },
-        ] as const;
-
-        for (const scenario of cases) {
-            const dir = createRun(fixture.stateDir, RUN_A);
-            if (scenario.decision === 'claimed') {
-                fs.mkdirSync(path.join(dir, 'decision.d'));
-            } else if (scenario.decision !== 'none') {
-                assert.ok(claimLaunch(fixture.stateDir, RUN_A, scenario.decision));
-            }
-            const original = fs.rmSync;
-            let attempts = 0;
-            t.mock.method(fs, 'rmSync', (target: fs.PathLike, options?: fs.RmOptions) => {
-                if (target === dir) {
-                    attempts += 1;
-                    if (scenario.code === 'ENOTDIR') {
-                        const regular = path.join(dir, 'regular');
-                        fs.writeFileSync(regular, '');
-                        fs.rmdirSync(regular);
-                    } else {
-                        lateStatusRmdir(dir, original);
-                    }
-                }
-                return original(target, options);
-            });
-            assert.throws(() => clearRun(fixture.stateDir, RUN_A), { code: scenario.code });
-            assert.equal(attempts, scenario.attempts, scenario.decision);
-            t.mock.restoreAll();
-            fs.rmSync(dir, { recursive: true, force: true });
-        }
     });
 });
 
