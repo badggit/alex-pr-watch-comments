@@ -22,12 +22,14 @@ export interface WorkerPane {
 export interface WatcherWindow {
     windowId: string;
     paneId: string;
+    // The number the tmux status line shows for the window.
+    index: string;
 }
 
 export type PaneState = 'alive' | 'dead' | 'missing';
 
 const PANE_PID_FORMAT = '#{pane_id} #{pane_pid}';
-const WINDOW_PANE_FORMAT = '#{window_id} #{pane_id}';
+const WINDOW_PANE_FORMAT = '#{window_id} #{pane_id} #{window_index}';
 const PANE_SIZE_FORMAT = '#{pane_id} #{pane_width} #{pane_height}';
 const WINDOW_SIZE_FORMAT = '#{window_width} #{window_height}';
 // tmux 3.4-3.6 says 'no space for new pane'; 3.7+ says 'no space for a new pane' (3.7 adds a 'size or position' prefix).
@@ -36,6 +38,9 @@ const PANE_ID = /^%\d+$/u;
 const WINDOW_ID = /^@\d+$/u;
 const SESSION_ID = /^\$\d+$/u;
 const PATH_ITEM = 'PATH=';
+export const NOT_IN_TMUX =
+    'not running inside tmux: the watcher opens Claude Code in new tmux panes, so start a tmux session first ' +
+    '(for example: tmux new -s review), then run this command or the skill from a pane of that session';
 
 // tmux format-expands some arguments (the split-window start directory); doubling # keeps the value literal.
 export function tmuxLiteral(value: string): string {
@@ -128,7 +133,7 @@ function clientEnvFor(env: Env, envItems: readonly string[]): Env | undefined {
 export async function tmuxInit(deps: TmuxDeps, tmuxPath: string): Promise<TmuxInitResult> {
     const parsed = parseTmuxEnv(deps.env);
     if (parsed === undefined) {
-        return { ok: false, reason: 'must run inside tmux' };
+        return { ok: false, reason: NOT_IN_TMUX };
     }
     const result = await tmuxOn(deps, tmuxPath, parsed.socket, [
         'display-message',
@@ -346,15 +351,23 @@ export async function capDonePanes(
     }
 }
 
-// The started command must wait for its launch-ready marker: it may not act before both options are set.
+// The name a background watcher window shows in the tmux status line.
+export function watcherWindowName(prNumber: number): string {
+    return `prwc-${prNumber}`;
+}
+
+// The window is named so it can be found in the status line; a window created with -n keeps that name, as tmux
+// turns automatic-rename off for it. The started command must wait for its launch-ready marker: it may not act
+// before both options are set.
 export async function newWatcherWindow(
     deps: TmuxDeps,
     tmuxPath: string,
     tmux: TmuxContext,
-    prKey: string,
+    target: { prKey: string; name: string },
     envItems: readonly string[],
     command: readonly string[]
 ): Promise<WatcherWindow | undefined> {
+    const { prKey, name } = target;
     const created = await tmuxOn(
         deps,
         tmuxPath,
@@ -365,6 +378,8 @@ export async function newWatcherWindow(
             '-P',
             '-F',
             WINDOW_PANE_FORMAT,
+            '-n',
+            name,
             '-t',
             `${tmux.sessionId}:`,
             ...envArgs(envItems),
@@ -372,11 +387,11 @@ export async function newWatcherWindow(
         ],
         clientEnvFor(deps.env, envItems)
     );
-    const fields = twoFields(created);
-    if (fields === undefined || !WINDOW_ID.test(fields[0]) || !PANE_ID.test(fields[1])) {
+    const [windowId = '', paneId = '', index = '', ...rest] =
+        created?.code === 0 ? created.stdout.trim().split(' ') : [];
+    if (rest.length > 0 || !WINDOW_ID.test(windowId) || !PANE_ID.test(paneId) || !isUintString(index)) {
         return;
     }
-    const [windowId, paneId] = fields;
     const tagged = await tmuxOn(deps, tmuxPath, tmux.socket, [
         'set-option',
         '-w',
@@ -394,7 +409,7 @@ export async function newWatcherWindow(
         await tmuxOn(deps, tmuxPath, tmux.socket, ['kill-window', '-t', windowId]);
         return;
     }
-    return { windowId, paneId };
+    return { windowId, paneId, index };
 }
 
 export async function paneState(deps: TmuxDeps, tmuxPath: string, socket: string, pane: string): Promise<PaneState> {

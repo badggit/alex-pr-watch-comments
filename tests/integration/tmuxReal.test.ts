@@ -251,13 +251,21 @@ await describe('tmux control on a real isolated server', async () => {
             fixture.deps,
             fixture.tmuxPath,
             fixture.tmux,
-            PR_KEY,
+            { prKey: PR_KEY, name: 'prwc-12' },
             ['FOO=bar', `PATH=${customPath}`],
             ['/bin/sh', '-c', script]
         );
         assert.ok(result);
         assert.notEqual(result.windowId, fixture.tmux.windowId);
         assert.deepEqual(await readLines(outFile, 2), ['bar', customPath]);
+        const named = await tmuxOn(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, [
+            'display-message',
+            '-p',
+            '-t',
+            result.windowId,
+            '#{window_index} #{window_name} #{automatic-rename}',
+        ]);
+        assert.equal(named?.stdout.trim(), `${result.index} prwc-12 0`);
         const remain = await tmuxOn(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, [
             'show-options',
             '-p',
@@ -278,7 +286,14 @@ await describe('tmux control on a real isolated server', async () => {
         const { deps, tmuxPath } = fixture;
         const socket = fixture.tmux.socket;
         const open = async (prKey: string): Promise<string> => {
-            const created = await newWatcherWindow(deps, tmuxPath, fixture.tmux, prKey, [], ['sleep', '30']);
+            const created = await newWatcherWindow(
+                deps,
+                tmuxPath,
+                fixture.tmux,
+                { prKey, name: 'w' },
+                [],
+                ['sleep', '30']
+            );
             assert.ok(created);
             return created.paneId;
         };

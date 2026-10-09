@@ -27,6 +27,7 @@ import {
     tmuxOn,
     type PaneState,
     type TmuxDeps,
+    watcherWindowName,
     type WatcherWindow,
 } from './tmuxControl.ts';
 import type { CliOptions, CommandRunner, Deps, Env, LaunchResult, PrLockOwner, Session } from './types.ts';
@@ -189,6 +190,11 @@ async function awaitLaunchResult(
     }
 }
 
+// The window index and name are what the tmux status line shows; the id is what --list and the lock record use.
+function windowLabel(session: Session, window: WatcherWindow): string {
+    return `tmux window ${window.index} (${watcherWindowName(session.pr.number)}, ${window.windowId})`;
+}
+
 async function reportLaunch(
     deps: Deps,
     session: Session,
@@ -196,16 +202,16 @@ async function reportLaunch(
     result: LaunchOutcome
 ): Promise<number> {
     if (result === undefined) {
-        deps.out(`watcher did not report its first poll; check window ${window.windowId}\n`);
+        deps.out(`watcher did not report its first poll; check ${windowLabel(session, window)}\n`);
         return 1;
     }
     if (result === 'exited') {
-        deps.out(`watcher exited before its first poll; check window ${window.windowId}\n`);
+        deps.out(`watcher exited before its first poll; check ${windowLabel(session, window)}\n`);
         return 1;
     }
     switch (result.result) {
         case 'firstPoll': {
-            deps.out(`watching ${session.pr.prUrl} in window ${window.windowId}\n`);
+            deps.out(`watching ${session.pr.prUrl} in ${windowLabel(session, window)}\n`);
             return 0;
         }
         case 'fatal': {
@@ -233,7 +239,8 @@ async function launchWatcher(deps: Deps, session: Session, token: string, entry:
     const { stateDir, pr, tools, tmux } = session;
     const tmuxDeps: TmuxDeps = { runner: deps.runner, env: withoutStripped(deps.env) };
     const items = windowEnvItems(deps.env, session, token);
-    const window = await newWatcherWindow(tmuxDeps, tools.tmux, tmux, pr.prKey, items, watcherCommand(session, entry));
+    const target = { prKey: pr.prKey, name: watcherWindowName(pr.number) };
+    const window = await newWatcherWindow(tmuxDeps, tools.tmux, tmux, target, items, watcherCommand(session, entry));
     if (window === undefined) {
         deps.out('could not create the watcher window\n');
         return 1;

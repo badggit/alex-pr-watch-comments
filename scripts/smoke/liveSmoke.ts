@@ -201,7 +201,7 @@ const DEADLINE_CODE = 124;
 const CLEANUP_TMUX_TIMEOUT_MS = 30_000;
 const KILL_ATTEMPTS = 3;
 const KILL_RETRY_MS = 1000;
-const WATCHING = /^watching \S+ in window (@\d+)$/mu;
+const WATCHING = /^watching \S+ in tmux window \d+ \(prwc-\d+, (@\d+)\)$/mu;
 const TRUST_FAILURE =
     'trust dialog: trust .cache/smoke/clone in Claude Code (run claude once in it and choose Yes, I trust this folder), then rerun';
 // The first pane runs the background start and keeps its output and exit code in the work area.

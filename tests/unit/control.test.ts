@@ -11,6 +11,7 @@ import { launchReady, writeLaunchResult } from '../../src/launchChannel.ts';
 import { acquirePrLock, type PrLockFields } from '../../src/locks.ts';
 import { createProcessRunner, pidAlive, processStart } from '../../src/proc.ts';
 import { initState, runDir, watcherDir } from '../../src/stateStore.ts';
+import { NOT_IN_TMUX } from '../../src/tmuxControl.ts';
 import type { CliOptions, CommandRequest, CommandRunner, Env, LaunchResult, PrRef } from '../../src/types.ts';
 import {
     createFakeRunner,
@@ -223,7 +224,7 @@ function launchResult(token: string, result: LaunchResult['result'], message = '
 function windowResponder(report: (_token: string) => void, windowId = '@2', paneId = '%2'): FakeResponder {
     return (call) => {
         report(tokenOf(call));
-        return { stdout: `${windowId} ${paneId}\n` };
+        return { stdout: `${windowId} ${paneId} 1\n` };
     };
 }
 
@@ -410,7 +411,7 @@ await describe('background start', async () => {
     await test('without TMUX it exits 1 and creates no window', async (t) => {
         const setup = await makeSetup(t, { env: { TMUX: undefined } });
         assert.equal(await startBackground(setup), 1);
-        assert.ok(setup.deps.outText().includes('must run inside tmux'), printed(setup));
+        assert.ok(setup.deps.outText().includes(NOT_IN_TMUX), printed(setup));
         assert.equal(newWindows(setup).length, 0);
     });
 
@@ -448,7 +449,7 @@ await describe('background start', async () => {
         };
         const [code] = await Promise.all([startBackground(setup, ['--model', 'two words']), poller()]);
         assert.equal(code, 0, printed(setup));
-        assert.ok(setup.deps.outText().includes(`watching ${PR.prUrl} in window @2`), printed(setup));
+        assert.ok(setup.deps.outText().includes(`watching ${PR.prUrl} in tmux window 1 (prwc-12, @2)`), printed(setup));
         assert.deepEqual(readyAt, { newWindow: false, remainOnExit: false });
         const call = onlyWindow(setup);
         assert.ok(call.args.includes('-d'));
@@ -530,7 +531,10 @@ await describe('background start', async () => {
             })
         );
         assert.equal(await startBackground(setup), 1);
-        assert.ok(setup.deps.outText().includes('did not report its first poll; check window @2'), printed(setup));
+        assert.ok(
+            setup.deps.outText().includes('did not report its first poll; check tmux window 1 (prwc-12, @2)'),
+            printed(setup)
+        );
         assert.equal(fs.readFileSync(statusFile, 'utf8'), before);
         assert.deepEqual(launchFiles(setup), [`${other}.json`]);
     });
@@ -661,7 +665,7 @@ await describe('background start', async () => {
         assert.equal(await startBackground(setup), 1);
         assert.ok(performance.now() - started < 20_000, 'the start waited for the whole timeout');
         assert.ok(
-            setup.deps.outText().includes('watcher exited before its first poll; check window @2'),
+            setup.deps.outText().includes('watcher exited before its first poll; check tmux window 1 (prwc-12, @2)'),
             printed(setup)
         );
         assert.deepEqual(launchFiles(setup), []);
@@ -669,7 +673,7 @@ await describe('background start', async () => {
 
     await test('the result wait ends at its deadline although every pane query is slow', async (t) => {
         const setup = await makeSetup(t, { env: { PRWC_BG_TIMEOUT: '1' } });
-        setup.fake.respond('tmux', 'new-window', { stdout: '@2 %2\n' });
+        setup.fake.respond('tmux', 'new-window', { stdout: '@2 %2 1\n' });
         const timeouts: (number | undefined)[] = [];
         const slowListing = (request: CommandRequest): boolean => request.args.includes('list-panes');
         setup.deps.runner = slowCalls(setup.fake.runner, slowListing, 30_000, timeouts);
@@ -711,11 +715,11 @@ await describe('background start', async () => {
             if (created === 1) {
                 writeJson(path.join(watcherDir(setup.stateDir, PR_KEY), 'status.json'), STATUS);
                 assert.ok(writeLaunchResult(setup.stateDir, PR_KEY, launchResult(token, 'firstPoll')));
-                return { stdout: '@2 %2\n' };
+                return { stdout: '@2 %2 1\n' };
             }
             const holder = { ...launchResult(token, 'alreadyWatched', 'already watched'), pid: 4242, windowId: '@2' };
             assert.ok(writeLaunchResult(setup.stateDir, PR_KEY, holder));
-            return { stdout: '@3 %3\n' };
+            return { stdout: '@3 %3 2\n' };
         });
         const codes = await Promise.all([startBackground(setup), startBackground(setup)]);
         assert.deepEqual(codes, [0, 0], printed(setup));

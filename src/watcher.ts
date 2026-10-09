@@ -76,6 +76,7 @@ interface WatcherRuntime {
     waiting: WaitingSet | undefined;
     notice: NoticeState;
     recoveryProblem: RecoveryProblem | undefined;
+    firstPollLogged: boolean;
 }
 
 export interface TickHooks {
@@ -151,6 +152,7 @@ export function createRuntime(launchToken: string, windowId: string): WatcherRun
         waiting: undefined,
         notice: initialNoticeState(),
         recoveryProblem: undefined,
+        firstPollLogged: false,
     };
 }
 
@@ -596,6 +598,10 @@ async function pollTick(
         return 'stopped';
     }
     publishLaunch(deps.log, stateDir, pr.prKey, rt, 'firstPoll', 'first poll succeeded');
+    if (!rt.firstPollLogged) {
+        rt.firstPollLogged = true;
+        deps.log.info('first poll done, the pull request is open; waiting for inline comments approved with a rocket');
+    }
     if (rt.inflightRunId !== undefined && runIsRetained(session, rt.inflightRunId)) {
         await countWaiting(deps, session, rt, rt.inflightRunId, { poll, lookup });
         return stop.aborted ? 'stopped' : 'ok';
@@ -787,6 +793,18 @@ function releaseOwnLock(deps: Deps, session: Session): void {
     }
 }
 
+// Without these lines a watcher pane stays empty until the first event, which looks like a hung start.
+function announceStart(deps: Deps, session: Session): void {
+    const { pr } = session;
+    const mode = session.worktree === undefined ? 'in place' : 'watch worktree';
+    deps.log.info(`watching ${pr.prUrl}`);
+    deps.log.info(`working tree: ${safeText(session.dirCanon)} (${mode})`);
+    deps.log.info(
+        `polling every ${session.interval} s; approve an inline review comment with a rocket reaction to hand it to Claude`
+    );
+    deps.log.info(`stop: press Ctrl-C in this pane, or run alex-pr-watch-comments --stop ${pr.prUrl}`);
+}
+
 // Everything after the PR lock was acquired: the lock is released on every exit path, whatever the last launch
 // publication does; a running worker and its worktree lock are always left alone.
 async function watchLocked(deps: Deps, session: Session, rt: WatcherRuntime, stop: AbortSignal): Promise<number> {
@@ -801,6 +819,7 @@ async function watchLocked(deps: Deps, session: Session, rt: WatcherRuntime, sto
             hint: '',
         };
         writeStatus(stateDir, pr.prKey, { ...reset, ...NO_RUN, since: now }, now);
+        announceStart(deps, session);
         const reconciled = await reconcile(deps, session, stop);
         rt.inflightRunId = reconciled.inflightRunId;
         rt.recoveryProblem = reconciled.problem;

@@ -401,9 +401,17 @@ await describe('background start on a real isolated tmux server', async () => {
         stubRespond(testEnv.stubDir, 'gh', 'PrwcLookup', { json: lookupJson() });
         const started = await runEntry(fixture, startArgs(fixture), callerEnv(fixture));
         assert.equal(started.code, 0, both(started));
-        assert.ok(started.stdout.includes(`watching ${PR_URL} in window @`), both(started));
+        assert.ok(started.stdout.includes(`watching ${PR_URL} in tmux window `), both(started));
         const window = await onlyWatcherWindow(fixture);
         assert.equal(window.paneDead, '0');
+        assert.ok(started.stdout.includes(`(prwc-12, ${window.windowId})`), both(started));
+        const name = await tmuxText(fixture, ['display-message', '-p', '-t', window.windowId, '#{window_name}']);
+        assert.equal(name.trim(), 'prwc-12');
+        const announced = await waitUntil(10_000, async () => {
+            const text = await paneText(fixture, window.windowId);
+            return text.includes(`info watching ${PR_URL}`) && text.includes('first poll done');
+        });
+        assert.ok(announced, await paneText(fixture, window.windowId));
         const again = await runEntry(fixture, startArgs(fixture), callerEnv(fixture));
         assert.equal(again.code, 0, both(again));
         assert.ok(again.stdout.includes('already watched'), both(again));
