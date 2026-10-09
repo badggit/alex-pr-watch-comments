@@ -9,7 +9,7 @@ import {
     killDeadWatcherPane,
     killPane,
     markPaneDone,
-    newWatcherWindow,
+    newWatcherSession,
     paneForRun,
     paneState,
     paneWatcherTag,
@@ -242,22 +242,31 @@ await describe('tmux control on a real isolated server', async () => {
         assert.deepEqual(three.at(-1), [panes[2], '0', '25', '200']);
     });
 
-    await test('newWatcherWindow passes env items, keeps the pane and tags the window', async (t) => {
+    await test('newWatcherSession passes env items, keeps the pane and tags the window', async (t) => {
         const fixture = await setUp(t);
         const outFile = path.join(fixture.testEnv.root, 'foo');
         const customPath = `${fixture.testEnv.root}/custom-bin:/usr/bin:/bin`;
         const script = `echo "$FOO" > ${shQuote(outFile)}; echo "$PATH" >> ${shQuote(outFile)}; exec sleep 30`;
-        const result = await newWatcherWindow(
+        const result = await newWatcherSession(
             fixture.deps,
             fixture.tmuxPath,
-            fixture.tmux,
-            PR_KEY,
+            fixture.tmux.socket,
+            { prKey: PR_KEY, name: 'prwc-r-12' },
             ['FOO=bar', `PATH=${customPath}`],
             ['/bin/sh', '-c', script]
         );
         assert.ok(result);
-        assert.notEqual(result.windowId, fixture.tmux.windowId);
+        assert.notEqual(result.sessionId, fixture.tmux.sessionId);
         assert.deepEqual(await readLines(outFile, 2), ['bar', customPath]);
+        const named = await tmuxOn(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, [
+            'display-message',
+            '-p',
+            '-t',
+            result.paneId,
+            '#{session_id} #{session_name} #{window_id}',
+        ]);
+        assert.equal(named?.stdout.trim(), `${result.sessionId} prwc-r-12 ${result.windowId}`);
+        assert.equal(result.sessionName, 'prwc-r-12');
         const remain = await tmuxOn(fixture.deps, fixture.tmuxPath, fixture.tmux.socket, [
             'show-options',
             '-p',
@@ -273,12 +282,33 @@ await describe('tmux control on a real isolated server', async () => {
         assert.equal(await paneWatcherTag(fixture.deps, fixture.tmuxPath, socket, fixture.tmux.pane), undefined);
     });
 
+    await test('newWatcherSession takes over the name of a session whose watcher pane died', async (t) => {
+        const fixture = await setUp(t);
+        const { deps, tmuxPath } = fixture;
+        const socket = fixture.tmux.socket;
+        const target = { prKey: PR_KEY, name: 'prwc-r-12' };
+        const first = await newWatcherSession(deps, tmuxPath, socket, target, [], ['sleep', '30']);
+        assert.ok(first);
+        const pid = await tmuxOn(deps, tmuxPath, socket, ['display-message', '-p', '-t', first.paneId, '#{pane_pid}']);
+        assert.equal(pid?.code, 0);
+        process.kill(Number.parseInt(pid.stdout, 10), 'SIGKILL');
+        assert.ok(
+            await waitUntil(WAIT_MS, async () => (await paneState(deps, tmuxPath, socket, first.paneId)) === 'dead')
+        );
+        const second = await newWatcherSession(deps, tmuxPath, socket, target, [], ['sleep', '30']);
+        assert.ok(second);
+        assert.equal(second.sessionName, 'prwc-r-12');
+        assert.notEqual(second.sessionId, first.sessionId);
+        const third = await newWatcherSession(deps, tmuxPath, socket, target, [], ['sleep', '30']);
+        assert.equal(third?.sessionName, 'prwc-r-12-2');
+    });
+
     await test('killDeadWatcherPane kills only a dead pane that carries the watcher tag', async (t) => {
         const fixture = await setUp(t);
         const { deps, tmuxPath } = fixture;
         const socket = fixture.tmux.socket;
         const open = async (prKey: string): Promise<string> => {
-            const created = await newWatcherWindow(deps, tmuxPath, fixture.tmux, prKey, [], ['sleep', '30']);
+            const created = await newWatcherSession(deps, tmuxPath, socket, { prKey, name: 'w' }, [], ['sleep', '30']);
             assert.ok(created);
             return created.paneId;
         };

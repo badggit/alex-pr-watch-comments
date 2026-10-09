@@ -135,6 +135,15 @@ await describe('parseArgs', async () => {
         assert.equal(okOptions([PR_URL, '--background', '--worktree']).inPlace, false);
     });
 
+    await test('--no-attach turns off the terminal tab of a background start', () => {
+        assert.equal(okOptions([PR_URL, '--background']).attach, true);
+        assert.equal(okOptions([PR_URL, '--background', '--no-attach']).attach, false);
+        assert.deepEqual(parseArgs([PR_URL, '--no-attach'], CWD), {
+            kind: 'error',
+            message: '--no-attach needs --background',
+        });
+    });
+
     await test('repeating the same working-tree option keeps that mode', () => {
         assert.equal(okOptions([PR_URL]).inPlace, true);
         assert.equal(okOptions([PR_URL, '--in-place', '--in-place']).inPlace, true);

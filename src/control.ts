@@ -14,6 +14,7 @@ import {
     GH_STRIP_VARS,
     PS_PATH,
 } from './constants.ts';
+import { openGhosttyTab } from './ghosttyTab.ts';
 import { clearLaunch, markLaunchReady, readLaunchResult } from './launchChannel.ts';
 import { newLockToken, readPrLockOwner } from './locks.ts';
 import { normalizeCallerPath, preflight, resolveExecutable } from './preflight.ts';
@@ -21,12 +22,16 @@ import { pidAlive, signalIfSame } from './proc.ts';
 import { listRunIds, readRecord, readStatus, type RecordRead } from './runStore.ts';
 import { initState, resolveStateDir, runDir, watcherDir, type InitStateResult } from './stateStore.ts';
 import {
+    ensureSocketDir,
     killDeadWatcherPane,
-    newWatcherWindow,
+    newWatcherSession,
     paneState,
+    parseTmuxEnv,
+    serverSocket,
     tmuxOn,
     type PaneState,
     type TmuxDeps,
+    watcherSessionName,
     type WatcherWindow,
 } from './tmuxControl.ts';
 import type { CliOptions, CommandRunner, Deps, Env, LaunchResult, PrLockOwner, Session } from './types.ts';
@@ -189,23 +194,57 @@ async function awaitLaunchResult(
     }
 }
 
+// How the owner reaches the watcher's session: switch to it from a tmux client, or attach to it from any terminal;
+// -S is shown only for a server other than the default one.
+function reachHint(deps: Deps, session: Session, window: WatcherWindow): string {
+    if (parseTmuxEnv(deps.env) !== undefined) {
+        return `switch to it: tmux switch-client -t ${window.sessionName}`;
+    }
+    const isDefault = session.tmux.socket === serverSocket({ ...deps.env, TMUX: undefined }, process.getuid?.() ?? 0);
+    const server = isDefault ? '' : `-S ${session.tmux.socket} `;
+    return `attach to it: tmux ${server}attach -t ${window.sessionName}`;
+}
+
+async function attachLine(deps: Deps, session: Session, window: WatcherWindow, attach: boolean): Promise<string> {
+    const hint = reachHint(deps, session, window);
+    if (!attach) {
+        return hint;
+    }
+    const target = { tmuxPath: session.tools.tmux, socket: session.tmux.socket, sessionName: window.sessionName };
+    const host = { platform: process.platform, home: deps.env.HOME };
+    switch (await openGhosttyTab(deps.runner, target, host)) {
+        case 'opened': {
+            return 'opened a Ghostty tab attached to it';
+        }
+        case 'unavailable': {
+            return hint;
+        }
+        case 'failed': {
+            return `could not open a Ghostty tab (Ghostty 1.3 or newer with AppleScript is needed); ${hint}`;
+        }
+    }
+}
+
 async function reportLaunch(
     deps: Deps,
     session: Session,
     window: WatcherWindow,
-    result: LaunchOutcome
+    result: LaunchOutcome,
+    attach: boolean
 ): Promise<number> {
+    const label = `tmux session ${window.sessionName}`;
     if (result === undefined) {
-        deps.out(`watcher did not report its first poll; check window ${window.windowId}\n`);
+        deps.out(`watcher did not report its first poll; check ${label} (${reachHint(deps, session, window)})\n`);
         return 1;
     }
     if (result === 'exited') {
-        deps.out(`watcher exited before its first poll; check window ${window.windowId}\n`);
+        deps.out(`watcher exited before its first poll; check ${label} (${reachHint(deps, session, window)})\n`);
         return 1;
     }
     switch (result.result) {
         case 'firstPoll': {
-            deps.out(`watching ${session.pr.prUrl} in window ${window.windowId}\n`);
+            deps.out(`watching ${session.pr.prUrl} in ${label}\n`);
+            deps.out(`${await attachLine(deps, session, window, attach)}\n`);
             return 0;
         }
         case 'fatal': {
@@ -215,12 +254,12 @@ async function reportLaunch(
         case 'alreadyWatched': {
             deps.out(alreadyWatched(result.pid, result.windowId));
             const killed = await tmuxOn(queryDeps(deps), session.tools.tmux, session.tmux.socket, [
-                'kill-window',
+                'kill-session',
                 '-t',
-                window.windowId,
+                window.sessionId,
             ]);
             if (killed?.code !== 0) {
-                deps.log.warn(`could not kill the unused watcher window ${window.windowId}`);
+                deps.log.warn(`could not kill the unused watcher session ${window.sessionName}`);
             }
             return 0;
         }
@@ -228,19 +267,33 @@ async function reportLaunch(
 }
 
 // The watcher waits for the ready marker, which is written only once the window is tagged and kept on exit, so even
-// an immediate fatal exit stays readable in the window. The tmux client never sees a token variable.
-async function launchWatcher(deps: Deps, session: Session, token: string, entry: BackgroundEntry): Promise<number> {
+// an immediate fatal exit stays readable in the session. The tmux client never sees a token variable.
+async function launchWatcher(
+    deps: Deps,
+    session: Session,
+    token: string,
+    entry: BackgroundEntry,
+    attach: boolean
+): Promise<number> {
     const { stateDir, pr, tools, tmux } = session;
+    try {
+        ensureSocketDir(tmux.socket);
+    } catch (error) {
+        deps.out(`could not create the tmux socket directory: ${safeText(errorCode(error) ?? 'unknown error')}\n`);
+        return 1;
+    }
     const tmuxDeps: TmuxDeps = { runner: deps.runner, env: withoutStripped(deps.env) };
     const items = windowEnvItems(deps.env, session, token);
-    const window = await newWatcherWindow(tmuxDeps, tools.tmux, tmux, pr.prKey, items, watcherCommand(session, entry));
+    const target = { prKey: pr.prKey, name: watcherSessionName(pr.repo, pr.number) };
+    const command = watcherCommand(session, entry);
+    const window = await newWatcherSession(tmuxDeps, tools.tmux, tmux.socket, target, items, command);
     if (window === undefined) {
-        deps.out('could not create the watcher window\n');
+        deps.out('could not create the watcher session\n');
         return 1;
     }
     markLaunchReady(stateDir, pr.prKey, token);
     const result = await awaitLaunchResult(deps, session, token, window);
-    return await reportLaunch(deps, session, window, result);
+    return await reportLaunch(deps, session, window, result, attach);
 }
 
 function clearOwnLaunch(deps: Deps, session: Session, token: string): void {
@@ -251,7 +304,7 @@ function clearOwnLaunch(deps: Deps, session: Session, token: string): void {
     }
 }
 
-// Starts the watcher in a detached tmux window of the caller's session and reports its first poll. Each start talks
+// Starts the watcher in a new detached tmux session and reports its first poll. Each start talks
 // to its own watcher only through its own launch token's files and removes only those.
 export async function runBackground(
     deps: Deps,
@@ -277,7 +330,7 @@ export async function runBackground(
     }
     const token = newLockToken(deps.nowSeconds());
     try {
-        return await launchWatcher(deps, session, token, entry);
+        return await launchWatcher(deps, session, token, entry, options.attach);
     } finally {
         clearOwnLaunch(deps, session, token);
     }

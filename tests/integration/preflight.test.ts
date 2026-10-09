@@ -16,6 +16,7 @@ import {
 import { createProcessRunner } from '../../src/proc.ts';
 import { createRun } from '../../src/runStore.ts';
 import { initState, worktreeKey } from '../../src/stateStore.ts';
+import { NOT_IN_TMUX } from '../../src/tmuxControl.ts';
 import type { CliOptions, Env, PrRef, Session } from '../../src/types.ts';
 import { createFakeRunner, type FakeRunner } from '../support/fakeRunner.ts';
 import { gitSync, makePrClone, offlineGitRunner } from '../support/gitRepo.ts';
@@ -101,6 +102,7 @@ function cliOptions(dir: string, claude?: string, pr = PR, inPlace = true): CliO
         batchMax: 5,
         once: false,
         inPlace,
+        attach: false,
     };
 }
 
@@ -476,14 +478,14 @@ await describe('preflight', async () => {
     await test('refuses outside tmux', async (t) => {
         const setup = await setUp(t);
         const { result } = await runPreflight(setup, { env: { ...setup.testEnv.env, TMUX: undefined } });
-        assert.equal(reasonOf(result), 'must run inside tmux');
+        assert.equal(reasonOf(result), NOT_IN_TMUX);
         assert.equal(setup.fake.calls('gh').length, 0);
     });
 
     await test('the tmux check runs before the state directory check', async (t) => {
         const setup = await setUp(t);
         const env = { ...setup.testEnv.env, TMUX: undefined, PRWC_STATE_DIR: `${setup.testEnv.root}/state dir` };
-        assert.equal(await refusalOf(setup, { env }), 'must run inside tmux');
+        assert.equal(await refusalOf(setup, { env }), NOT_IN_TMUX);
     });
 
     await test('refuses when gh is not authenticated', async (t) => {

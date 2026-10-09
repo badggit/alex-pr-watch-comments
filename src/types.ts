@@ -63,6 +63,8 @@ export interface CliOptions {
     batchMax: number;
     once: boolean;
     inPlace: boolean;
+    // Background start only: open a terminal tab attached to the watcher's session.
+    attach: boolean;
 }
 
 // resetAt is in epoch seconds.

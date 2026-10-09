@@ -2,13 +2,13 @@
 
 Turn inline review comments on a GitHub pull request into commits, hands-free.
 
-Leave comments on lines of the PR diff, approve them with a `rocket` reaction, and a watcher picks them up. It opens a new tmux pane, starts [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) in your project and gives it every approved comment to resolve, one after another. For each comment Claude fixes the code if needed, commits and pushes to the PR branch, replies in the comment thread and marks the comment as done.
+Leave comments on lines of the PR diff, approve them with a `rocket` reaction, and a watcher picks them up. It runs in a tmux session of its own, opens a new tmux pane there, starts [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) in your project and gives it every approved comment to resolve, one after another. For each comment Claude fixes the code if needed, commits and pushes to the PR branch, replies in the comment thread and marks the comment as done.
 
 The plugin also has a small helper for parallel work: the `alex-worktree-new` skill creates a git worktree next to your clone, with copy-on-write clones of the dependency folders and links to your other ignored files, and switches the Claude Code session into it. See [New worktree](#new-worktree).
 
 ## How it works
 
-1. You start the watcher for one PR from a tmux session, for a local clone of the PR's repository with the PR branch checked out. By default it works in that clone. Pass `--worktree` to use a separate git worktree next to the clone and keep your clone available for other work. See [Watch worktree](#watch-worktree).
+1. You start the watcher for one PR, for a local clone of the PR's repository with the PR branch checked out. With `--background` (and from the skill) it starts in a new detached tmux session named `prwc-REPO-NUMBER` and, on macOS with [Ghostty](https://ghostty.org), opens a Ghostty tab attached to that session; this works from inside or outside tmux. Without `--background` it runs in the current tmux pane. By default it works in that clone. Pass `--worktree` to use a separate git worktree next to the clone and keep your clone available for other work. See [Watch worktree](#watch-worktree).
 2. Every 2 minutes (`--interval`, default 120 seconds) the watcher reads the PR's inline review threads with `gh`.
 3. A comment is picked up when it carries a `rocket` reaction added by you, the account `gh` is logged in as. Only inline review comments (comments on the diff) count; general PR comments (the "Conversation" tab) are ignored. All comments approved at that moment go into one run as a batch, oldest rocket first, at most `--batch-max` (default 5) of them; the rest wait for the next batch. One run at a time.
 4. The watcher checks its worktree, saves the text of every approved comment, replaces each of your `rocket` reactions with `eyes`, opens a new pane in the watcher's window and starts `claude` there. The task is passed as claude's initial prompt on the command line; nothing is typed into the pane. Claude first checks that the worktree is still on the PR head branch and reads the project instructions (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `AGENTS.local.md` in the worktree, where they exist; the run's own rules win over them). Then it works through the comments in order, one at a time:
@@ -23,7 +23,7 @@ The plugin also has a small helper for parallel work: the `alex-worktree-new` sk
 
 ### Pane layout
 
-The panes of the watcher's window are laid out as a grid in launch order, columns first: 2 panes sit side by side, 3 are two on top and one full-width below, 4 make a 2x2 grid, 5 are three on top and two below, and so on. The grid covers every pane of the window, so when the watcher runs in a window you also use, your own panes are rearranged too. When a window is too small for one more pane, the worker opens in a new window. When the finished panes beyond `--keep-panes` are closed, the grid is laid out again. A worker pane counts as finished only after Claude has exited; the limit never closes a retained Claude session, including with `--keep-panes 0`.
+The panes of the watcher's window are laid out as a grid in launch order, columns first: 2 panes sit side by side, 3 are two on top and one full-width below, 4 make a 2x2 grid, 5 are three on top and two below, and so on. The grid covers every pane of the window. A `--background` watcher has its own session, so your windows are never touched; a foreground watcher shares the window you started it in, so your own panes there are rearranged too. When a window is too small for one more pane, the worker opens in a new window. When the finished panes beyond `--keep-panes` are closed, the grid is laid out again. A worker pane counts as finished only after Claude has exited; the limit never closes a retained Claude session, including with `--keep-panes 0`.
 
 ### Reactions
 
@@ -51,7 +51,8 @@ If your Claude Code settings define their own Stop hooks, they may make Claude c
 ## Requirements
 
 - Node.js 22.18 or newer. On the 23 line, 23.6 or newer is needed. The plugin runs its TypeScript directly with Node's built-in type stripping: there is no build step and no `npm install`. The launcher accepts only release versions (`MAJOR.MINOR.PATCH`, no pre-release strings).
-- [tmux](https://github.com/tmux/tmux) 3.0 or newer. The watcher runs inside a tmux session, because it opens new panes there.
+- [tmux](https://github.com/tmux/tmux) 3.2 or newer, because the watcher opens new panes there. A `--background` start (the skill uses it) creates its own session: inside tmux on the server you run in, outside tmux on the default server (`TMUX_TMPDIR`, else `/tmp`), which it starts when none runs. A foreground watcher must run in a tmux pane; outside tmux it refuses with a hint to add `--background`, and exits 1.
+- Optional, macOS only: [Ghostty](https://ghostty.org) 1.3 or newer with AppleScript enabled (the default). After a `--background` start the watcher opens a Ghostty tab (a window when Ghostty has none) running `tmux attach` to its session. macOS asks once to allow the terminal app to control Ghostty. Without Ghostty, or with `--no-attach`, the start prints the command to attach instead.
 - `git` 2.29 or newer, and a local clone of the repository with the PR branch checked out. With `--worktree`, the PR branch must not be checked out in that clone, see [Watch worktree](#watch-worktree).
 - [GitHub CLI](https://cli.github.com/) (`gh`), logged in to the PR's host with `gh auth login` (for GitHub Enterprise Server: `gh auth login --hostname HOST`) and with push access to the PR branch.
 - [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) (`claude`) on your `PATH`, or given with `--claude`.
@@ -90,7 +91,7 @@ Run Claude Code inside tmux, in the project directory, and use the skill:
 
 The skill is a thin wrapper. It runs exactly one command and shows its output:
 
-- a PR URL runs `alex-pr-watch-comments PR_URL --background` from the current project directory;
+- a PR URL runs `alex-pr-watch-comments PR_URL --background` from the current project directory, so the skill works with or without tmux around Claude Code;
 - a PR URL followed by `--worktree` runs `alex-pr-watch-comments PR_URL --background --worktree`;
 - `list` runs `alex-pr-watch-comments --list`;
 - `stop PR_URL` runs `alex-pr-watch-comments --stop PR_URL`.
@@ -148,7 +149,7 @@ Common forms, with the symlink from above:
 # Watch in the foreground of the current tmux pane; Ctrl-C stops the watcher.
 alex-pr-watch-comments https://github.com/OWNER/REPO/pull/123
 
-# Watch in a detached window of the current tmux session.
+# Watch in a new detached tmux session named prwc-REPO-123 and open a Ghostty tab attached to it (macOS).
 alex-pr-watch-comments https://github.com/OWNER/REPO/pull/123 --background --dir /path/to/project
 
 # Watch in a separate git worktree.
@@ -181,7 +182,7 @@ $ cd /path/to/app && alex-pr-watch-comments new-worktree --task abc-123
 
 ```text
 alex-pr-watch-comments <PR URL> [options]               watch in the foreground of the current tmux pane
-alex-pr-watch-comments <PR URL> --background [options]  watch in a detached tmux window
+alex-pr-watch-comments <PR URL> --background [options]  watch in a new detached tmux session
 alex-pr-watch-comments --list                           list watchers and runs
 alex-pr-watch-comments --stop <PR URL>                  stop the watcher for a PR (a running worker is kept)
 alex-pr-watch-comments new-worktree NAME [--branch BRANCH] [--base REF]
@@ -204,7 +205,7 @@ The options in the table below are for the watcher. `new-worktree` takes only it
 
 | Option               | Meaning                                                                                                                                                                                       |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--background`       | Start the watcher in a detached window of the current tmux session and return once its first poll succeeded. Cannot be combined with `--list`, `--stop` or `--once`.                          |
+| `--background`       | Start the watcher in a new detached tmux session named `prwc-REPO-NUMBER` (a taken name gets a `-2` to `-9` suffix) and return once its first poll succeeded. Works inside and outside tmux. Cannot be combined with `--list`, `--stop` or `--once`. |
 | `--list`             | List watchers and runs. Takes no PR URL. Needs no tmux.                                                                                                                                       |
 | `--stop PR_URL`      | Stop the watcher of a PR. Needs no tmux session of its own.                                                                                                                                   |
 | `--dir PATH`         | Your clone of the repository, default: the current directory.                                                                                                                                 |
@@ -215,6 +216,7 @@ The options in the table below are for the watcher. `new-worktree` takes only it
 | `--claude-arg ARG`   | One extra argument for claude, repeatable, passed literally as its own argument (never through a shell). A value cannot contain a newline. An argument ending in `;` is passed literally too. |
 | `--keep-panes N`     | Worker panes to keep after Claude exits, 0 or more, default 5. Older finished panes are closed; live retained sessions are kept.                                                              |
 | `--batch-max N`      | Approved comments one run takes at most, 1 to 50, default 5. The oldest rockets go first; the rest wait for the next batch.                                                                   |
+| `--no-attach`        | With `--background`: do not open a Ghostty tab attached to the session; print how to attach instead. |
 | `--once`             | One polling pass, then exit. Not with `--background`.                                                                                                                                         |
 | `--help`             | Show the usage text.                                                                                                                                                                          |
 
@@ -243,15 +245,15 @@ All values are whole seconds unless noted. A value that is not a positive whole 
 | `PRWC_STOP_WAIT`     | 10                                      | Time `--stop` waits for the watcher to exit.                                                                            |
 | `PRWC_NODE`          | `node` on `PATH`                        | Node.js executable used by the launcher (a path, not seconds).                                                          |
 
-`--background` passes the effective value of every variable above except `PRWC_STOP_WAIT` and `PRWC_NODE` to the watcher window, defaults included, so a stale value in the tmux server environment never wins.
+`--background` passes the effective value of every variable above except `PRWC_STOP_WAIT` and `PRWC_NODE` to the watcher session, defaults included, so a stale value in the tmux server environment never wins.
 
 ### Output and exit codes
 
 | Command            | Output                                                                                                                                                                                                                                                                                                                                 | Exit code                                                                                                                                               |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--background`     | `watching URL in window @N`                                                                                                                                                                                                                                                                                                            | 0                                                                                                                                                       |
+| `--background`     | `watching URL in tmux session NAME`, then one of `opened a Ghostty tab attached to it`, `switch to it: tmux switch-client -t NAME` (inside tmux), `attach to it: tmux attach -t NAME` (outside tmux; with `-S SOCKET` for a server other than the default one), or `could not open a Ghostty tab (...); ` followed by one of the last two | 0 |
 | `--background`     | `already watched by pid PID (window @N)`                                                                                                                                                                                                                                                                                               | 0                                                                                                                                                       |
-| `--background`     | a start-up refusal, a state directory refusal, `could not create the watcher window`, `watcher failed: MESSAGE`, `watcher did not report its first poll; check window @N` or `watcher exited before its first poll; check window @N`                                                                                                   | 1                                                                                                                                                       |
+| `--background`     | a start-up refusal, a state directory refusal, `could not create the tmux socket directory: CODE`, `could not create the watcher session`, `watcher failed: MESSAGE`, `watcher did not report its first poll; check tmux session NAME (HINT)` or `watcher exited before its first poll; check tmux session NAME (HINT)`, where HINT is the switch or attach command above | 1 |
 | `--list`           | one line per watcher and per run (a run removed while listing is skipped), `unreadable record PATH (format N)` for a run record it cannot read, or `no watchers`; `unsupported state format N` for a state directory of another format                                                                                                 | 0 (1 only for an unsafe state directory)                                                                                                                |
 | `--stop`           | `watcher pid PID was not running` if the watcher was already gone, `left in place: run RUN_ID state=STATE` for each run of the PR and `unreadable record PATH (format N)` for each unreadable run record, then `stopped watcher for URL`                                                                                               | 0                                                                                                                                                       |
 | `--stop`           | `unsafe state directory: ...`, `unsupported state format N`, `not watched: URL`, `invalid lock socket`, `watcher pid PID belongs to another process; not signalled`, `could not verify watcher pid PID; not signalled`, `watcher pid PID did not exit within N seconds` or `the PR lock of URL has an unreadable owner; not signalled` | 1                                                                                                                                                       |
@@ -264,9 +266,9 @@ All values are whole seconds unless noted. A value that is not a positive whole 
 | any                | `alex-pr-watch-comments: MESSAGE` plus the usage text for a wrong option or argument                                                                                                                                                                                                                                                   | 2                                                                                                                                                       |
 | any                | `alex-pr-watch-comments: MESSAGE` for an unexpected error                                                                                                                                                                                                                                                                              | 1                                                                                                                                                       |
 
-When a `--background` start fails after the window was created, the window stays open so you can read why.
+When a `--background` start fails after the session was created, the session stays open so you can read why.
 
-`--stop` sends the watcher a TERM signal only after it checked that the recorded process is still the same one (its start time matches). It never signals a process it could not verify, never kills a running worker or its pane, and never touches the clone or a run record. If the stopped watcher ran in a background window, that window is closed once its pane has exited.
+`--stop` sends the watcher a TERM signal only after it checked that the recorded process is still the same one (its start time matches). It never signals a process it could not verify, never kills a running worker or its pane, and never touches the clone or a run record. If the stopped watcher ran in a background session, its pane is closed once it has exited; the session ends with its last pane.
 
 ## Watch worktree
 
@@ -352,9 +354,9 @@ The worker runs your normal `claude`, with your settings and your permission rul
 ## GitHub host and authentication
 
 - alex-pr-watch-comments works with github.com and with GitHub Enterprise Server. The host comes from the PR URL: every GitHub call of the watcher and of the worker passes `--hostname HOST`, and a `GH_HOST` set to any other host is refused at start.
-- alex-pr-watch-comments never uses `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. They are removed from every process the watcher starts and from the worker's environment, including any that a tmux server still holds from earlier; a `--background` window gets them as empty values, and the watcher drops those at start. So the watcher and the worker panes always use the gh login stored for the PR's host (`gh auth login`, or `gh auth login --hostname HOST` for GitHub Enterprise Server). `GH_REPO` is removed the same way.
+- alex-pr-watch-comments never uses `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. They are removed from every process the watcher starts and from the worker's environment, including any that a tmux server still holds from earlier; a `--background` session gets them as empty values, and the watcher drops those at start. So the watcher and the worker panes always use the gh login stored for the PR's host (`gh auth login`, or `gh auth login --hostname HOST` for GitHub Enterprise Server). `GH_REPO` is removed the same way.
 - When one of these variables is set, a foreground or a background start only warns, naming the variable, that it is ignored. A token variable never blocks a start. When gh is not logged in, the start-up refusal names the ignored variable too, so the fix is `gh auth login` for that host.
-- Your effective gh config directory (`GH_CONFIG_DIR`, else `XDG_CONFIG_HOME/gh`, else `~/.config/gh`) is passed to the watcher window and to every worker pane, together with `GH_HOST=HOST` of the PR.
+- Your effective gh config directory (`GH_CONFIG_DIR`, else `XDG_CONFIG_HOME/gh`, else `~/.config/gh`) is passed to the watcher session and to every worker pane, together with `GH_HOST=HOST` of the PR.
 
 ## Safety
 
@@ -400,7 +402,7 @@ The watcher keeps locks, run records and the per-run files in the state director
 
 The state directory must be owned by you with mode 700, with no group- or world-writable parent (the sticky `/tmp` is fine); otherwise every command refuses with `unsafe state directory` and a fix hint. On Linux systems with user-private groups, `~/.local` is often mode 775; fix it with `chmod go-w ~/.local`, or set `PRWC_STATE_DIR` to a directory elsewhere.
 
-The watcher logs to its own pane (the foreground pane or the background window), one line per event with a UTC time. Run notices, such as a run that needs attention, also appear in the tmux status line.
+The watcher logs to its own pane (the foreground pane or the first pane of the background session), one line per event with a UTC time. At start it prints the PR URL, the working tree, the polling interval and how to stop it, and after its first successful poll a line that it is waiting for approved comments. Run notices, such as a run that needs attention, also appear in the tmux status line.
 
 ### Watcher and run states
 
