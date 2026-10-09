@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 import { gridLayout } from './paneGrid.ts';
 import type { CommandResult, Deps, Env, TmuxContext } from './types.ts';
 import { isSafeSocketPath, isUintString, safeText } from './validate.ts';
@@ -20,16 +23,16 @@ export interface WorkerPane {
 }
 
 export interface WatcherWindow {
+    sessionId: string;
+    sessionName: string;
     windowId: string;
     paneId: string;
-    // The number the tmux status line shows for the window.
-    index: string;
 }
 
 export type PaneState = 'alive' | 'dead' | 'missing';
 
 const PANE_PID_FORMAT = '#{pane_id} #{pane_pid}';
-const WINDOW_PANE_FORMAT = '#{window_id} #{pane_id} #{window_index}';
+const SESSION_FORMAT = '#{session_id} #{window_id} #{pane_id}';
 const PANE_SIZE_FORMAT = '#{pane_id} #{pane_width} #{pane_height}';
 const WINDOW_SIZE_FORMAT = '#{window_width} #{window_height}';
 // tmux 3.4-3.6 says 'no space for new pane'; 3.7+ says 'no space for a new pane' (3.7 adds a 'size or position' prefix).
@@ -39,8 +42,12 @@ const WINDOW_ID = /^@\d+$/u;
 const SESSION_ID = /^\$\d+$/u;
 const PATH_ITEM = 'PATH=';
 export const NOT_IN_TMUX =
-    'not running inside tmux: the watcher opens Claude Code in new tmux panes, so start a tmux session first ' +
-    '(for example: tmux new -s review), then run this command or the skill from a pane of that session';
+    'not running inside tmux: a foreground watcher runs in the current tmux pane; add --background to start it in ' +
+    'its own tmux session, or run this command from a tmux pane';
+// A fixed size for the detached session until a client attaches; the 80x24 default fits too few worker panes.
+const SESSION_WIDTH = '200';
+const SESSION_HEIGHT = '50';
+const MAX_NAME_ATTEMPTS = 9;
 
 // tmux format-expands some arguments (the split-window start directory); doubling # keeps the value literal.
 export function tmuxLiteral(value: string): string {
@@ -351,65 +358,26 @@ export async function capDonePanes(
     }
 }
 
-// The name a background watcher window shows in the tmux status line.
-export function watcherWindowName(prNumber: number): string {
-    return `prwc-${prNumber}`;
+// tmux turns . and : in a session name into _, so they are replaced up front to keep the name as reported.
+export function watcherSessionName(repo: string, prNumber: number): string {
+    return `prwc-${repo.replaceAll(/[^\w-]/gu, '_')}-${prNumber}`;
 }
 
-// The window is named so it can be found in the status line; a window created with -n keeps that name, as tmux
-// turns automatic-rename off for it. The started command must wait for its launch-ready marker: it may not act
-// before both options are set.
-export async function newWatcherWindow(
-    deps: TmuxDeps,
-    tmuxPath: string,
-    tmux: TmuxContext,
-    target: { prKey: string; name: string },
-    envItems: readonly string[],
-    command: readonly string[]
-): Promise<WatcherWindow | undefined> {
-    const { prKey, name } = target;
-    const created = await tmuxOn(
-        deps,
-        tmuxPath,
-        tmux.socket,
-        [
-            'new-window',
-            '-d',
-            '-P',
-            '-F',
-            WINDOW_PANE_FORMAT,
-            '-n',
-            name,
-            '-t',
-            `${tmux.sessionId}:`,
-            ...envArgs(envItems),
-            ...command,
-        ],
-        clientEnvFor(deps.env, envItems)
-    );
-    const [windowId = '', paneId = '', index = '', ...rest] =
-        created?.code === 0 ? created.stdout.trim().split(' ') : [];
-    if (rest.length > 0 || !WINDOW_ID.test(windowId) || !PANE_ID.test(paneId) || !isUintString(index)) {
-        return;
+// The socket of the tmux server the caller runs in, or else of the default server that a plain tmux command
+// would use (the server need not be running yet).
+export function serverSocket(env: Env, uid: number): string {
+    const parsed = parseTmuxEnv(env);
+    if (parsed !== undefined) {
+        return parsed.socket;
     }
-    const tagged = await tmuxOn(deps, tmuxPath, tmux.socket, [
-        'set-option',
-        '-w',
-        '-t',
-        windowId,
-        '@prwc_watcher',
-        prKey,
-    ]);
-    const kept =
-        succeeded(tagged) &&
-        succeeded(
-            await tmuxOn(deps, tmuxPath, tmux.socket, ['set-option', '-p', '-t', paneId, 'remain-on-exit', 'on'])
-        );
-    if (!kept) {
-        await tmuxOn(deps, tmuxPath, tmux.socket, ['kill-window', '-t', windowId]);
-        return;
-    }
-    return { windowId, paneId, index };
+    const base = env.TMUX_TMPDIR === undefined || env.TMUX_TMPDIR.length === 0 ? '/tmp' : env.TMUX_TMPDIR;
+    return path.join(base, `tmux-${uid}`, 'default');
+}
+
+// tmux creates the directory of its default socket itself only when it picks the socket path on its own; with -S
+// it expects the directory to exist and to be private.
+export function ensureSocketDir(socket: string): void {
+    fs.mkdirSync(path.dirname(socket), { recursive: true, mode: 0o700 });
 }
 
 export async function paneState(deps: TmuxDeps, tmuxPath: string, socket: string, pane: string): Promise<PaneState> {
@@ -467,4 +435,87 @@ export async function killDeadWatcherPane(
         `kill-pane -t ${pane}`,
     ]);
     return succeeded(result);
+}
+
+// Kills the dead watcher pane of prKey that a crashed watcher left in the named session; a session left with no
+// pane ends, which frees its name. Panes of other PRs and live panes are never touched.
+async function reclaimSession(
+    deps: TmuxDeps,
+    tmuxPath: string,
+    socket: string,
+    name: string,
+    prKey: string
+): Promise<void> {
+    const panes = listing(
+        await tmuxOn(deps, tmuxPath, socket, ['list-panes', '-s', '-t', `=${name}`, '-F', '#{pane_id}'])
+    );
+    for (const [pane = ''] of panes) {
+        await killDeadWatcherPane(deps, tmuxPath, socket, pane, prKey);
+    }
+}
+
+async function createSession(
+    deps: TmuxDeps,
+    tmuxPath: string,
+    socket: string,
+    target: { prKey: string; name: string },
+    rest: readonly string[],
+    clientEnv: Env | undefined
+): Promise<WatcherWindow | undefined> {
+    let reclaimed = false;
+    for (let attempt = 1; attempt <= MAX_NAME_ATTEMPTS; attempt += 1) {
+        const sessionName = attempt === 1 ? target.name : `${target.name}-${attempt}`;
+        const args = ['new-session', '-d', '-P', '-F', SESSION_FORMAT, '-s', sessionName, ...rest];
+        const created = await tmuxOn(deps, tmuxPath, socket, args, clientEnv);
+        if (created !== undefined && created.code !== 0 && created.stderr.includes('duplicate session')) {
+            if (!reclaimed) {
+                // One retry of the same name after the leftovers of a crashed watcher were removed.
+                reclaimed = true;
+                await reclaimSession(deps, tmuxPath, socket, sessionName, target.prKey);
+                attempt -= 1;
+            }
+            continue;
+        }
+        const [sessionId = '', windowId = '', paneId = '', ...extra] =
+            created?.code === 0 ? created.stdout.trim().split(' ') : [];
+        const valid = SESSION_ID.test(sessionId) && WINDOW_ID.test(windowId) && PANE_ID.test(paneId);
+        return extra.length === 0 && valid ? { sessionId, sessionName, windowId, paneId } : undefined;
+    }
+    return;
+}
+
+// Starts the watcher in a new detached session of its own, so it and its worker panes never touch the caller's
+// windows. A taken name gets a numeric suffix. The started command must wait for its launch-ready marker: it may not
+// act before both options are set.
+export async function newWatcherSession(
+    deps: TmuxDeps,
+    tmuxPath: string,
+    socket: string,
+    target: { prKey: string; name: string },
+    envItems: readonly string[],
+    command: readonly string[]
+): Promise<WatcherWindow | undefined> {
+    const rest = ['-x', SESSION_WIDTH, '-y', SESSION_HEIGHT, ...envArgs(envItems), ...command];
+    const session = await createSession(deps, tmuxPath, socket, target, rest, clientEnvFor(deps.env, envItems));
+    if (session === undefined) {
+        return;
+    }
+    const tagged = await tmuxOn(deps, tmuxPath, socket, [
+        'set-option',
+        '-w',
+        '-t',
+        session.windowId,
+        '@prwc_watcher',
+        target.prKey,
+    ]);
+    const kept =
+        succeeded(tagged) &&
+        succeeded(
+            await tmuxOn(deps, tmuxPath, socket, ['set-option', '-p', '-t', session.paneId, 'remain-on-exit', 'on'])
+        );
+    if (!kept) {
+        await tmuxOn(deps, tmuxPath, socket, ['kill-session', '-t', session.sessionId]);
+        return;
+    }
+    return session;
 }

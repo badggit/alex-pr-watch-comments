@@ -9,12 +9,13 @@ import {
     killDeadWatcherPane,
     killPane,
     markPaneDone,
-    newWatcherWindow,
+    newWatcherSession,
     NOT_IN_TMUX,
     paneForRun,
     paneState,
     paneWatcherTag,
     parseTmuxEnv,
+    serverSocket,
     splitWorker,
     tmuxArg,
     tmuxInit,
@@ -22,6 +23,7 @@ import {
     tmuxMessage,
     tmuxOn,
     type TmuxDeps,
+    watcherSessionName,
 } from '../../src/tmuxControl.ts';
 import type { Env, TmuxContext } from '../../src/types.ts';
 import { createFakeRunner, type FakeRunner, type RecordedCall } from '../support/fakeRunner.ts';
@@ -32,7 +34,7 @@ const SOCKET = '/tmp/prwc-test-socket';
 const WORKER_SOCKET = '/tmp/worker-socket';
 const CONTEXT: TmuxContext = { socket: SOCKET, pane: '%1', sessionId: '$1', windowId: '@2' };
 const SPLIT_FORMAT = '#{pane_id} #{pane_pid}';
-const WINDOW_FORMAT = '#{window_id} #{pane_id} #{window_index}';
+const SESSION_FORMAT = '#{session_id} #{window_id} #{pane_id}';
 const NO_SPACE = { code: 1, stderr: 'no space for new pane\n' };
 const NO_SPACE_TMUX37 = { code: 1, stderr: 'size or position no space for a new pane\n' };
 const RUN_ID = '20260101000000-11';
@@ -582,27 +584,32 @@ await describe('arrangeGrid', async () => {
     });
 });
 
-await describe('newWatcherWindow', async () => {
+await describe('newWatcherSession', async () => {
     const watcherCommand = ['/opt/node/bin/node', '/opt/plugin/src/main.ts', '--background-child'];
-    const target = { prKey: PR_KEY, name: 'prwc-12' };
+    const target = { prKey: PR_KEY, name: 'prwc-r-12' };
+    const sessionArgs = (name: string): string[] => [
+        'new-session',
+        '-d',
+        '-P',
+        '-F',
+        SESSION_FORMAT,
+        '-s',
+        name,
+        '-x',
+        '200',
+        '-y',
+        '50',
+    ];
 
-    await test('passes each env item as one -e argument and sets both options', async () => {
+    await test('creates a named detached session, passes each env item as one -e argument and sets both options', async () => {
         const fake = createFakeRunner();
-        fake.respond('tmux', 'new-window', { stdout: '@4 %8 3\n' });
+        fake.respond('tmux', 'new-session', { stdout: '$5 @4 %8\n' });
         const items = ['PATH=/a b', 'PRWC_STATE_DIR=/s'];
-        const result = await newWatcherWindow(depsOf(fake), TMUX, CONTEXT, target, items, watcherCommand);
-        assert.deepEqual(result, { windowId: '@4', paneId: '%8', index: '3' });
+        const result = await newWatcherSession(depsOf(fake), TMUX, SOCKET, target, items, watcherCommand);
+        assert.deepEqual(result, { sessionId: '$5', sessionName: 'prwc-r-12', windowId: '@4', paneId: '%8' });
         const calls = fake.calls();
         assert.deepEqual(tmuxArgs(calls[0]), [
-            'new-window',
-            '-d',
-            '-P',
-            '-F',
-            WINDOW_FORMAT,
-            '-n',
-            'prwc-12',
-            '-t',
-            '$1:',
+            ...sessionArgs('prwc-r-12'),
             '-e',
             'PATH=/a b',
             '-e',
@@ -618,60 +625,83 @@ await describe('newWatcherWindow', async () => {
         }
     });
 
-    await test('with no env items it passes no -e', async () => {
+    await test('a taken name is retried once after the dead watcher pane of the PR in it was killed', async () => {
         const fake = createFakeRunner();
-        fake.respond('tmux', 'new-window', { stdout: '@4 %8 3\n' });
-        await newWatcherWindow(depsOf(fake), TMUX, CONTEXT, target, [], watcherCommand);
-        const args = tmuxArgs(fake.calls()[0]);
-        assert.ok(!args.includes('-e'));
-        assert.equal(fake.calls('tmux').find((call) => call.key === 'split-window')?.env, undefined);
-        assert.deepEqual(args, [
-            'new-window',
-            '-d',
-            '-P',
-            '-F',
-            WINDOW_FORMAT,
-            '-n',
-            'prwc-12',
-            '-t',
-            '$1:',
-            ...watcherCommand,
+        fake.respond('tmux', 'new-session', { code: 1, stderr: 'duplicate session: prwc-r-12\n' });
+        fake.respond('tmux', 'list-panes', { stdout: '%3\n' });
+        fake.respond('tmux', 'new-session', { stdout: '$6 @4 %8\n' });
+        const result = await newWatcherSession(depsOf(fake), TMUX, SOCKET, target, [], watcherCommand);
+        assert.equal(result?.sessionName, 'prwc-r-12');
+        const listed = fake.calls().find((call) => call.key === 'list-panes');
+        assert.deepEqual(tmuxArgs(listed), ['list-panes', '-s', '-t', '=prwc-r-12', '-F', '#{pane_id}']);
+        const killed = fake.calls().find((call) => call.key === 'if-shell');
+        assert.deepEqual(tmuxArgs(killed).slice(-2), [
+            `#{&&:#{pane_dead},#{==:#{@prwc_watcher},${PR_KEY}}}`,
+            'kill-pane -t %3',
         ]);
     });
 
-    await test('a failing remain-on-exit kills the created window', async () => {
+    await test('a name still taken after the reclaim gets a numeric suffix', async () => {
         const fake = createFakeRunner();
-        fake.respond('tmux', 'new-window', { stdout: '@4 %8 3\n' });
+        const duplicate = { code: 1, stderr: 'duplicate session: prwc-r-12\n' };
+        fake.respond('tmux', 'new-session', duplicate);
+        fake.respond('tmux', 'new-session', duplicate);
+        fake.respond('tmux', 'new-session', { stdout: '$6 @4 %8\n' });
+        const result = await newWatcherSession(depsOf(fake), TMUX, SOCKET, target, [], watcherCommand);
+        assert.equal(result?.sessionName, 'prwc-r-12-2');
+        const created = fake.calls().filter((call) => call.key === 'new-session');
+        assert.deepEqual(tmuxArgs(created[2]), [...sessionArgs('prwc-r-12-2'), ...watcherCommand]);
+        assert.equal(fake.callCount('tmux', 'list-panes'), 1);
+    });
+
+    await test('a failing remain-on-exit kills the created session', async () => {
+        const fake = createFakeRunner();
+        fake.respond('tmux', 'new-session', { stdout: '$5 @4 %8\n' });
         fake.respond('tmux', 'set-option', { code: 0 });
         fake.respond('tmux', 'set-option', { code: 1, stderr: 'invalid option\n' });
-        const result = await newWatcherWindow(depsOf(fake), TMUX, CONTEXT, target, [], watcherCommand);
+        const result = await newWatcherSession(depsOf(fake), TMUX, SOCKET, target, [], watcherCommand);
         assert.equal(result, undefined);
-        const kills = fake.calls().filter((call) => call.key === 'kill-window');
+        const kills = fake.calls().filter((call) => call.key === 'kill-session');
         assert.deepEqual(
             kills.map((call) => tmuxArgs(call)),
-            [['kill-window', '-t', '@4']]
+            [['kill-session', '-t', '$5']]
         );
     });
 
-    await test('a failing @prwc_watcher option kills the window before remain-on-exit', async () => {
+    await test('a failing @prwc_watcher option kills the session before remain-on-exit', async () => {
         const fake = createFakeRunner();
-        fake.respond('tmux', 'new-window', { stdout: '@4 %8 3\n' });
+        fake.respond('tmux', 'new-session', { stdout: '$5 @4 %8\n' });
         fake.respond('tmux', 'set-option', { code: 1 });
-        const result = await newWatcherWindow(depsOf(fake), TMUX, CONTEXT, target, [], watcherCommand);
+        const result = await newWatcherSession(depsOf(fake), TMUX, SOCKET, target, [], watcherCommand);
         assert.equal(result, undefined);
         assert.equal(fake.callCount('tmux', 'set-option'), 1);
-        assert.equal(fake.callCount('tmux', 'kill-window'), 1);
+        assert.equal(fake.callCount('tmux', 'kill-session'), 1);
     });
 
-    await test('a failing or unparsable new-window gives undefined and sets nothing', async () => {
-        const responses = [{ code: 1, stderr: 'failed\n' }, { stdout: 'garbage\n' }, { stdout: '@4 %8\n' }];
+    await test('a failing or unparsable new-session gives undefined and sets nothing', async () => {
+        const responses = [{ code: 1, stderr: 'failed\n' }, { stdout: 'garbage\n' }, { stdout: '$5 @4\n' }];
         for (const response of responses) {
             const fake = createFakeRunner();
-            fake.respond('tmux', 'new-window', response);
-            const result = await newWatcherWindow(depsOf(fake), TMUX, CONTEXT, target, [], watcherCommand);
+            fake.respond('tmux', 'new-session', response);
+            const result = await newWatcherSession(depsOf(fake), TMUX, SOCKET, target, [], watcherCommand);
             assert.equal(result, undefined);
             assert.equal(fake.callCount('tmux', 'set-option'), 0);
+            assert.equal(fake.callCount('tmux', 'new-session'), 1);
         }
+    });
+});
+
+await describe('watcherSessionName and serverSocket', async () => {
+    await test('the session name keeps only word characters and hyphens of the repository', () => {
+        assert.equal(watcherSessionName('my.repo', 12), 'prwc-my_repo-12');
+        assert.equal(watcherSessionName('repo-x_y', 3), 'prwc-repo-x_y-3');
+    });
+
+    await test('the socket is the caller server one inside tmux, else the default one', () => {
+        assert.equal(serverSocket({ TMUX: '/tmp/s,1,0', TMUX_PANE: '%3' }, 501), '/tmp/s');
+        assert.equal(serverSocket({}, 501), '/tmp/tmux-501/default');
+        assert.equal(serverSocket({ TMUX_TMPDIR: '/var/t' }, 501), '/var/t/tmux-501/default');
+        assert.equal(serverSocket({ TMUX_TMPDIR: '' }, 501), '/tmp/tmux-501/default');
     });
 });
 

@@ -15,6 +15,7 @@ type WorkingTreeMode = 'in-place' | 'worktree' | 'conflict';
 
 interface Draft {
     background: boolean;
+    noAttach: boolean;
     list: boolean;
     once: boolean;
     // 'conflict' is sticky: once both options were given, no later option can clear it.
@@ -34,7 +35,14 @@ const PR_URL = new RegExp(
     'iu'
 );
 const LINE_BREAK = /[\n\r]/u;
-const FLAG_OPTIONS: ReadonlySet<string> = new Set(['--background', '--list', '--once', '--in-place', '--worktree']);
+const FLAG_OPTIONS: ReadonlySet<string> = new Set([
+    '--background',
+    '--no-attach',
+    '--list',
+    '--once',
+    '--in-place',
+    '--worktree',
+]);
 const VALUE_OPTIONS: ReadonlySet<string> = new Set([
     '--stop',
     '--dir',
@@ -162,6 +170,10 @@ function applyFlag(draft: Draft, name: string): void {
             draft.background = true;
             break;
         }
+        case '--no-attach': {
+            draft.noAttach = true;
+            break;
+        }
         case '--list': {
             draft.list = true;
             break;
@@ -191,6 +203,9 @@ function findConflict(draft: Draft): string | undefined {
     }
     if (draft.background && (draft.list || stop)) {
         return '--background cannot be combined with --list or --stop';
+    }
+    if (draft.noAttach && !draft.background) {
+        return '--no-attach needs --background';
     }
     if (draft.once && draft.background) {
         return '--once cannot be combined with --background';
@@ -225,6 +240,7 @@ function toResult(draft: Draft, mode: CliMode, pr?: PrRef): ParseResult {
             batchMax: draft.batchMax,
             once: draft.once,
             inPlace: draft.workingTreeMode !== 'worktree',
+            attach: !draft.noAttach,
         },
     };
 }
@@ -266,6 +282,7 @@ export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
     }
     const draft: Draft = {
         background: false,
+        noAttach: false,
         list: false,
         once: false,
         workingTreeMode: undefined,
@@ -307,7 +324,7 @@ export function usageText(): string {
     return [
         'Usage:',
         '  alex-pr-watch-comments <PR URL> [options]               watch in the foreground of the current tmux pane',
-        '  alex-pr-watch-comments <PR URL> --background [options]  watch in a detached tmux window',
+        '  alex-pr-watch-comments <PR URL> --background [options]  watch in a new detached tmux session',
         '  alex-pr-watch-comments --list                           list watchers and runs',
         '  alex-pr-watch-comments --stop <PR URL>                  stop the watcher for a PR (a running worker is kept)',
         '  alex-pr-watch-comments new-worktree NAME [--branch BRANCH] [--base REF]',
@@ -324,6 +341,7 @@ export function usageText(): string {
         '  --claude-arg <arg>    extra claude argument, repeatable, passed literally',
         `  --keep-panes <n>      finished worker panes to keep (default ${DEFAULT_KEEP_PANES})`,
         `  --batch-max <n>       approved comments per run, 1 to ${MAX_BATCH} (default ${DEFAULT_BATCH_MAX})`,
+        '  --no-attach           with --background: do not open a Ghostty tab attached to the session (macOS)',
         '  --once                one polling pass, then exit (not with --background)',
         '',
     ].join('\n');

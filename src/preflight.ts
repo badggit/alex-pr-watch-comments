@@ -9,9 +9,17 @@ import { syncIgnoredLinks } from './ignoredLinks.ts';
 import { getArray, getRecord } from './json.ts';
 import { confirmedMainTree, gitDirsOf, isLinked, type GitDirs } from './linkedWorktree.ts';
 import { readJsonFile, resolveStateDir, worktreeKey } from './stateStore.ts';
-import { parseTmuxEnv, tmuxInit } from './tmuxControl.ts';
+import { parseTmuxEnv, serverSocket, tmuxInit } from './tmuxControl.ts';
 import type { CliOptions, Deps, Env, PrInfo, PrRef, Session, TmuxContext, ToolPaths, WatchWorktree } from './types.ts';
-import { isSafeAbsPath, isSafeRunPath, isValidBranch, isValidName, readEnvSeconds, safeText } from './validate.ts';
+import {
+    isSafeAbsPath,
+    isSafeRunPath,
+    isSafeSocketPath,
+    isValidBranch,
+    isValidName,
+    readEnvSeconds,
+    safeText,
+} from './validate.ts';
 import { prepareWatchWorktree, samePath, watchWorktreePath } from './watchWorktree.ts';
 
 export type PreflightDeps = Pick<Deps, 'runner' | 'env' | 'log'>;
@@ -157,10 +165,20 @@ export function ownerStopHookSources(home: string | undefined, toplevel: string)
     return sources.filter(([, file]) => file !== undefined && hasStopHooks(readJsonFile(file))).map(([label]) => label);
 }
 
-async function checkTmux(deps: PreflightDeps, callerPath: string): Promise<Checked<TmuxContext>> {
+// A background start creates a session of its own, so outside tmux it needs only the socket of the default server;
+// it has no pane, session or window of its own, and those fields stay empty.
+async function checkTmux(deps: PreflightDeps, callerPath: string, background: boolean): Promise<Checked<TmuxContext>> {
     const tmuxPath = resolveExecutable('tmux', callerPath);
-    if (tmuxPath === undefined && parseTmuxEnv(deps.env) !== undefined) {
+    const inTmux = parseTmuxEnv(deps.env) !== undefined;
+    if (tmuxPath === undefined && (inTmux || background)) {
         return missingTool('tmux');
+    }
+    if (background && !inTmux) {
+        const socket = serverSocket(deps.env, process.getuid?.() ?? 0);
+        if (!isSafeSocketPath(socket)) {
+            return refuse(`unusable tmux socket path ${safeText(socket)}; set TMUX_TMPDIR to a plain absolute path`);
+        }
+        return { ok: true, value: { socket, pane: '', sessionId: '', windowId: '' } };
     }
     // Without TMUX, tmuxInit refuses before it runs anything, so the fallback name is never executed.
     const init = await tmuxInit(deps, tmuxPath ?? 'tmux');
@@ -413,7 +431,7 @@ export async function preflight(
     const dir = path.resolve(cwd, options.dir);
     const roots = projectRoots(dir);
     const callerPath = normalizeCallerPath(deps.env.PATH ?? '', roots);
-    const tmux = await checkTmux(deps, callerPath);
+    const tmux = await checkTmux(deps, callerPath, options.mode === 'background');
     if (!tmux.ok) {
         return tmux;
     }

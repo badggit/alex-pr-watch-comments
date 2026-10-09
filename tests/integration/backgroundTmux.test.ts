@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -240,7 +241,7 @@ async function runEntry(fixture: Fixture, args: readonly string[], env: Env): Pr
 }
 
 function startArgs(fixture: Fixture, url = PR_URL): string[] {
-    return [url, '--background', '--in-place', '--dir', fixture.clone, '--interval', '300'];
+    return [url, '--background', '--no-attach', '--in-place', '--dir', fixture.clone, '--interval', '300'];
 }
 
 function both(result: ObservedResult): string {
@@ -401,12 +402,11 @@ await describe('background start on a real isolated tmux server', async () => {
         stubRespond(testEnv.stubDir, 'gh', 'PrwcLookup', { json: lookupJson() });
         const started = await runEntry(fixture, startArgs(fixture), callerEnv(fixture));
         assert.equal(started.code, 0, both(started));
-        assert.ok(started.stdout.includes(`watching ${PR_URL} in tmux window `), both(started));
+        assert.ok(started.stdout.includes(`watching ${PR_URL} in tmux session prwc-r-12\n`), both(started));
         const window = await onlyWatcherWindow(fixture);
         assert.equal(window.paneDead, '0');
-        assert.ok(started.stdout.includes(`(prwc-12, ${window.windowId})`), both(started));
-        const name = await tmuxText(fixture, ['display-message', '-p', '-t', window.windowId, '#{window_name}']);
-        assert.equal(name.trim(), 'prwc-12');
+        const name = await tmuxText(fixture, ['display-message', '-p', '-t', window.windowId, '#{session_name}']);
+        assert.equal(name.trim(), 'prwc-r-12');
         const announced = await waitUntil(10_000, async () => {
             const text = await paneText(fixture, window.windowId);
             return text.includes(`info watching ${PR_URL}`) && text.includes('first poll done');
@@ -451,13 +451,35 @@ await describe('background start on a real isolated tmux server', async () => {
         assert.deepEqual(await watcherWindows(fixture), []);
     });
 
+    await test('outside tmux a start creates its session on a new default server', async (t) => {
+        const fixture = await setUp(t);
+        stubRespond(fixture.testEnv.stubDir, 'gh', 'PrwcPoll', { json: POLL_OPEN });
+        // Kept short: a Unix socket path has a small length limit.
+        const tmuxTmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'prwc-'));
+        const socket = path.join(tmuxTmpdir, `tmux-${process.getuid?.() ?? 0}`, 'default');
+        const deps = tmuxDeps(fixture);
+        t.after(async () => {
+            await tmuxOn(deps, fixture.tmuxPath, socket, ['kill-server']);
+            fs.rmSync(tmuxTmpdir, { recursive: true, force: true });
+        });
+        const env = { ...fixture.testEnv.env, TMUX: undefined, TMUX_PANE: undefined, TMUX_TMPDIR: tmuxTmpdir };
+        const started = await runEntry(fixture, startArgs(fixture), env);
+        assert.equal(started.code, 0, both(started));
+        assert.ok(started.stdout.endsWith('attach to it: tmux attach -t prwc-r-12\n'), both(started));
+        const sessions = await tmuxOn(deps, fixture.tmuxPath, socket, ['list-sessions', '-F', '#{session_name}']);
+        assert.equal(sessions?.stdout.trim(), 'prwc-r-12');
+        assert.equal(fs.realpathSync.native(lockOwner(fixture).socket), fs.realpathSync.native(socket));
+        const stopped = await runEntry(fixture, ['--stop', PR_URL], env);
+        assert.equal(stopped.code, 0, both(stopped));
+    });
+
     await test('arguments ending in ; reach the watcher exactly', async (t) => {
         const fixture = await setUp(t);
         const dir = `${fixture.clone};`;
         fs.renameSync(fixture.clone, dir);
         stubRespond(fixture.testEnv.stubDir, 'gh', 'PrwcPoll', { json: POLL_OPEN });
         const claudeArgs = ['value;', String.raw`a\;`, ';', 'value;'];
-        const args = [PR_URL, '--background', '--in-place', '--dir', dir, '--interval', '300'];
+        const args = [PR_URL, '--background', '--no-attach', '--in-place', '--dir', dir, '--interval', '300'];
         const started = await runEntry(
             fixture,
             [...args, ...claudeArgs.flatMap((arg) => ['--claude-arg', arg])],

@@ -201,7 +201,7 @@ const DEADLINE_CODE = 124;
 const CLEANUP_TMUX_TIMEOUT_MS = 30_000;
 const KILL_ATTEMPTS = 3;
 const KILL_RETRY_MS = 1000;
-const WATCHING = /^watching \S+ in tmux window \d+ \(prwc-\d+, (@\d+)\)$/mu;
+const WATCHING = /^watching \S+ in tmux session (prwc-[\w-]+)$/mu;
 const TRUST_FAILURE =
     'trust dialog: trust .cache/smoke/clone in Claude Code (run claude once in it and choose Yes, I trust this folder), then rerun';
 // The first pane runs the background start and keeps its output and exit code in the work area.
@@ -642,7 +642,16 @@ async function startWatcher(ctx: Ctx, target: Target): Promise<void> {
     const codeFile = path.join(workArea, 'background.code');
     const env = ['/usr/bin/env', `PATH=${target.callerPath}`, `PRWC_STATE_DIR=${target.stateDir}`];
     const shell = ['/bin/sh', '-c', PANE_SCRIPT, 'sh', out, codeFile];
-    const watch = ['--background', '--dir', target.clone, '--interval', WATCHER_INTERVAL, '--claude', tools.claude];
+    const watch = [
+        '--background',
+        '--no-attach',
+        '--dir',
+        target.clone,
+        '--interval',
+        WATCHER_INTERVAL,
+        '--claude',
+        tools.claude,
+    ];
     const command = [...env, ...shell, BIN, target.pr.url, ...watch];
     ctx.trace.serverStarted = true;
     const session = ['-f', '/dev/null', 'new-session', '-d', '-s', SESSION, '-x', '200', '-y', '50'];
@@ -658,7 +667,7 @@ async function startWatcher(ctx: Ctx, target: Target): Promise<void> {
         throw new Error(`background start exited with ${safeText(code)}: ${safeText(output.trim())}`);
     }
     ctx.trace.watcherStarted = true;
-    say(`watcher started in window ${match[1] ?? ''}`);
+    say(`watcher started in tmux session ${match[1] ?? ''}`);
 }
 
 // The watcher pane is the pane of the window tagged with this PR's @prwc_watcher that is not a worker pane. A

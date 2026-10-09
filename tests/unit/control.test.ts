@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -161,6 +162,7 @@ function bgOptions(setup: Setup, claudeArgs: string[] = [], inPlace = true): Cli
         batchMax: 5,
         once: false,
         inPlace,
+        attach: false,
     };
 }
 
@@ -176,6 +178,7 @@ function stopOptions(pr = PR): CliOptions {
         batchMax: 5,
         once: false,
         inPlace: true,
+        attach: false,
     };
 }
 
@@ -205,7 +208,7 @@ function assertStripVarsEmptied(items: readonly string[]): void {
 }
 
 function newWindows(setup: Setup): RecordedCall[] {
-    return setup.fake.calls('tmux').filter((call) => call.key === 'new-window');
+    return setup.fake.calls('tmux').filter((call) => call.key === 'new-session');
 }
 
 function onlyWindow(setup: Setup): RecordedCall {
@@ -220,18 +223,18 @@ function launchResult(token: string, result: LaunchResult['result'], message = '
     return { token, result, message, pid: 4242, windowId: '@2' };
 }
 
-// The new-window responder: report is called with the launch token before the window is created.
+// The new-session responder: report is called with the launch token before the session is created.
 function windowResponder(report: (_token: string) => void, windowId = '@2', paneId = '%2'): FakeResponder {
     return (call) => {
         report(tokenOf(call));
-        return { stdout: `${windowId} ${paneId} 1\n` };
+        return { stdout: `$9 ${windowId} ${paneId}\n` };
     };
 }
 
 function answerAtOnce(setup: Setup, result: LaunchResult['result'], message = ''): void {
     setup.fake.respond(
         'tmux',
-        'new-window',
+        'new-session',
         windowResponder((token) => {
             assert.ok(writeLaunchResult(setup.stateDir, PR_KEY, launchResult(token, result, message)));
         })
@@ -334,7 +337,7 @@ function assertConditionalKill(setup: Setup): void {
         'kill-pane -t %1',
     ]);
     assert.equal(tmuxCalls(setup, 'kill-pane').length, 0);
-    assert.equal(tmuxCalls(setup, 'kill-window').length, 0);
+    assert.equal(tmuxCalls(setup, 'kill-session').length, 0);
 }
 
 // No raw control character (newline aside) and no bidi control reaches the output.
@@ -408,11 +411,20 @@ function stop(setup: Setup, pr = PR): Promise<number> {
 }
 
 await describe('background start', async () => {
-    await test('without TMUX it exits 1 and creates no window', async (t) => {
-        const setup = await makeSetup(t, { env: { TMUX: undefined } });
-        assert.equal(await startBackground(setup), 1);
-        assert.ok(setup.deps.outText().includes(NOT_IN_TMUX), printed(setup));
-        assert.equal(newWindows(setup).length, 0);
+    await test('without TMUX it starts the session on the default server and prints how to attach', async (t) => {
+        const tmuxTmpdir = path.join(os.tmpdir(), `prwc-sock-${process.pid}-${Date.now()}`);
+        t.after(() => {
+            fs.rmSync(tmuxTmpdir, { recursive: true, force: true });
+        });
+        const setup = await makeSetup(t, { env: { TMUX: undefined, TMUX_PANE: undefined, TMUX_TMPDIR: tmuxTmpdir } });
+        answerAtOnce(setup, 'firstPoll');
+        assert.equal(await startBackground(setup), 0, printed(setup));
+        const socket = path.join(tmuxTmpdir, `tmux-${process.getuid?.() ?? 0}`, 'default');
+        assert.deepEqual(onlyWindow(setup).args.slice(0, 2), ['-S', socket]);
+        assert.equal(fs.statSync(path.dirname(socket)).mode & 0o777, 0o700);
+        const output = setup.deps.outText();
+        assert.ok(output.endsWith('attach to it: tmux attach -t prwc-r-12\n'), output);
+        assert.ok(!output.includes(NOT_IN_TMUX), output);
     });
 
     await test('a live lock owner is reported as already watched and no window is created', async (t) => {
@@ -429,7 +441,7 @@ await describe('background start', async () => {
         let token = '';
         setup.fake.respond(
             'tmux',
-            'new-window',
+            'new-session',
             windowResponder((value) => {
                 token = value;
                 readyAt.newWindow = launchReady(setup.stateDir, PR_KEY, value);
@@ -449,7 +461,14 @@ await describe('background start', async () => {
         };
         const [code] = await Promise.all([startBackground(setup, ['--model', 'two words']), poller()]);
         assert.equal(code, 0, printed(setup));
-        assert.ok(setup.deps.outText().includes(`watching ${PR.prUrl} in tmux window 1 (prwc-12, @2)`), printed(setup));
+        assert.ok(
+            setup.deps
+                .outText()
+                .includes(
+                    `watching ${PR.prUrl} in tmux session prwc-r-12\nswitch to it: tmux switch-client -t prwc-r-12\n`
+                ),
+            printed(setup)
+        );
         assert.deepEqual(readyAt, { newWindow: false, remainOnExit: false });
         const call = onlyWindow(setup);
         assert.ok(call.args.includes('-d'));
@@ -494,18 +513,18 @@ await describe('background start', async () => {
         const readyAtKill: boolean[] = [];
         setup.fake.respond(
             'tmux',
-            'new-window',
+            'new-session',
             windowResponder((value) => {
                 token = value;
             })
         );
         setup.fake.respond('tmux', 'set-option', (call) => (call.args.includes('remain-on-exit') ? { code: 1 } : {}));
-        setup.fake.respond('tmux', 'kill-window', () => {
+        setup.fake.respond('tmux', 'kill-session', () => {
             readyAtKill.push(launchReady(setup.stateDir, PR_KEY, token));
             return {};
         });
         assert.equal(await startBackground(setup), 1);
-        assert.ok(setup.deps.outText().includes('could not create the watcher window'), printed(setup));
+        assert.ok(setup.deps.outText().includes('could not create the watcher session'), printed(setup));
         assert.deepEqual(readyAtKill, [false]);
         assert.equal(launchReady(setup.stateDir, PR_KEY, token), false);
         assert.deepEqual(
@@ -525,14 +544,14 @@ await describe('background start', async () => {
         setup.deps.env = { ...setup.deps.env, PRWC_BG_TIMEOUT: '2' };
         setup.fake.respond(
             'tmux',
-            'new-window',
+            'new-session',
             windowResponder(() => {
                 assert.ok(writeLaunchResult(setup.stateDir, PR_KEY, launchResult(other, 'firstPoll')));
             })
         );
         assert.equal(await startBackground(setup), 1);
         assert.ok(
-            setup.deps.outText().includes('did not report its first poll; check tmux window 1 (prwc-12, @2)'),
+            setup.deps.outText().includes('did not report its first poll; check tmux session prwc-r-12'),
             printed(setup)
         );
         assert.equal(fs.readFileSync(statusFile, 'utf8'), before);
@@ -637,7 +656,7 @@ await describe('background start', async () => {
         answerAtOnce(setup, 'fatal', 'boom');
         assert.equal(await startBackground(setup), 1);
         assert.ok(setup.deps.outText().includes('watcher failed: boom'), printed(setup));
-        assert.equal(tmuxCalls(setup, 'kill-window').length, 0);
+        assert.equal(tmuxCalls(setup, 'kill-session').length, 0);
     });
 
     await test('a fatal message is shown without control characters or forged lines', async (t) => {
@@ -655,7 +674,7 @@ await describe('background start', async () => {
         const setup = await makeSetup(t, { env: { PRWC_BG_TIMEOUT: '60' } });
         setup.fake.respond(
             'tmux',
-            'new-window',
+            'new-session',
             windowResponder(() => {
                 return;
             })
@@ -665,7 +684,7 @@ await describe('background start', async () => {
         assert.equal(await startBackground(setup), 1);
         assert.ok(performance.now() - started < 20_000, 'the start waited for the whole timeout');
         assert.ok(
-            setup.deps.outText().includes('watcher exited before its first poll; check tmux window 1 (prwc-12, @2)'),
+            setup.deps.outText().includes('watcher exited before its first poll; check tmux session prwc-r-12'),
             printed(setup)
         );
         assert.deepEqual(launchFiles(setup), []);
@@ -673,7 +692,7 @@ await describe('background start', async () => {
 
     await test('the result wait ends at its deadline although every pane query is slow', async (t) => {
         const setup = await makeSetup(t, { env: { PRWC_BG_TIMEOUT: '1' } });
-        setup.fake.respond('tmux', 'new-window', { stdout: '@2 %2 1\n' });
+        setup.fake.respond('tmux', 'new-session', { stdout: '$9 @2 %2\n' });
         const timeouts: (number | undefined)[] = [];
         const slowListing = (request: CommandRequest): boolean => request.args.includes('list-panes');
         setup.deps.runner = slowCalls(setup.fake.runner, slowListing, 30_000, timeouts);
@@ -693,7 +712,7 @@ await describe('background start', async () => {
         let token = '';
         setup.fake.respond(
             'tmux',
-            'new-window',
+            'new-session',
             windowResponder((value) => {
                 token = value;
             })
@@ -709,26 +728,26 @@ await describe('background start', async () => {
     await test('of two concurrent starts the loser reports already watched and kills its own window', async (t) => {
         const setup = await makeSetup(t);
         let created = 0;
-        setup.fake.respond('tmux', 'new-window', (call) => {
+        setup.fake.respond('tmux', 'new-session', (call) => {
             created += 1;
             const token = tokenOf(call);
             if (created === 1) {
                 writeJson(path.join(watcherDir(setup.stateDir, PR_KEY), 'status.json'), STATUS);
                 assert.ok(writeLaunchResult(setup.stateDir, PR_KEY, launchResult(token, 'firstPoll')));
-                return { stdout: '@2 %2 1\n' };
+                return { stdout: '$9 @2 %2\n' };
             }
             const holder = { ...launchResult(token, 'alreadyWatched', 'already watched'), pid: 4242, windowId: '@2' };
             assert.ok(writeLaunchResult(setup.stateDir, PR_KEY, holder));
-            return { stdout: '@3 %3 2\n' };
+            return { stdout: '$10 @3 %3\n' };
         });
         const codes = await Promise.all([startBackground(setup), startBackground(setup)]);
         assert.deepEqual(codes, [0, 0], printed(setup));
         const output = setup.deps.outText();
         assert.equal(output.split('watching ').length - 1, 1, output);
         assert.equal(output.split('already watched by pid 4242 (window @2)').length - 1, 1, output);
-        const kills = tmuxCalls(setup, 'kill-window');
+        const kills = tmuxCalls(setup, 'kill-session');
         assert.equal(kills.length, 1);
-        assert.equal(kills[0]?.args.at(-1), '@3');
+        assert.equal(kills[0]?.args.at(-1), '$10');
         assert.ok(fs.existsSync(path.join(watcherDir(setup.stateDir, PR_KEY), 'status.json')));
         assert.deepEqual(launchFiles(setup), []);
     });

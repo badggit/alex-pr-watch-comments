@@ -427,6 +427,7 @@ function cliOptions(setup: Setup, once: boolean, inPlace = true): CliOptions {
         batchMax: 5,
         once,
         inPlace,
+        attach: false,
     };
 }
 

@@ -102,6 +102,7 @@ function cliOptions(dir: string, claude?: string, pr = PR, inPlace = true): CliO
         batchMax: 5,
         once: false,
         inPlace,
+        attach: false,
     };
 }
 
