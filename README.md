@@ -10,8 +10,8 @@ The plugin also has a small helper for parallel work: the `alex-worktree-new` sk
 
 1. You start the watcher for one PR, for a local clone of the PR's repository with the PR branch checked out. With `--background` (and from the skill) it starts in a new detached tmux session named `prwc-REPO-NUMBER` and, on macOS with [Ghostty](https://ghostty.org), opens a Ghostty tab attached to that session; this works from inside or outside tmux. Without `--background` it runs in the current tmux pane. By default it works in that clone. Pass `--worktree` to use a separate git worktree next to the clone and keep your clone available for other work. See [Watch worktree](#watch-worktree).
 2. Every 2 minutes (`--interval`, default 120 seconds) the watcher reads the PR's inline review threads with `gh`.
-3. A comment is picked up when it carries a `rocket` reaction added by you, the account `gh` is logged in as. Only inline review comments (comments on the diff) count; general PR comments (the "Conversation" tab) are ignored. All comments approved at that moment go into one run as a batch, oldest rocket first, at most `--batch-max` (default 5) of them; the rest wait for the next batch. One run at a time.
-4. The watcher checks its worktree, saves the text of every approved comment, replaces each of your `rocket` reactions with `eyes`, opens a new pane in the watcher's window and starts `claude` there. The task is passed as claude's initial prompt on the command line; nothing is typed into the pane. Claude first checks that the worktree is still on the PR head branch and reads the project instructions (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `AGENTS.local.md` in the worktree, where they exist; the run's own rules win over them). Then it works through the comments in order, one at a time:
+3. A comment is picked up when it carries a `rocket` reaction added by anyone with push access to the PR's repository (write, maintain or admin): you, the account `gh` is logged in as, another collaborator, or the comment's own author. See [Who can approve](#who-can-approve). Only inline review comments (comments on the diff) count; general PR comments (the "Conversation" tab) are ignored. All comments approved at that moment go into one run as a batch, oldest rocket first, at most `--batch-max` (default 5) of them; the rest wait for the next batch. One run at a time.
+4. The watcher checks its worktree, saves the text of every approved comment, removes your own `rocket` reactions, adds `eyes` to every approved comment, opens a new pane in the watcher's window and starts `claude` there. The task is passed as claude's initial prompt on the command line; nothing is typed into the pane. Claude first checks that the worktree is still on the PR head branch and reads the project instructions (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `AGENTS.local.md` in the worktree, where they exist; the run's own rules win over them). Then it works through the comments in order, one at a time:
     - reads the comment and decides whether the code needs a change;
     - if it does, fixes the code, commits only that change and pushes to the PR branch, so every comment gets its own commit;
     - replies to the comment inline, in the same thread, ending the reply with the tag `#alex-pr-watch-comments` on its own last line;
@@ -29,19 +29,26 @@ The panes of the watcher's window are laid out as a grid in launch order, column
 
 | Reaction | Meaning                                                          |
 | -------- | ---------------------------------------------------------------- |
-| `rocket` | You approve the comment for automatic processing.                |
+| `rocket` | Someone with push access approves the comment for processing.    |
 | `eyes`   | The watcher took the comment, a Claude session is working on it. |
 | `+1`     | Done: the reply is posted and any fix is pushed.                 |
 | `-1`     | Failed: the comment was not resolved; see the reply or the log.  |
 
 ### Reaction lifecycle
 
-- Only your own `rocket` counts. It is removed when the run starts, so the same comment never runs twice by accident. To run a comment again, add the `rocket` again; the watcher removes your old `+1` or `-1` when the new run starts.
-- If the comment was edited at or after the time of your `rocket`, it is not run: the watcher removes the `rocket` and logs that the comment was edited after approval. Read the new text and add the `rocket` again to approve it.
-- A batch completes only after claude has stayed idle for a short quiet period and every comment of the batch has a fresh `+1` (a `+1` newer than your `rocket`). The quiet period is `PRWC_STOP_QUIET`, default 10 seconds: one of your own Stop hooks may make claude continue after it stopped once, and that work shows up as new activity before the period ends. The run is then `retained` with outcome `completed`: the session and its working-tree lock remain until you exit Claude. Restarting the watcher preserves this result and waiting state.
+- Your own `rocket` is removed when the run starts, so the same comment never runs twice by accident. The `rocket` of another person cannot be removed by the watcher; it stays, and it is consumed instead: when a run starts, the watcher saves the approval time of each comment in `consumed.json` in the PR's directory under `watchers/` in the state directory, and a `rocket` of another person counts only while it is newer than that time and newer than the watcher's `+1` and `-1` on that comment. So a failed reaction or an interrupted run never makes a comment run twice on its own. To run a comment again, add the `rocket` again (another person removes their old `rocket` and adds it again); the watcher removes its old `+1` or `-1` when the new run starts.
+- If the comment was edited at or after the time of the newest counting `rocket`, it is not run: the watcher removes your `rocket`, adds a fresh `-1` when the approval came from another person, and logs that the comment was edited after approval. Read the new text and add the `rocket` again to approve it.
+- A batch completes only after claude has stayed idle for a short quiet period and every comment of the batch has a fresh `+1` (a `+1` newer than the approving `rocket`). The quiet period is `PRWC_STOP_QUIET`, default 10 seconds: one of your own Stop hooks may make claude continue after it stopped once, and that work shows up as new activity before the period ends. The run is then `retained` with outcome `completed`: the session and its working-tree lock remain until you exit Claude. Restarting the watcher preserves this result and waiting state.
 - If claude cannot resolve a comment, it posts a reply that explains the blocker (also ending with the `#alex-pr-watch-comments` tag), removes `eyes`, adds no `+1` and goes on with the next comment. When claude has stopped, the watcher adds a `-1` to every such comment and records the run as `retained` with outcome `failed`. Claude stays open for inspection; new batches wait for you to exit it, see [Watcher and run states](#watcher-and-run-states).
 - If claude exits before the run is done (for example you quit it, or it crashed), or the run could not be started or was interrupted, the run ends as exited: the watcher removes `eyes` and adds a `-1` to every comment of the batch that has no fresh `+1`. Add the `rocket` again to retry a comment.
-- A comment whose `rocket` you added again during the run gets no `-1`: it goes into the next batch.
+- A comment whose `rocket` you added again during the run gets no `-1`: it goes into the next batch. A `rocket` another person adds during the run counts only if it is newer than the `+1` or `-1` the run leaves, so they add it again after the run.
+
+### Who can approve
+
+- A `rocket` counts when its author has push access to the PR's repository: the `permission` or `role_name` of `gh api repos/OWNER/REPO/collaborators/LOGIN/permission` is `write`, `maintain` or `admin`. This includes the author of the comment, so a reviewer with push access can approve their own comment.
+- Your own `rocket` always counts and needs no check. Rockets of bots and deleted users never count.
+- The answer for each login is cached for 10 minutes, so revoked access stops counting soon. A 404 means no access. Any other failure of the check fails the whole lookup, which is retried with the usual backoff: an approval is never decided on a guess.
+- Of several rockets that count, the newest one is the approval time.
 - A deleted comment simply drops out of its batch. Anything else (claude idle while a comment has neither `+1` nor a failure reply, a permission prompt, every comment of the batch deleted) leaves the run in needs attention; that is not a failure yet, so no `-1` is added. See [State and logs](#state-and-logs).
 
 ### Stop hooks
@@ -362,8 +369,8 @@ The worker runs your normal `claude`, with your settings and your permission rul
 
 Every run starts an agent that edits code and pushes it to your branch, so the trigger has to be trusted:
 
-- Only a `rocket` reaction added by you, the account `gh` is logged in as, starts a run. On a public repository anyone can react to a comment, and those reactions are ignored.
-- An edit of the comment after your `rocket` needs a fresh `rocket`: the watcher never runs text you did not approve.
+- Only a `rocket` reaction added by someone with push access to the PR's repository starts a run (see [Who can approve](#who-can-approve)). On a public repository anyone can react to a comment, and the reactions of users without push access are ignored. Everyone with push access can already change the branch directly, so their `rocket` grants nothing new.
+- An edit of the comment after the approving `rocket` needs a fresh `rocket`: the watcher never runs text that was not approved.
 - The text saved when the run starts (one snapshot per comment) is the only approved text. Earlier comments of the same thread are included as untrusted context only. The worker never fetches other comments or replies.
 - Scope: claude changes only what the comment asks for, never runs commands quoted in comments, and does not touch dependencies, lockfiles, CI or workflow files or package scripts unless the approved comment asks for that file. It replies only inline in the same thread, never as a general PR comment or a review.
 - The worker can use git and gh only through these exact commands (`RUN_DIR` is the run's directory in the state directory; `ID` is the database id of a comment of the batch and `REPLY_TO_ID` the first comment of its thread, and the four lines with them repeat for every comment; `*` stands for explicit file paths):
@@ -394,7 +401,7 @@ Every run starts an agent that edits code and pushes it to your branch, so the t
     There is no wildcard `git diff`: with a path wildcard, `git diff` could read any file outside the repository. The reaction files are written per comment and name only that approved comment. The worker never adds a `-1`: only the watcher does. The push goes only to the PR branch: no force push, no amend, no rebase.
 
 - `PATH` entries inside your clone or the watch worktree are ignored when the watcher resolves `git`, `gh`, `tmux` and `claude`, and a tool that would resolve inside the working tree refuses the start. Before claude starts, the worker checks that `git` and `gh` still resolve to the same executables the watcher checked at start.
-- Accepted risk: the worker runs with your Claude Code permissions and your stored gh login. The comment text is still untrusted input, and the `rocket` is your approval to act on it, so read the comment before you add one.
+- Accepted risk: the worker runs with your Claude Code permissions and your stored gh login. The comment text is still untrusted input, and a `rocket` is an approval to act on it: you and every collaborator with push access should read the comment before adding one. Do not run the watcher on a repository whose push access you do not trust.
 
 ## State and logs
 
@@ -434,7 +441,7 @@ While a run is retained, the watcher shows `holding` with reason `OUTCOME-waitin
 
 - When the set of waiting comments changes (but not when it empties), the watcher posts a tmux notice such as `alex-pr-watch-comments: run RUN_ID: 2 approved comments waiting, exit Claude in pane N to start the next batch`. After the PR is closed or merged, the notice is `PR merged, exit Claude to finish` (or `PR closed, ...`).
 - A notice is repeated as a reminder at most every 30 minutes. Every change also goes to the watcher log.
-- A comment edited after its `rocket` is not counted; add the `rocket` again to approve the new text.
+- A comment edited after its approving `rocket` is not counted; add the `rocket` again to approve the new text.
 - A tmux notice is short and needs an attached client, so `--list` is the authoritative view.
 
 When the PR is closed or merged, the watcher keeps waiting while the in-flight run has, or may have, a worker. A run that has not started its worker yet (`preparing`) ends the watcher.

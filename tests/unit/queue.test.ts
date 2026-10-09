@@ -2,27 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import { buildQueue, lookupIds } from '../../src/queue.ts';
-import type { Logger, LookupEntry, LookupResult, PollComment, PollResult } from '../../src/types.ts';
-
-interface RecordingLogger extends Logger {
-    lines: string[];
-}
-
-function recordingLogger(): RecordingLogger {
-    const lines: string[] = [];
-    return {
-        lines,
-        info: (message) => {
-            lines.push(message);
-        },
-        warn: (message) => {
-            lines.push(message);
-        },
-        error: (message) => {
-            lines.push(message);
-        },
-    };
-}
+import type { LookupEntry, LookupResult, PollComment, PollResult } from '../../src/types.ts';
 
 function comment(dbId: number, rocket = true): PollComment {
     return { threadId: `PRRT_${dbId}`, position: 0, nodeId: `PRRC_${dbId}`, dbId, topDbId: dbId, rocket };
@@ -43,6 +23,9 @@ function entry(dbId: number, rocketAt?: number, editedAt?: number): LookupEntry 
         nodeId: `PRRC_${dbId}`,
         dbId,
         rocketAt,
+        viewerRocketAt: rocketAt,
+        othersRocketAt: undefined,
+        rockets: [],
         plus1At: undefined,
         eyes: false,
         minus1: false,
@@ -76,12 +59,10 @@ await describe('lookupIds', async () => {
 
 await describe('buildQueue', async () => {
     await test('candidates come out in approval order', () => {
-        const log = recordingLogger();
         const result = buildQueue(
             poll([comment(1), comment(2), comment(3)]),
             lookup([entry(1, 30), entry(2, 10), entry(3, 20)]),
-            [],
-            log
+            []
         );
         assert.deepEqual(
             result.candidates.map((candidate) => candidate.entry.rocketAt),
@@ -93,15 +74,13 @@ await describe('buildQueue', async () => {
         );
         assert.deepEqual(result.edited, []);
         assert.deepEqual(result.skippedDbIds, []);
-        assert.deepEqual(log.lines, []);
     });
 
     await test('equal rocket times are ordered by database id', () => {
         const result = buildQueue(
             poll([comment(5), comment(3), comment(4)]),
             lookup([entry(5, 10), entry(3, 10), entry(4, 5)]),
-            [],
-            recordingLogger()
+            []
         );
         assert.deepEqual(
             result.candidates.map((candidate) => candidate.poll.dbId),
@@ -110,12 +89,7 @@ await describe('buildQueue', async () => {
     });
 
     await test('an edit at the rocket time is refused, an earlier edit is accepted', () => {
-        const result = buildQueue(
-            poll([comment(1), comment(2)]),
-            lookup([entry(1, 50, 50), entry(2, 60, 59)]),
-            [],
-            recordingLogger()
-        );
+        const result = buildQueue(poll([comment(1), comment(2)]), lookup([entry(1, 50, 50), entry(2, 60, 59)]), []);
         assert.deepEqual(
             result.edited.map((item) => item.dbId),
             [1]
@@ -130,8 +104,7 @@ await describe('buildQueue', async () => {
         const result = buildQueue(
             poll([comment(1), comment(2), comment(3)]),
             lookup([entry(1, 10, 15), entry(2, 20), entry(3, 30)]),
-            [],
-            recordingLogger()
+            []
         );
         assert.deepEqual(
             result.edited.map((item) => item.dbId),
@@ -142,18 +115,13 @@ await describe('buildQueue', async () => {
     });
 
     await test('the in-flight node is excluded from candidates and refusals', () => {
-        const result = buildQueue(
-            poll([comment(1), comment(2)]),
-            lookup([entry(1, 10, 15), entry(2, 20)]),
-            ['PRRC_1'],
-            recordingLogger()
-        );
+        const result = buildQueue(poll([comment(1), comment(2)]), lookup([entry(1, 10, 15), entry(2, 20)]), ['PRRC_1']);
         assert.deepEqual(result.edited, []);
         assert.deepEqual(
             result.candidates.map((candidate) => candidate.poll.dbId),
             [2]
         );
-        const unedited = buildQueue(poll([comment(1)]), lookup([entry(1, 10)]), ['PRRC_1'], recordingLogger());
+        const unedited = buildQueue(poll([comment(1)]), lookup([entry(1, 10)]), ['PRRC_1']);
         assert.deepEqual(unedited.candidates, []);
     });
 
@@ -161,8 +129,7 @@ await describe('buildQueue', async () => {
         const result = buildQueue(
             poll([comment(1), comment(2), comment(3)]),
             lookup([entry(1, 10), entry(2, 20), entry(3, 30)]),
-            ['PRRC_1', 'PRRC_3'],
-            recordingLogger()
+            ['PRRC_1', 'PRRC_3']
         );
         assert.deepEqual(
             result.candidates.map((candidate) => candidate.poll.dbId),
@@ -170,11 +137,9 @@ await describe('buildQueue', async () => {
         );
     });
 
-    await test('an undefined rocket time is skipped with a log line', () => {
-        const log = recordingLogger();
-        const result = buildQueue(poll([comment(1), comment(2)]), lookup([entry(1), entry(2, 20)]), [], log);
+    await test('an undefined rocket time is skipped silently', () => {
+        const result = buildQueue(poll([comment(1), comment(2)]), lookup([entry(1), entry(2, 20)]), []);
         assert.deepEqual(result.skippedDbIds, [1]);
-        assert.deepEqual(log.lines, ['comment 1: viewer rocket time not found, skipped']);
         assert.deepEqual(
             result.candidates.map((candidate) => candidate.poll.dbId),
             [2]
@@ -182,7 +147,7 @@ await describe('buildQueue', async () => {
     });
 
     await test('rocketed comments without a lookup entry and unrocketed comments are not candidates', () => {
-        const result = buildQueue(poll([comment(1), comment(2, false)]), lookup([entry(2, 20)]), [], recordingLogger());
+        const result = buildQueue(poll([comment(1), comment(2, false)]), lookup([entry(2, 20)]), []);
         assert.deepEqual(result.candidates, []);
         assert.deepEqual(result.edited, []);
         assert.deepEqual(result.skippedDbIds, []);

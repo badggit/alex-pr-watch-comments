@@ -73,3 +73,16 @@ export async function ghCommand(deps: GhDeps, gh: GhCli, args: readonly string[]
     }
     return { kind: 'ok', data: undefined };
 }
+
+// For REST reads that print a JSON body; the caller passes the full argument list, including --hostname with gh.host.
+export async function ghJson(deps: GhDeps, gh: GhCli, args: readonly string[]): Promise<GhResult> {
+    const result = await deps.runner.run({ file: gh.path, args });
+    if (result.code !== 0) {
+        return commandFailure(result);
+    }
+    const parsed = parseJson(result.stdout);
+    if (!isRecord(parsed)) {
+        return { kind: 'transient', message: 'gh api printed output that is not a JSON object' };
+    }
+    return { kind: 'ok', data: parsed };
+}

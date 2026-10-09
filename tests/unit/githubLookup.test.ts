@@ -129,6 +129,9 @@ await describe('lookupComments', async () => {
             nodeId: 'PRRC_a',
             dbId: 101,
             rocketAt: epoch('2026-01-01T00:00:10Z'),
+            viewerRocketAt: epoch('2026-01-01T00:00:10Z'),
+            othersRocketAt: undefined,
+            rockets: [{ login: 'other', at: epoch('2026-01-01T00:00:05Z') }],
             plus1At: undefined,
             eyes: true,
             minus1: false,
@@ -264,14 +267,31 @@ await describe('lookupComments', async () => {
         assert.equal(entry.rocketAt, undefined);
     });
 
-    await test('a next page without a viewer reaction makes no follow-up', async () => {
+    await test('rockets of other users beyond the first 100 are collected through a follow-up', async () => {
         const fake = createFakeRunner();
         fake.respond('gh', 'PrwcLookup', {
             json: manyReactionsLookup({ content: 'ROCKET', viewerHasReacted: false, remaining: 4000 }),
         });
+        fake.respond('gh', 'PrwcReactions', {
+            json: reactionsPage({ first: 101, count: 20, hasNextPage: false, endCursor: 'c2', remaining: 3999 }),
+        });
+        const result = okResult(await lookupComments({ runner: fake.runner }, GH, [MANY_NODE_ID]));
+        assert.equal(reactionCalls(fake).length, 1);
+        const entry = entryOf(result, MANY_NODE_ID);
+        assert.equal(entry.rocketAt, undefined);
+        assert.equal(entry.viewerRocketAt, undefined);
+        assert.equal(entry.rockets.length, 120);
+        assert.deepEqual(entry.rockets.at(-1), { login: 'user120', at: reactionEpoch(120) });
+    });
+
+    await test('a +1 next page without a viewer +1 makes no follow-up', async () => {
+        const fake = createFakeRunner();
+        fake.respond('gh', 'PrwcLookup', {
+            json: manyReactionsLookup({ content: 'THUMBS_UP', viewerHasReacted: false, remaining: 4000 }),
+        });
         const result = okResult(await lookupComments({ runner: fake.runner }, GH, [MANY_NODE_ID]));
         assert.equal(reactionCalls(fake).length, 0);
-        assert.equal(entryOf(result, MANY_NODE_ID).rocketAt, undefined);
+        assert.equal(entryOf(result, MANY_NODE_ID).plus1At, undefined);
     });
 
     await test('a gone comment is listed, removed from the retry and the others are kept', async () => {

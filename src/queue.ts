@@ -1,4 +1,4 @@
-import type { Candidate, Logger, LookupEntry, LookupResult, PollResult, QueueResult } from './types.ts';
+import type { Candidate, LookupEntry, LookupResult, PollResult, QueueResult } from './types.ts';
 
 interface Approved {
     candidate: Candidate;
@@ -12,12 +12,7 @@ export function lookupIds(poll: PollResult, inflightNodeIds: readonly string[] =
 
 // The in-flight nodes are left out entirely: their approved text is already pinned in their snapshots. A comment
 // edited at or after its rocket is refused, never queued, because the approved text is no longer the current text.
-export function buildQueue(
-    poll: PollResult,
-    lookup: LookupResult,
-    inflightNodeIds: readonly string[],
-    log: Logger
-): QueueResult {
+export function buildQueue(poll: PollResult, lookup: LookupResult, inflightNodeIds: readonly string[]): QueueResult {
     const inflight = new Set(inflightNodeIds);
     const entries = new Map(lookup.entries.map((entry) => [entry.nodeId, entry]));
     const seen = new Set<string>();
@@ -31,8 +26,8 @@ export function buildQueue(
         }
         seen.add(comment.nodeId);
         const { rocketAt, editedAt } = entry;
+        // Common and silent: a rocket that was already consumed or comes from a user without push access.
         if (rocketAt === undefined) {
-            log.info(`comment ${comment.dbId}: viewer rocket time not found, skipped`);
             skippedDbIds.push(comment.dbId);
         } else if (editedAt !== undefined && editedAt >= rocketAt) {
             edited.push(entry);
