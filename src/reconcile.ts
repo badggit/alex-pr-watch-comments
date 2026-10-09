@@ -1,7 +1,6 @@
 import path from 'node:path';
 
-import { sessionGh } from './gh.ts';
-import { lookupComments } from './githubLookup.ts';
+import { approvalFloors, lookupApproved } from './approval.ts';
 import { getNumber } from './json.ts';
 import { adoptWorktreeLock, worktreeLockHolder } from './locks.ts';
 import { pidAlive } from './proc.ts';
@@ -77,10 +76,11 @@ async function adoptRun(deps: Deps, session: Session, record: RunRecord): Promis
 // Marks the comments of an interrupted run that failTarget picks, read from one lookup. When the lookup fails nothing
 // is marked (a done comment must not get a -1); every EYES the watcher added is removed instead.
 async function closeComments(deps: Deps, session: Session, record: RunRecord, stop?: AbortSignal): Promise<void> {
-    const looked = await lookupComments(
+    const looked = await lookupApproved(
         deps,
-        sessionGh(session),
-        record.comments.map((comment) => comment.nodeId)
+        session,
+        record.comments.map((comment) => comment.nodeId),
+        approvalFloors(record.comments)
     );
     if (looked.kind !== 'ok') {
         deps.log.warn(`run ${record.runId}: could not look up its comments, so none was marked as failed`);

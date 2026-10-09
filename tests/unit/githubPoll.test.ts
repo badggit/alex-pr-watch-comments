@@ -222,7 +222,7 @@ await describe('pollPr pages', async () => {
         assert.deepEqual(result.result.rate, { remaining: 4990, resetAt: RESET_AT });
     });
 
-    await test('rocket is true only where the viewer reacted with ROCKET', async () => {
+    await test('rocket is true where any user reacted with ROCKET', async () => {
         const othersOnly = {
             data: {
                 viewer: { login: 'reviewer' },
@@ -273,7 +273,7 @@ await describe('pollPr pages', async () => {
         assert.ok(result.kind === 'ok');
         assert.deepEqual(
             result.result.comments.map((item) => item.rocket),
-            [false]
+            [true]
         );
     });
 

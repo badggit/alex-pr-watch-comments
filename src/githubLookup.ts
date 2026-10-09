@@ -1,12 +1,12 @@
 import { GRAPHQL_OPS, PAGE_SIZE } from './constants.ts';
 import { ghGraphql, type GhCli, type GhDeps } from './gh.ts';
 import { getArray, getBoolean, getNumber, getPath, getRecord, getString, isoToEpoch, isRecord } from './json.ts';
-import type { GhFailure, GhResult, LookupEntry, LookupResult, RateInfo } from './types.ts';
+import type { GhFailure, GhResult, LookupEntry, LookupResult, RateInfo, RocketReaction } from './types.ts';
 import { quoteUntrusted, visibleText } from './untrustedText.ts';
 import { isValidNodeId } from './validate.ts';
 
-export type PagedReaction = 'ROCKET' | 'THUMBS_UP';
-export type ReactionContent = PagedReaction | 'EYES' | 'THUMBS_DOWN';
+export type PagedReaction = 'ROCKET' | 'THUMBS_UP' | 'THUMBS_DOWN';
+export type ReactionContent = PagedReaction | 'EYES';
 export type ReactionAction = 'add' | 'remove';
 
 export type LookupOutcome = { kind: 'ok'; result: LookupResult } | GhFailure;
@@ -29,6 +29,8 @@ interface LookupPage {
 type ChunkOutcome = { kind: 'ok'; data: unknown; gone: string[] } | GhFailure;
 type TimeOutcome = { kind: 'ok'; at: number | undefined; rate: RateInfo | undefined } | GhFailure;
 type EntryOutcome = { kind: 'ok'; entry: LookupEntry | undefined; rate: RateInfo | undefined } | GhFailure;
+type RocketsOutcome = { kind: 'ok'; rockets: RocketReaction[]; rate: RateInfo | undefined } | GhFailure;
+type PagingOutcome = { kind: 'ok'; rate: RateInfo } | GhFailure;
 
 const RATE_FIELDS = 'rateLimit { remaining resetAt }';
 const REACTION_PAGE = 'pageInfo { hasNextPage endCursor } nodes { createdAt user { login } }';
@@ -107,6 +109,17 @@ function viewerNode(nodes: readonly unknown[], viewer: string): unknown {
     return nodes.find((node) => getPath(node, 'user', 'login') === viewer);
 }
 
+// A reaction of a deleted user (user null) or with an unparsable time is left out.
+function readRocket(node: unknown): RocketReaction | undefined {
+    const login = getString(getRecord(node, 'user'), 'login');
+    const at = isoToEpoch(getPath(node, 'createdAt'));
+    return login === undefined || at === undefined ? undefined : { login, at };
+}
+
+function readRockets(nodes: readonly unknown[]): RocketReaction[] {
+    return nodes.map((node) => readRocket(node)).filter((rocket) => rocket !== undefined);
+}
+
 function viewerHasReacted(node: unknown, content: ReactionContent): boolean {
     const groups = getArray(node, 'reactionGroups') ?? [];
     const group = groups.find((item) => getString(item, 'content') === content);
@@ -162,7 +175,9 @@ function readEditedAt(node: unknown): { editedAt: number | undefined } | undefin
 }
 
 // The comment fields without the reaction times; undefined for a node that is not a usable review comment.
-function decodeComment(node: unknown): Omit<LookupEntry, 'rocketAt' | 'plus1At'> | undefined {
+function decodeComment(
+    node: unknown
+): Omit<LookupEntry, 'rocketAt' | 'viewerRocketAt' | 'othersRocketAt' | 'rockets' | 'plus1At'> | undefined {
     const nodeId = getString(node, 'id');
     const edited = readEditedAt(node);
     const dbId = getNumber(node, 'databaseId');
@@ -197,19 +212,22 @@ function decodeComment(node: unknown): Omit<LookupEntry, 'rocketAt' | 'plus1At'>
     };
 }
 
-export async function fetchReactionTime(
+// Pages the reactions of one kind from startCursor (undefined: from the first page) and hands every page's nodes to
+// visit until it returns true or the last page is read.
+async function pageReactions(
     deps: GhDeps,
     gh: GhCli,
     nodeId: string,
     content: PagedReaction,
-    startCursor: string,
-    viewer: string
-): Promise<ReactionTimeOutcome> {
+    startCursor: string | undefined,
+    visit: (_nodes: readonly unknown[]) => boolean
+): Promise<PagingOutcome> {
     let cursor = startCursor;
-    const seenCursors = new Set([startCursor]);
+    const seenCursors = new Set(startCursor === undefined ? [] : [startCursor]);
     let rate: RateInfo | undefined;
     for (;;) {
-        const result = await ghGraphql(deps, gh, REACTIONS_QUERY, { id: nodeId, content, endCursor: cursor });
+        const variables = cursor === undefined ? { id: nodeId, content } : { id: nodeId, content, endCursor: cursor };
+        const result = await ghGraphql(deps, gh, REACTIONS_QUERY, variables);
         if (result.kind !== 'ok') {
             return withRate(result, rate);
         }
@@ -218,12 +236,8 @@ export async function fetchReactionTime(
             return transient(`unexpected ${GRAPHQL_OPS.reactions} response`, freshRate(result.data, rate));
         }
         rate = readRate(result.data);
-        const found = viewerNode(connection.nodes, viewer);
-        if (found !== undefined) {
-            return { kind: 'ok', at: isoToEpoch(getPath(found, 'createdAt')), rate };
-        }
-        if (!connection.hasNextPage) {
-            return { kind: 'ok', at: undefined, rate };
+        if (visit(connection.nodes) || !connection.hasNextPage) {
+            return { kind: 'ok', rate };
         }
         if (connection.endCursor === undefined || seenCursors.has(connection.endCursor)) {
             return transient(`${GRAPHQL_OPS.reactions} returned a repeated cursor`, rate);
@@ -233,17 +247,56 @@ export async function fetchReactionTime(
     }
 }
 
-// The viewer's reaction time from the first page, or through the follow-up only when the viewer reacted but is
-// not among the first page's reactions and more pages exist.
-async function viewerReactionTime(
+export async function fetchReactionTime(
+    deps: GhDeps,
+    gh: GhCli,
+    nodeId: string,
+    content: PagedReaction,
+    startCursor: string | undefined,
+    viewer: string
+): Promise<ReactionTimeOutcome> {
+    let at: number | undefined;
+    const paged = await pageReactions(deps, gh, nodeId, content, startCursor, (nodes) => {
+        const found = viewerNode(nodes, viewer);
+        if (found === undefined) {
+            return false;
+        }
+        at = isoToEpoch(getPath(found, 'createdAt'));
+        return true;
+    });
+    return paged.kind === 'ok' ? { kind: 'ok', at, rate: paged.rate } : paged;
+}
+
+// Every rocket of the comment: the first page from the lookup node, the rest through follow-up calls.
+async function allRockets(deps: GhDeps, gh: GhCli, node: unknown, nodeId: string): Promise<RocketsOutcome> {
+    const connection = readConnection(getPath(node, 'rocket'));
+    if (connection === undefined) {
+        return { kind: 'ok', rockets: [], rate: undefined };
+    }
+    const rockets = readRockets(connection.nodes);
+    if (!connection.hasNextPage) {
+        return { kind: 'ok', rockets, rate: undefined };
+    }
+    if (connection.endCursor === undefined) {
+        return transient(`${GRAPHQL_OPS.lookup} returned no reaction cursor`);
+    }
+    const paged = await pageReactions(deps, gh, nodeId, 'ROCKET', connection.endCursor, (nodes) => {
+        rockets.push(...readRockets(nodes));
+        return false;
+    });
+    return paged.kind === 'ok' ? { kind: 'ok', rockets, rate: paged.rate } : paged;
+}
+
+// The viewer's +1 time from the first page, or through the follow-up only when the viewer reacted but is not among
+// the first page's reactions and more pages exist.
+async function viewerPlusTime(
     deps: GhDeps,
     gh: GhCli,
     node: unknown,
     nodeId: string,
-    content: PagedReaction,
     viewer: string
 ): Promise<TimeOutcome> {
-    const connection = readConnection(getPath(node, content === 'ROCKET' ? 'rocket' : 'plus'));
+    const connection = readConnection(getPath(node, 'plus'));
     if (connection === undefined) {
         return { kind: 'ok', at: undefined, rate: undefined };
     }
@@ -251,13 +304,13 @@ async function viewerReactionTime(
     if (found !== undefined) {
         return { kind: 'ok', at: isoToEpoch(getPath(found, 'createdAt')), rate: undefined };
     }
-    if (!connection.hasNextPage || !viewerHasReacted(node, content)) {
+    if (!connection.hasNextPage || !viewerHasReacted(node, 'THUMBS_UP')) {
         return { kind: 'ok', at: undefined, rate: undefined };
     }
     if (connection.endCursor === undefined) {
         return transient(`${GRAPHQL_OPS.lookup} returned no reaction cursor`);
     }
-    const followUp = await fetchReactionTime(deps, gh, nodeId, content, connection.endCursor, viewer);
+    const followUp = await fetchReactionTime(deps, gh, nodeId, 'THUMBS_UP', connection.endCursor, viewer);
     return followUp;
 }
 
@@ -272,18 +325,27 @@ async function decodeEntry(
     if (comment === undefined) {
         return { kind: 'ok', entry: undefined, rate: undefined };
     }
-    const rocket = await viewerReactionTime(deps, gh, node, comment.nodeId, 'ROCKET', viewer);
+    const rocket = await allRockets(deps, gh, node, comment.nodeId);
     if (rocket.kind !== 'ok') {
         return withRate(rocket, rocket.rate ?? lastRate);
     }
     const rateAfterRocket = rocket.rate ?? lastRate;
-    const plus = await viewerReactionTime(deps, gh, node, comment.nodeId, 'THUMBS_UP', viewer);
+    const plus = await viewerPlusTime(deps, gh, node, comment.nodeId, viewer);
     if (plus.kind !== 'ok') {
         return withRate(plus, plus.rate ?? rateAfterRocket);
     }
+    const viewerRocketAt = rocket.rockets.find((item) => item.login === viewer)?.at;
+    const rockets = rocket.rockets.filter((item) => item.login !== viewer);
     return {
         kind: 'ok',
-        entry: { ...comment, rocketAt: rocket.at, plus1At: plus.at },
+        entry: {
+            ...comment,
+            rocketAt: viewerRocketAt,
+            viewerRocketAt,
+            othersRocketAt: undefined,
+            rockets,
+            plus1At: plus.at,
+        },
         rate: plus.rate ?? rocket.rate,
     };
 }

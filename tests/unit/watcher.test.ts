@@ -4,7 +4,8 @@ import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { getPath, isRecord, parseJson } from '../../src/json.ts';
+import { clearPermissionCache, readConsumed } from '../../src/approval.ts';
+import { getArray, getPath, isRecord, parseJson } from '../../src/json.ts';
 import { markLaunchReady, readLaunchResult } from '../../src/launchChannel.ts';
 import { acquirePrLock, acquireWorktreeLock, worktreeLockHolder } from '../../src/locks.ts';
 import { createProcessRunner, pidAlive, processStart } from '../../src/proc.ts';
@@ -40,6 +41,8 @@ interface CommentSpec {
     plus1At?: number;
     // The viewer's rocket is only on a later reaction page, so the lookup needs a PrwcReactions follow-up.
     followUp?: boolean;
+    // A rocket of the user 'other', whose push access is answered by OTHER_PERMISSION_KEY.
+    otherRocketAt?: number;
 }
 
 interface RateOptions {
@@ -95,6 +98,8 @@ const TOKEN = '123-456';
 const THREAD = 'PRRT_t1';
 const VIEWER = 'reviewer';
 const BRANCH = 'feature';
+// The routing key of the REST permission check of the user 'other' on the PR's repository.
+const OTHER_PERMISSION_KEY = 'api_repos/o/r/collaborators/other/permission';
 const NEVER = new AbortController().signal;
 const NULL_JSON: unknown = JSON.parse('null');
 const GH_FAIL: FakeResponse = { code: 1, stderr: 'HTTP 502: Bad Gateway' };
@@ -165,6 +170,15 @@ function reactionPage(viewerAt: number | undefined, followUp: boolean): unknown 
     return { pageInfo: { hasNextPage: false, endCursor: 'R1' }, nodes };
 }
 
+function rocketPage(comment: CommentSpec): unknown {
+    const page = reactionPage(comment.rocketAt, comment.followUp ?? false);
+    if (comment.otherRocketAt === undefined) {
+        return page;
+    }
+    const other = { createdAt: iso(comment.otherRocketAt), user: { login: 'other' } };
+    return { pageInfo: { hasNextPage: false, endCursor: 'R1' }, nodes: [...(getArray(page, 'nodes') ?? []), other] };
+}
+
 function lookupNode(comment: CommentSpec): unknown {
     return {
         ...NODE_TEMPLATE,
@@ -172,7 +186,7 @@ function lookupNode(comment: CommentSpec): unknown {
         databaseId: comment.dbId,
         url: `https://github.com/o/r/pull/12#discussion_r${comment.dbId}`,
         lastEditedAt: comment.editedAt === undefined ? NULL_JSON : iso(comment.editedAt),
-        rocket: reactionPage(comment.rocketAt, comment.followUp ?? false),
+        rocket: rocketPage(comment),
         plus: reactionPage(comment.plus1At, false),
         reactionGroups: [
             { content: 'ROCKET', viewerHasReacted: comment.rocketAt !== undefined },
@@ -240,6 +254,7 @@ function respondDefaults(fake: FakeRunner, panePid: number): void {
 // git goes to the real git through the offline transport and ps and the identity read (/bin/sh, tool other) to the real runner (unless psPassthrough is false);
 // gh and tmux are answered by the fake runner. The clock is fixed at the setup time.
 async function makeSetup(t: TestContext, options?: SetupOptions): Promise<Setup> {
+    clearPermissionCache();
     const testEnv = await createTestEnv();
     const cleanups: (() => Promise<unknown> | void)[] = [];
     t.after(async () => {
@@ -528,6 +543,50 @@ await describe('watchTick', async () => {
         assert.deepEqual(listRunIds(setup.stateDir), []);
     });
 
+    await test('a comment approved only by a collaborator is dispatched without a rocket removal', async (t) => {
+        const setup = await makeSetup(t);
+        setup.fake.respond('gh', OTHER_PERMISSION_KEY, { json: { permission: 'write', role_name: 'write' } });
+        const comments: CommentSpec[] = [{ dbId: 103, rocket: true, otherRocketAt: setup.now - 100 }];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        const rt = createRuntime('', '@1');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(splits(setup.fake), 1);
+        assert.ok(rt.inflightRunId?.endsWith('-103'), `dispatched ${rt.inflightRunId}`);
+        assert.deepEqual(rocketRemovals(setup.fake), []);
+        assert.deepEqual(readConsumed(setup.stateDir, PR_KEY), new Map([[nodeIdOf(103), setup.now - 100]]));
+    });
+
+    await test('a rocket of a user without push access starts nothing', async (t) => {
+        const setup = await makeSetup(t);
+        setup.fake.respond('gh', OTHER_PERMISSION_KEY, { json: { permission: 'read', role_name: 'read' } });
+        const comments: CommentSpec[] = [{ dbId: 103, rocket: true, otherRocketAt: setup.now - 100 }];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        const rt = createRuntime('', '@1');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(splits(setup.fake), 0);
+        assert.equal(rt.inflightRunId, undefined);
+        assert.deepEqual(mutations(setup.fake), []);
+    });
+
+    await test('an edited comment approved by a collaborator gets a -1 instead of a rocket removal', async (t) => {
+        const setup = await makeSetup(t);
+        setup.fake.respond('gh', OTHER_PERMISSION_KEY, { json: { permission: 'admin', role_name: 'admin' } });
+        const comments: CommentSpec[] = [
+            { dbId: 102, rocket: true, otherRocketAt: setup.now - 300, editedAt: setup.now - 100 },
+        ];
+        respondPoll(setup, comments);
+        respondLookup(setup, comments);
+        const rt = createRuntime('', '@1');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.deepEqual(rocketRemovals(setup.fake), []);
+        const added = mutations(setup.fake).map((call) => [call.key, variable(call, 'content')]);
+        assert.deepEqual(added, [['PrwcAddReaction', 'THUMBS_DOWN']]);
+        assert.ok(setup.deps.logLines.some((line) => line.includes('add the rocket again to approve the new text')));
+        assert.equal(splits(setup.fake), 0);
+    });
+
     await test('a guard hold leaves no lock and no reaction change', async (t) => {
         const setup = await makeSetup(t);
         fs.appendFileSync(path.join(setup.clone, 'README.md'), 'dirty\n');
@@ -612,6 +671,7 @@ await describe('watchTick', async () => {
         respondPoll(setup, [{ dbId: 101 }, { dbId: 102 }, approved]);
         respondPoll(setup, [{ dbId: 101 }, { dbId: 102 }, { dbId: 103 }]);
         respondLookup(setup, [approved]);
+        respondLookup(setup, [{ dbId: 103 }]);
         const rt = createRuntime('', '@1');
         assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
         const runId = rt.inflightRunId;
@@ -1346,6 +1406,7 @@ await describe('applyPacing', async () => {
         setup.fake.respond('gh', 'PrwcReactions', {
             json: reactionsJson(setup.now, setup.now - 100, { remaining: 100, resetAt: setup.now + 900 }),
         });
+        setup.fake.respond('gh', OTHER_PERMISSION_KEY, { json: { permission: 'read', role_name: 'read' } });
         const rt = createRuntime('', '@1');
         assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
         assert.equal(setup.fake.callCount('gh', 'PrwcReactions'), 1);

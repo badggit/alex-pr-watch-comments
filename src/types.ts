@@ -110,10 +110,22 @@ export interface PollResult {
     comments: PollComment[];
 }
 
+// A ROCKET reaction of any user, with its creation time in epoch seconds.
+export interface RocketReaction {
+    login: string;
+    at: number;
+}
+
+// rocketAt is the approval time: the newest rocket that counts, from the viewer or from another user with push
+// access (othersRocketAt). lookupComments fills only the viewer's part; resolveApprovals adds the others.
+// rockets lists the rockets of every user except the viewer.
 export interface LookupEntry {
     nodeId: string;
     dbId: number;
     rocketAt: number | undefined;
+    viewerRocketAt: number | undefined;
+    othersRocketAt: number | undefined;
+    rockets: RocketReaction[];
     plus1At: number | undefined;
     eyes: boolean;
     minus1: boolean;
@@ -199,7 +211,7 @@ export type RunState = 'preparing' | 'running' | 'needs_attention' | 'retained' 
 // How a retained run settled; fixed once the run enters the retained state.
 export type RunOutcome = 'completed' | 'failed';
 
-// One approved comment of a run. rocketAt is the viewer's rocket time, the baseline a +1 must be newer than to count
+// One approved comment of a run. rocketAt is its approval time, the baseline a +1 must be newer than to count
 // as done; eyesAdded says the watcher's EYES add succeeded.
 export interface RunComment {
     nodeId: string;

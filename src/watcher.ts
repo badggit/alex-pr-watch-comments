@@ -1,7 +1,8 @@
+import { approvalFloors, lookupApproved } from './approval.ts';
 import { DEFAULT_RATE_RESERVE, DEFAULT_READY_WAIT, DEFAULT_RUN_CHECK, ENV_NAMES } from './constants.ts';
 import { dispatch, resumeDispatch, retryLockRelease, type DispatchResult } from './dispatch.ts';
 import { sessionGh } from './gh.ts';
-import { lookupComments, react } from './githubLookup.ts';
+import { react, type ReactOutcome } from './githubLookup.ts';
 import { pollPr } from './githubPoll.ts';
 import { launchReady, readLaunchResult, writeLaunchResult } from './launchChannel.ts';
 import { acquirePrLock, releasePrLock } from './locks.ts';
@@ -85,10 +86,11 @@ export interface TickHooks {
 
 // A preparing run is resumed and never captured; it has no worker yet, so a closed PR ends the watcher. Any other
 // in-flight run (an unreadable record too, without node ids) may have a worker and is evaluated on the capture taken
-// before its lookup until that worker is proven gone, so a closed PR keeps the watcher waiting for it.
+// before its lookup until that worker is proven gone, so a closed PR keeps the watcher waiting for it. floors holds
+// the approval time of every comment of the run, a retained one too (approvalFloors).
 type Inflight =
-    | { kind: 'preparing'; runId: string; nodeIds: string[] }
-    | { kind: 'evaluate'; runId: string; nodeIds: string[]; capture: Capture };
+    | { kind: 'preparing'; runId: string; nodeIds: string[]; floors: Map<string, number> }
+    | { kind: 'evaluate'; runId: string; nodeIds: string[]; floors: Map<string, number>; capture: Capture };
 
 // kept: the run still holds the slot; cleared: the slot is free and reason says why the run ended.
 type InflightResult = { kind: 'kept' } | { kind: 'cleared'; reason: string };
@@ -126,12 +128,6 @@ const ENDED_EARLY = 'watcher ended before its first poll';
 const LOCK_PENDING = 'worktree lock release pending';
 const NO_RUN: Pick<WatcherStatus, 'runId' | 'comments'> = { runId: '', comments: '' };
 const NOTICE_PREFIX = 'alex-pr-watch-comments: ';
-function ignoreMessage(): void {
-    return;
-}
-
-// The read-only queue of a retained run must not repeat the per-comment queue messages on every poll.
-const QUIET_QUEUE_LOG: Logger = { info: ignoreMessage, warn: ignoreMessage, error: ignoreMessage };
 
 export function createRuntime(launchToken: string, windowId: string): WatcherRuntime {
     return {
@@ -334,10 +330,11 @@ function noteInflight(session: Session, runId: string): Inflight {
     const record = read.kind === 'ok' ? read.record : undefined;
     const retained = record?.state === 'retained';
     const nodeIds = retained ? [] : (record?.comments.map((comment) => comment.nodeId) ?? []);
+    const floors = approvalFloors(record?.comments ?? []);
     if (record?.state === 'preparing') {
-        return { kind: 'preparing', runId, nodeIds };
+        return { kind: 'preparing', runId, nodeIds, floors };
     }
-    return { kind: 'evaluate', runId, nodeIds, capture: captureRun(session.stateDir, runId) };
+    return { kind: 'evaluate', runId, nodeIds, floors, capture: captureRun(session.stateDir, runId) };
 }
 
 function retryPendingLock(deps: Deps, session: Session, rt: WatcherRuntime): void {
@@ -347,14 +344,33 @@ function retryPendingLock(deps: Deps, session: Session, rt: WatcherRuntime): voi
     }
 }
 
+function reactDetail(outcome: Exclude<ReactOutcome, { kind: 'ok' }>): string {
+    return outcome.kind === 'invalid' ? 'invalid comment node id' : safeText(outcome.message);
+}
+
+// The viewer's rocket is removed. A rocket of another user cannot be removed, so a fresh -1 of the viewer consumes it
+// instead: an older -1 is removed first, since adding a reaction the viewer already has keeps its old time.
 async function refuseEdited(deps: Deps, session: Session, entry: LookupEntry): Promise<void> {
-    const removed = await react(deps, sessionGh(session), 'remove', entry.nodeId, 'ROCKET');
-    if (removed.kind === 'ok') {
-        deps.log.info(`comment ${entry.dbId} was edited after approval; add the rocket again to approve the new text`);
-        return;
+    const gh = sessionGh(session);
+    const prefix = `comment ${entry.dbId} was edited after approval`;
+    if (entry.viewerRocketAt !== undefined) {
+        const removed = await react(deps, gh, 'remove', entry.nodeId, 'ROCKET');
+        if (removed.kind !== 'ok') {
+            deps.log.warn(`${prefix}; its rocket removal failed: ${reactDetail(removed)}`);
+            return;
+        }
     }
-    const detail = removed.kind === 'invalid' ? 'invalid comment node id' : safeText(removed.message);
-    deps.log.warn(`comment ${entry.dbId} was edited after approval; its rocket removal failed: ${detail}`);
+    if (entry.othersRocketAt !== undefined) {
+        if (entry.minus1) {
+            await react(deps, gh, 'remove', entry.nodeId, 'THUMBS_DOWN');
+        }
+        const added = await react(deps, gh, 'add', entry.nodeId, 'THUMBS_DOWN');
+        if (added.kind !== 'ok') {
+            deps.log.warn(`${prefix}; its THUMBS_DOWN add failed: ${reactDetail(added)}`);
+            return;
+        }
+    }
+    deps.log.info(`${prefix}; add the rocket again to approve the new text`);
 }
 
 async function resumeInflight(
@@ -366,10 +382,8 @@ async function resumeInflight(
     stop: AbortSignal
 ): Promise<void> {
     const ids = new Set(inflight.nodeIds);
-    const rocketed = new Set(
-        lists.poll.comments.filter((item) => item.rocket && ids.has(item.nodeId)).map((item) => item.nodeId)
-    );
     const entries = lists.lookup.entries.filter((item) => ids.has(item.nodeId));
+    const rocketed = new Set(entries.filter((item) => item.viewerRocketAt !== undefined).map((item) => item.nodeId));
     const resumed = await resumeDispatch(deps, session, inflight.runId, rocketed, entries);
     rt.inflightRunId = resumed.runId;
     if (stop.aborted) {
@@ -502,7 +516,7 @@ async function countWaiting(
     runId: string,
     lists: { poll: PollResult; lookup: LookupResult }
 ): Promise<void> {
-    rt.waiting = waitingSetOf(buildQueue(lists.poll, lists.lookup, [], QUIET_QUEUE_LOG).candidates);
+    rt.waiting = waitingSetOf(buildQueue(lists.poll, lists.lookup, []).candidates);
     await showRetained(deps, session, rt, runId);
 }
 
@@ -523,7 +537,7 @@ async function checkInflight(
 ): Promise<CheckResult> {
     let lookup = emptyLookup();
     if (inflight.nodeIds.length > 0) {
-        const looked = await lookupComments(deps, sessionGh(session), inflight.nodeIds);
+        const looked = await lookupApproved(deps, session, inflight.nodeIds, inflight.floors);
         if (looked.kind !== 'ok') {
             return { kind: 'ended', outcome: failedFetch(deps, session, rt, ctx.stop, looked, ctx.suspended) };
         }
@@ -585,7 +599,7 @@ async function pollTick(
     const ids = lookupIds(poll, inflight?.kind === 'preparing' ? inflightIds : []);
     let lookup = emptyLookup();
     if (ids.length > 0) {
-        const looked = await lookupComments(deps, gh, ids);
+        const looked = await lookupApproved(deps, session, ids, inflight?.floors);
         if (looked.kind !== 'ok') {
             return failedFetch(deps, session, rt, stop, looked, ctx.suspended);
         }
@@ -606,7 +620,7 @@ async function pollTick(
         await countWaiting(deps, session, rt, rt.inflightRunId, { poll, lookup });
         return stop.aborted ? 'stopped' : 'ok';
     }
-    const queue = buildQueue(poll, lookup, inflightIds, deps.log);
+    const queue = buildQueue(poll, lookup, inflightIds);
     for (const entry of queue.edited) {
         if (stop.aborted) {
             return 'stopped';

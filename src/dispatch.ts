@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { recordConsumed } from './approval.ts';
 import { DEFAULT_LAUNCH_WAIT, ENV_NAMES } from './constants.ts';
 import { sessionGh } from './gh.ts';
 import { fetchContext, react, type ReactOutcome } from './githubLookup.ts';
@@ -177,7 +178,8 @@ async function announce(deps: Deps, session: Session, text: string): Promise<voi
 }
 
 // Removes the viewer's rocket from every comment that still carries it (present decides); every removal is tried,
-// and true means none failed.
+// and true means none failed. A comment approved only by another user's rocket has nothing to remove: recordConsumed
+// has already consumed that rocket.
 async function removeRockets(
     deps: Deps,
     session: Session,
@@ -441,7 +443,11 @@ export async function dispatch(
         if (!(await writeSnapshots(deps, session, record, candidates, poll))) {
             return result('contextFailed', freeRun(deps, stateDir, wtKey, runId));
         }
-        if (!(await removeRockets(deps, session, record.comments, () => true, progress))) {
+        recordConsumed(stateDir, session.pr.prKey, record.comments);
+        const viewerRocketed = new Set(
+            candidates.filter((item) => item.entry.viewerRocketAt !== undefined).map((item) => item.entry.nodeId)
+        );
+        if (!(await removeRockets(deps, session, record.comments, (nodeId) => viewerRocketed.has(nodeId), progress))) {
             return result('rocketRemovalFailed', runId);
         }
         const entries = entryMap(candidates.map((candidate) => candidate.entry));
@@ -511,7 +517,7 @@ function refusedResume(deps: Deps, stateDir: string, runId: string, record: RunR
 
 // Continues a preparing run after a failed ROCKET removal: no lock acquire, no guards and no context fetch, since
 // the record already holds the head commit and the snapshots the approved text. rocketed holds the node ids that still
-// carry the viewer's rocket; a comment without an entry is gone and leaves the batch, and a batch without any comment
+// carry the viewer's own rocket; a comment without an entry is gone and leaves the batch, and a batch without any comment
 // left is abandoned.
 export async function resumeDispatch(
     deps: Deps,

@@ -50,7 +50,7 @@ const PR_STATES: readonly PrState[] = ['OPEN', 'CLOSED', 'MERGED'];
 const RATE_FIELDS = 'rateLimit { remaining resetAt }';
 
 const COMMENT_FIELDS =
-    'pageInfo { hasNextPage endCursor } nodes { id databaseId reactionGroups { content viewerHasReacted } }';
+    'pageInfo { hasNextPage endCursor } nodes { id databaseId reactionGroups { content viewerHasReacted reactors { totalCount } } }';
 
 const PR_INFO_QUERY = `query ${GRAPHQL_OPS.prInfo}($owner: String!, $repo: String!, $number: Int!) {
     viewer { login }
@@ -150,8 +150,12 @@ function decodeComment(value: unknown): CommentNode | undefined {
     if (!Number.isSafeInteger(dbId) || dbId <= 0) {
         return;
     }
+    // Any rocket marks the comment for the lookup, which decides whose rocket counts.
     const rocket = groups.some(
-        (group) => getString(group, 'content') === 'ROCKET' && getBoolean(group, 'viewerHasReacted') === true
+        (group) =>
+            getString(group, 'content') === 'ROCKET' &&
+            (getBoolean(group, 'viewerHasReacted') === true ||
+                (getNumber(getPath(group, 'reactors'), 'totalCount') ?? 0) > 0)
     );
     return { nodeId, dbId, rocket };
 }
