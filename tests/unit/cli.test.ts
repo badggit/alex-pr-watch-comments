@@ -87,7 +87,6 @@ await describe('parseArgs', async () => {
         assert.equal(options.claude, undefined);
         assert.deepEqual(options.claudeArgs, []);
         assert.equal(options.once, false);
-        assert.equal(options.inPlace, true);
     });
 
     await test('value options', () => {
@@ -129,10 +128,6 @@ await describe('parseArgs', async () => {
         assert.equal(stop.mode, 'stop');
         assert.equal(stop.pr?.prKey, 'o+r+12');
         assert.equal(okOptions([PR_URL, '--once']).once, true);
-        assert.equal(okOptions([PR_URL, '--in-place']).inPlace, true);
-        assert.equal(okOptions([PR_URL, '--background', '--in-place']).inPlace, true);
-        assert.equal(okOptions([PR_URL, '--worktree']).inPlace, false);
-        assert.equal(okOptions([PR_URL, '--background', '--worktree']).inPlace, false);
     });
 
     await test('--no-attach turns off the terminal tab of a background start', () => {
@@ -144,10 +139,16 @@ await describe('parseArgs', async () => {
         });
     });
 
-    await test('repeating the same working-tree option keeps that mode', () => {
-        assert.equal(okOptions([PR_URL]).inPlace, true);
-        assert.equal(okOptions([PR_URL, '--in-place', '--in-place']).inPlace, true);
-        assert.equal(okOptions([PR_URL, '--worktree', '--worktree']).inPlace, false);
+    await test('the removed working-tree options fail with a hint', () => {
+        const worktree = '--worktree was removed: create a worktree yourself and start the watcher inside it';
+        const inPlace = '--in-place was removed: the watcher always works in the folder it is started from';
+        assert.equal(errorMessage([PR_URL, '--worktree']), worktree);
+        assert.equal(errorMessage(['--worktree', PR_URL, '--background']), worktree);
+        assert.equal(errorMessage([PR_URL, '--in-place']), inPlace);
+        assert.equal(errorMessage(['--list', '--in-place']), inPlace);
+        assert.equal(errorMessage([PR_URL, '--in-place', '--worktree']), inPlace);
+        assert.equal(errorMessage([PR_URL, '--claude-arg', '--worktree', '--in-place']), inPlace);
+        assert.deepEqual(okOptions([PR_URL, '--claude-arg', '--worktree']).claudeArgs, ['--worktree']);
     });
 
     await test('--help', () => {
@@ -178,27 +179,6 @@ await describe('parseArgs', async () => {
         assert.match(errorMessage([PR_URL, '--background', '--list']), /--background/u);
         assert.match(errorMessage(['--background', '--stop', PR_URL]), /--background/u);
         assert.equal(errorMessage([PR_URL, '--background', '--once']), '--once cannot be combined with --background');
-        assert.equal(
-            errorMessage([PR_URL, '--in-place', '--worktree']),
-            '--in-place cannot be combined with --worktree'
-        );
-        assert.equal(
-            errorMessage([PR_URL, '--worktree', '--in-place']),
-            '--in-place cannot be combined with --worktree'
-        );
-        assert.equal(
-            errorMessage([PR_URL, '--in-place', '--worktree', '--in-place']),
-            '--in-place cannot be combined with --worktree'
-        );
-        assert.equal(
-            errorMessage([PR_URL, '--worktree', '--in-place', '--worktree']),
-            '--in-place cannot be combined with --worktree'
-        );
-        assert.equal(
-            errorMessage(['--worktree', '--in-place', '--list', '--stop', PR_URL]),
-            '--in-place cannot be combined with --worktree'
-        );
-        assert.equal(errorMessage([PR_URL, '--worktree', '--bogus', '--in-place']), 'unknown option: --bogus');
         assert.match(errorMessage([]), /PR URL/u);
         assert.match(errorMessage(['--background']), /PR URL/u);
         assert.match(errorMessage(['https://localhost/o/r/pull/1']), /invalid PR URL/u);
@@ -219,8 +199,6 @@ await describe('parseArgs', async () => {
             '--keep-panes',
             '--batch-max',
             '--once',
-            '--in-place',
-            '--worktree',
             '--help',
         ]) {
             assert.ok(usage.includes(option), option);
@@ -230,30 +208,17 @@ await describe('parseArgs', async () => {
     });
 });
 
-await describe('parseArgs new-worktree', async () => {
-    await test('a leading new-worktree routes to the new-worktree parser', () => {
-        assert.deepEqual(parseArgs(['new-worktree', '--task', 'abc-123'], CWD), {
-            kind: 'newWorktree',
-            args: { name: undefined, task: 'abc-123', branch: undefined, base: undefined },
-        });
-    });
-
-    await test('help and errors of the new-worktree parser pass through', () => {
-        assert.deepEqual(parseArgs(['new-worktree', '--help'], CWD), { kind: 'help' });
-        const message = errorMessage(['new-worktree']);
-        assert.match(message, /NAME/u);
-        assert.match(message, /--task/u);
-        assert.equal(errorMessage(['new-worktree', '--bogus']), 'unknown option: --bogus');
-    });
-
-    await test('new-worktree in any other position keeps its old meaning', () => {
+await describe('removed new-worktree subcommand', async () => {
+    await test('a leading new-worktree is a plain positional, not a subcommand', () => {
+        assert.match(errorMessage(['new-worktree', '--task', 'abc-123']), /unknown option: --task/u);
+        assert.match(errorMessage(['new-worktree']), /invalid PR URL/u);
         assert.equal(errorMessage([PR_URL, 'new-worktree']), 'unexpected argument: new-worktree');
     });
 
-    await test('usageText lists both new-worktree forms', () => {
+    await test('usageText no longer mentions removed commands and options', () => {
         const usage = usageText();
-        assert.ok(usage.includes('alex-pr-watch-comments new-worktree NAME [--branch BRANCH] [--base REF]'));
-        assert.ok(usage.includes('alex-pr-watch-comments new-worktree --task SLUG [--branch BRANCH] [--base REF]'));
-        assert.ok(usage.includes('create or reuse a worktree next to the main clone and print its path'));
+        for (const removed of ['new-worktree', '--worktree', '--in-place']) {
+            assert.ok(!usage.includes(removed), removed);
+        }
     });
 });

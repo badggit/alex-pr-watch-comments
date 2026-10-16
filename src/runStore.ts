@@ -26,6 +26,7 @@ import type {
     WatcherState,
     WatcherStatus,
 } from './types.ts';
+import { visibleText } from './untrustedText.ts';
 import { isUintString } from './validate.ts';
 
 export type RecordRead = { kind: 'ok'; record: RunRecord } | { kind: 'unreadable'; format: string };
@@ -55,6 +56,7 @@ const WATCHER_STATES: ReadonlySet<string> = new Set<WatcherState>([
     'running',
     'needs_attention',
     'backing_off',
+    'offline',
     'throttled',
     'exited',
     'fatal',
@@ -87,8 +89,37 @@ function formatText(value: unknown): string {
     return typeof format === 'number' || typeof format === 'string' ? String(format) : 'unknown';
 }
 
+type LabelFields = Pick<RunComment, 'author' | 'path' | 'line'>;
+
+// A stored label must already be escaped (visibleText leaves it unchanged), so a record edited by hand cannot send
+// control characters to the console.
+function narrowLabelText(value: unknown, key: string): { valid: boolean; text?: string } {
+    const raw = getPath(value, key);
+    if (raw === undefined) {
+        return { valid: true };
+    }
+    return typeof raw === 'string' && visibleText(raw) === raw ? { valid: true, text: raw } : { valid: false };
+}
+
+// author, path and line are optional: records written before they existed lack them.
+function narrowLabelFields(value: unknown): LabelFields | undefined {
+    const author = narrowLabelText(value, 'author');
+    const filePath = narrowLabelText(value, 'path');
+    const line = getPath(value, 'line');
+    const lineValid = line === undefined || (typeof line === 'number' && Number.isSafeInteger(line) && line > 0);
+    if (!author.valid || !filePath.valid || !lineValid) {
+        return;
+    }
+    return {
+        ...(author.text === undefined ? {} : { author: author.text }),
+        ...(filePath.text === undefined ? {} : { path: filePath.text }),
+        ...(typeof line === 'number' ? { line } : {}),
+    };
+}
+
 function narrowComment(value: unknown): RunComment | undefined {
     const read = createFieldReader(value);
+    const label = narrowLabelFields(value);
     const comment: RunComment = {
         nodeId: read.text('nodeId'),
         dbId: read.integer('dbId'),
@@ -97,8 +128,9 @@ function narrowComment(value: unknown): RunComment | undefined {
         topDbId: read.integer('topDbId'),
         rocketAt: read.integer('rocketAt'),
         eyesAdded: read.flag('eyesAdded'),
+        ...label,
     };
-    return read.failed() ? undefined : comment;
+    return read.failed() || label === undefined ? undefined : comment;
 }
 
 // A run holds at least one comment, and every comment must be readable.

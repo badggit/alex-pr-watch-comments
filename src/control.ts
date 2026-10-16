@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
     DEFAULT_BG_TIMEOUT,
     DEFAULT_LAUNCH_WAIT,
+    DEFAULT_OFFLINE_CHECK,
     DEFAULT_RATE_RESERVE,
     DEFAULT_READY_WAIT,
     DEFAULT_RUN_CHECK,
@@ -67,6 +68,7 @@ const FORWARDED_OVERRIDES: readonly (readonly [string, number])[] = [
     [ENV_NAMES.readyWait, DEFAULT_READY_WAIT],
     [ENV_NAMES.bgTimeout, DEFAULT_BG_TIMEOUT],
     [ENV_NAMES.runCheck, DEFAULT_RUN_CHECK],
+    [ENV_NAMES.offlineCheck, DEFAULT_OFFLINE_CHECK],
 ];
 const WINDOW_ID = /^@\d+$/u;
 const PANE_ID = /^%\d+$/u;
@@ -152,8 +154,7 @@ function watcherCommand(session: Session, entry: BackgroundEntry): string[] {
         entry.mainTs,
         session.pr.prUrl,
         '--dir',
-        session.worktree?.source ?? session.dirCanon,
-        session.worktree === undefined ? '--in-place' : '--worktree',
+        session.dirCanon,
         '--interval',
         String(session.interval),
         '--keep-panes',
@@ -365,7 +366,7 @@ function livenessSuffix(stateDir: string, prKey: string): string {
     return lockPresent(stateDir, prKey) ? ' lock=unreadable' : ' dead';
 }
 
-// dir is the working tree the watcher works in: the watch worktree, or the clone in --in-place mode.
+// dir is the working tree the watcher works in: the folder it was started from.
 function watcherLine(stateDir: string, prKey: string, now: number): string {
     const label = prLabel(prKey);
     const suffix = livenessSuffix(stateDir, prKey);

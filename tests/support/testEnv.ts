@@ -5,6 +5,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { PS_PATH } from '../../src/constants.ts';
+import { plainText } from '../../src/logParts.ts';
 import { pidAlive } from '../../src/proc.ts';
 import type { CommandRunner, Deps, Env } from '../../src/types.ts';
 
@@ -190,13 +191,13 @@ function buildDeps(runner: CommandRunner, env: Env): TestDeps {
         env,
         log: {
             info: (message) => {
-                logLines.push(`info ${message}`);
+                logLines.push(`info ${plainText(message)}`);
             },
             warn: (message) => {
-                logLines.push(`warn ${message}`);
+                logLines.push(`warn ${plainText(message)}`);
             },
             error: (message) => {
-                logLines.push(`error ${message}`);
+                logLines.push(`error ${plainText(message)}`);
             },
         },
         out: (text) => {

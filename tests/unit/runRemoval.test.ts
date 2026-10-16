@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 
+import { plainText } from '../../src/logParts.ts';
 import { removeRun, sweepTrash } from '../../src/runRemoval.ts';
 import { createRun, listRunIds } from '../../src/runStore.ts';
 import { initState, runDir, trashDir } from '../../src/stateStore.ts';
@@ -23,10 +24,10 @@ function recordingLogger(): RecordingLogger {
             // Info lines are not asserted.
         },
         warn: (message) => {
-            warnings.push(message);
+            warnings.push(plainText(message));
         },
         error: (message) => {
-            warnings.push(`error: ${message}`);
+            warnings.push(`error: ${plainText(message)}`);
         },
     };
 }

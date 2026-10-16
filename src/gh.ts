@@ -12,12 +12,37 @@ export interface GhCli {
 
 const MESSAGE_LIMIT = 500;
 const AUTH_MARKERS: readonly string[] = ['HTTP 401', 'Bad credentials', 'gh auth login'];
+// Lower case; matched against the lower-cased stderr. The first two are gh's own offline text, the rest are Go
+// network errors gh passes through.
+const NETWORK_MARKERS: readonly string[] = [
+    'error connecting to',
+    'check your internet connection',
+    'dial tcp',
+    'no such host',
+    'i/o timeout',
+    'network is unreachable',
+    'connection refused',
+    'connection reset',
+    'tls handshake timeout',
+    'client.timeout exceeded',
+    'server misbehaving',
+    'temporary failure in name resolution',
+];
 const GONE_MARKER = 'Could not resolve to a node with the global id of';
 const GONE_ID = /global id of '([^']*)'/gu;
 
-// The message is the trimmed, truncated stderr and is not sanitized: callers that display it use safeText.
+function isNetworkError(stderr: string): boolean {
+    const lower = stderr.toLowerCase();
+    return NETWORK_MARKERS.some((marker) => lower.includes(marker));
+}
+
+// The message is the trimmed, truncated stderr and is not sanitized: callers that display it use safeText. Network
+// markers are checked before the auth markers, so a lost connection is never taken for a fatal auth failure.
 export function classifyGhFailure(stderr: string): GhFailure {
     const message = stderr.trim().slice(0, MESSAGE_LIMIT);
+    if (isNetworkError(stderr)) {
+        return { kind: 'transient', offline: true, message };
+    }
     if (AUTH_MARKERS.some((marker) => stderr.includes(marker))) {
         return { kind: 'auth', message };
     }
@@ -29,8 +54,13 @@ export function classifyGhFailure(stderr: string): GhFailure {
     return { kind: 'transient', message };
 }
 
-// stdout of a failed call is never parsed: gh prints raw error bodies or partial data there.
-function commandFailure(result: CommandResult): GhFailure {
+// stdout of a failed call is never parsed: gh prints raw error bodies or partial data there. A call the runner cut
+// off at its timeout counts as a lost connection.
+export function commandFailure(result: CommandResult): GhFailure {
+    if (result.timedOut === true) {
+        const stderr = result.stderr.trim().slice(0, MESSAGE_LIMIT);
+        return { kind: 'transient', offline: true, message: stderr.length > 0 ? stderr : 'gh timed out' };
+    }
     const failure = classifyGhFailure(result.stderr);
     if (failure.message.length > 0) {
         return failure;

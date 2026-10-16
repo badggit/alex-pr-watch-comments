@@ -430,7 +430,7 @@ function printed(setup: Setup): string {
     return `${setup.deps.outText()}\n${setup.deps.logLines.join('\n')}`;
 }
 
-function cliOptions(setup: Setup, once: boolean, inPlace = true): CliOptions {
+function cliOptions(setup: Setup, once: boolean): CliOptions {
     return {
         mode: 'watch',
         pr: PR,
@@ -441,13 +441,12 @@ function cliOptions(setup: Setup, once: boolean, inPlace = true): CliOptions {
         keepPanes: 5,
         batchMax: 5,
         once,
-        inPlace,
         attach: false,
     };
 }
 
-function startWatch(setup: Setup, once: boolean, stop = NEVER, inPlace = true): Promise<number> {
-    return runWatch(setup.deps, cliOptions(setup, once, inPlace), setup.testEnv.root, process.execPath, stop);
+function startWatch(setup: Setup, once: boolean, stop = NEVER): Promise<number> {
+    return runWatch(setup.deps, cliOptions(setup, once), setup.testEnv.root, process.execPath, stop);
 }
 
 async function within<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMEOUT> {
@@ -523,7 +522,10 @@ await describe('watchTick', async () => {
         const rt = createRuntime('', '@1');
         assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
         assert.equal(rocketRemovals(setup.fake, 102).length, 1);
-        assert.ok(setup.deps.logLines.some((line) => line.includes('comment 102 was edited after approval')));
+        const editedLine =
+            'info comment 102 by @carol was edited after approval (https://github.com/o/r/pull/12#discussion_r102); ' +
+            'add the rocket again to approve the new text';
+        assert.ok(setup.deps.logLines.includes(editedLine), setup.deps.logLines.join('\n'));
         assert.equal(splits(setup.fake), 1);
         assert.ok(rt.inflightRunId?.endsWith('-103'), `dispatched ${rt.inflightRunId}`);
         assert.ok(listRunIds(setup.stateDir).every((runId) => !runId.endsWith('-102')));
@@ -1446,16 +1448,15 @@ await describe('runWatch', async () => {
         assert.equal(fs.existsSync(prLockDir(setup)), false);
     });
 
-    await test('once: a merged pull request removes the clean watch worktree', async (t) => {
+    await test('once: a merged pull request exits 0 and leaves the working tree where it is', async (t) => {
         const setup = await makeSetup(t);
         const clone = fs.realpathSync.native(setup.clone);
-        gitSync(setup.testEnv.env, ['-C', clone, 'checkout', '--quiet', 'main']);
+        const siblings = fs.readdirSync(path.dirname(clone)).toSorted();
         respondPoll(setup, [], { state: 'MERGED', remaining: 100, resetAt: setup.now + 900 });
-        assert.equal(await startWatch(setup, true, NEVER, false), 0, printed(setup));
-        const worktree = path.join(path.dirname(clone), 'alex-pr-watch-comments-pr-12');
-        assert.ok(printed(setup).includes(`created the watch worktree ${worktree}`), printed(setup));
-        assert.ok(printed(setup).includes(`removed the watch worktree ${worktree}`), printed(setup));
-        assert.equal(fs.existsSync(worktree), false);
+        assert.equal(await startWatch(setup, true), 0, printed(setup));
+        assert.ok(printed(setup).includes(`working tree: ${clone}\n`), printed(setup));
+        assert.equal(gitSync(setup.testEnv.env, ['-C', clone, 'branch', '--show-current']).trim(), BRANCH);
+        assert.deepEqual(fs.readdirSync(path.dirname(clone)).toSorted(), siblings);
     });
 
     await test('a launch that is never confirmed is fatal without any gh call', async (t) => {
@@ -2576,5 +2577,155 @@ await describe('closed pull request rules', async () => {
         assert.equal(launchResultOf(setup), 'firstPoll');
         assert.equal(stateOf(setup, runId), 'retained');
         assert.equal(fs.existsSync(prLockDir(setup)), false);
+    });
+});
+
+const OFFLINE_FAIL: FakeResponse = {
+    code: 1,
+    stderr: 'error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com\n',
+};
+const PROBE_KEY = 'api_rate_limit';
+const LOST_LINE =
+    'warn lost the connection to GitHub (error connecting to api.github.com?check your internet connection or ' +
+    'https://githubstatus.com); checking every 30 s and staying quiet until it is back';
+
+await describe('lost connection', async () => {
+    await test('offline ticks log one line, keep the backoff counter and check every 30 s', async (t) => {
+        const setup = await makeSetup(t);
+        setup.fake.respond('gh', 'PrwcPoll', OFFLINE_FAIL);
+        setup.fake.respond('gh', PROBE_KEY, OFFLINE_FAIL);
+        const rt = createRuntime('', '@1');
+        for (let tick = 0; tick < 4; tick += 1) {
+            assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+            assert.equal(applyPacing(setup.deps, setup.session, rt), 30);
+        }
+        assert.deepEqual(setup.deps.logLines, [LOST_LINE]);
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 1);
+        assert.equal(setup.fake.callCount('gh', PROBE_KEY), 3);
+        assert.equal(rt.failures, 0);
+        const status = statusOf(setup);
+        assert.equal(status.state, 'offline');
+        assert.ok(status.lastError.startsWith('error connecting to api.github.com'));
+    });
+
+    await test('PRWC_OFFLINE_CHECK sets the check pace, also over a throttle', async (t) => {
+        const setup = await makeSetup(t, { env: { PRWC_OFFLINE_CHECK: '7' } });
+        setup.fake.respond('gh', 'PrwcPoll', OFFLINE_FAIL);
+        const rt = createRuntime('', '@1');
+        rt.rate = { remaining: 10, resetAt: setup.now + 900 };
+        rt.failures = 5;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+        assert.equal(applyPacing(setup.deps, setup.session, rt), 7);
+        assert.ok(setup.deps.logLines.some((line) => line.includes('checking every 7 s')));
+        assert.equal(statusOf(setup).state, 'offline');
+    });
+
+    await test('an offline failure of the run check is reported the same way', async (t) => {
+        const setup = await makeSetup(t);
+        const claudePid = setup.testEnv.spawnOrphan('sleep', ['300']);
+        const runId = await seedRun(setup, { dbId: 101, claudePid });
+        setup.fake.respond('gh', 'PrwcLookup', OFFLINE_FAIL);
+        const rt = createRuntime('', '@1');
+        rt.inflightRunId = runId;
+        rt.lastPollAt = setup.deps.nowSeconds();
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+        assert.deepEqual(setup.deps.logLines, [LOST_LINE]);
+        assert.equal(applyPacing(setup.deps, setup.session, rt), 30);
+    });
+
+    await test('the probe getting through logs one line and the poll follows in the same tick', async (t) => {
+        const setup = await makeSetup(t);
+        const advance = movableClock(setup);
+        setup.fake.respond('gh', 'PrwcPoll', OFFLINE_FAIL);
+        respondPoll(setup, []);
+        setup.fake.respond('gh', PROBE_KEY, OFFLINE_FAIL);
+        setup.fake.respond('gh', PROBE_KEY, { json: {} });
+        const rt = createRuntime('', '@1');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+        applyPacing(setup.deps, setup.session, rt);
+        advance(30);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+        applyPacing(setup.deps, setup.session, rt);
+        advance(240);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 2);
+        assert.equal(setup.fake.callCount('gh', PROBE_KEY), 2);
+        assert.equal(rt.offlineSince, undefined);
+        assert.equal(applyPacing(setup.deps, setup.session, rt), setup.session.interval);
+        const backLines = setup.deps.logLines.filter((line) => line.includes('connection to GitHub is back'));
+        assert.deepEqual(backLines, ['info connection to GitHub is back after 4m 30s; watching resumed']);
+        assert.equal(setup.deps.logLines.filter((line) => line.startsWith('warn')).length, 1);
+        assert.ok(!setup.deps.logLines.some((line) => line.includes('GitHub requests work again')));
+        const status = statusOf(setup);
+        assert.equal(status.state, 'polling');
+        assert.equal(status.lastError, '');
+    });
+
+    await test('a stop during the probe ends the tick as stopped', async (t) => {
+        const setup = await makeSetup(t);
+        const controller = new AbortController();
+        setup.fake.respond('gh', PROBE_KEY, () => {
+            controller.abort();
+            return OFFLINE_FAIL;
+        });
+        const rt = createRuntime('', '@1');
+        rt.offlineSince = setup.now - 60;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, controller.signal), 'stopped');
+        assert.equal(setup.fake.callCount('gh', 'PrwcPoll'), 0);
+    });
+
+    await test('a probe killed by a stop is not reported as the connection coming back', async (t) => {
+        const setup = await makeSetup(t);
+        const controller = new AbortController();
+        setup.fake.respond('gh', PROBE_KEY, () => {
+            controller.abort();
+            return { code: 143, stdout: '', stderr: '' };
+        });
+        const rt = createRuntime('', '@1');
+        rt.offlineSince = setup.now - 60;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, controller.signal), 'stopped');
+        assert.deepEqual(setup.deps.logLines, []);
+        assert.equal(rt.offlineSince, setup.now - 60);
+    });
+
+    await test('an offline failure right after a host sleep is reported once', async (t) => {
+        const setup = await makeSetup(t);
+        setup.fake.respond('gh', 'PrwcPoll', OFFLINE_FAIL);
+        const rt = createRuntime('', '@1');
+        rt.monotonicMs = () => 5_000_000;
+        rt.lastTickAt = setup.now - 1000;
+        rt.lastTickMono = 5_000_000 - 1000;
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+        assert.deepEqual(setup.deps.logLines, [LOST_LINE]);
+        assert.equal(rt.offlineSince, setup.now);
+    });
+
+    await test('a failed request followed by a good tick logs one recovery line and clears the error', async (t) => {
+        const setup = await makeSetup(t);
+        setup.fake.respond('gh', 'PrwcPoll', GH_FAIL);
+        setup.fake.respond('gh', 'PrwcPoll', GH_FAIL);
+        respondPoll(setup, []);
+        const rt = createRuntime('', '@1');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+        assert.equal(applyPacing(setup.deps, setup.session, rt), 30);
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'transient');
+        assert.equal(applyPacing(setup.deps, setup.session, rt), 60);
+        assert.equal(statusOf(setup).lastError, 'HTTP 502: Bad Gateway');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'ok');
+        assert.equal(applyPacing(setup.deps, setup.session, rt), setup.session.interval);
+        const recovered = setup.deps.logLines.filter((line) => line.includes('GitHub requests work again'));
+        assert.deepEqual(recovered, ['info GitHub requests work again; watching resumed']);
+        assert.equal(rt.offlineSince, undefined);
+        assert.equal(statusOf(setup).lastError, '');
+    });
+
+    await test('an auth failure is still fatal', async (t) => {
+        const setup = await makeSetup(t);
+        setup.fake.respond('gh', 'PrwcPoll', AUTH_FAIL);
+        const rt = createRuntime('', '@1');
+        assert.equal(await watchTick(setup.deps, setup.session, rt, NEVER), 'fatal');
+        assert.equal(rt.offlineSince, undefined);
+        assert.equal(statusOf(setup).state, 'fatal');
     });
 });

@@ -5,12 +5,10 @@ import { DEFAULT_STOP_QUIET, ENV_NAMES, GH_TOKEN_VARS, GITHUB_HOST, PS_PATH } fr
 import { ghCommand, type GhCli } from './gh.ts';
 import { fetchPrInfo } from './githubPoll.ts';
 import { currentBranch, findRemote, gitIn } from './guards.ts';
-import { syncIgnoredLinks } from './ignoredLinks.ts';
 import { getArray, getRecord } from './json.ts';
-import { confirmedMainTree, gitDirsOf, isLinked, type GitDirs } from './linkedWorktree.ts';
 import { readJsonFile, resolveStateDir, worktreeKey } from './stateStore.ts';
 import { parseTmuxEnv, serverSocket, tmuxInit } from './tmuxControl.ts';
-import type { CliOptions, Deps, Env, PrInfo, PrRef, Session, TmuxContext, ToolPaths, WatchWorktree } from './types.ts';
+import type { CliOptions, Deps, Env, PrInfo, PrRef, Session, TmuxContext, ToolPaths } from './types.ts';
 import {
     isSafeAbsPath,
     isSafeRunPath,
@@ -20,7 +18,6 @@ import {
     readEnvSeconds,
     safeText,
 } from './validate.ts';
-import { prepareWatchWorktree, samePath, watchWorktreePath } from './watchWorktree.ts';
 
 export type PreflightDeps = Pick<Deps, 'runner' | 'env' | 'log'>;
 
@@ -129,7 +126,7 @@ function enclosingWorktree(dir: string): string | undefined {
     return current;
 }
 
-export function projectRoots(dir: string): string[] {
+function projectRoots(dir: string): string[] {
     const canonical = canonicalPath(dir) ?? dir;
     const worktrees = [enclosingWorktree(dir), enclosingWorktree(canonical)].filter((root) => root !== undefined);
     return [dir, canonical, ...worktrees];
@@ -287,7 +284,8 @@ async function checkPr(deps: PreflightDeps, gh: GhCli, pr: PrRef): Promise<Check
     return { ok: true, value: info };
 }
 
-// The clone the watcher was started for: a git working tree with a verified remote for the PR head repository.
+// The clone or worktree the watcher was started in: a git working tree with a verified remote for the PR head
+// repository.
 async function checkClone(
     deps: PreflightDeps,
     gitPath: string,
@@ -342,67 +340,6 @@ async function checkCheckout(
     return clone.ok ? checkHeadBranch(deps, gitPath, clone.value, pr, info) : clone;
 }
 
-// Only the folder next to the main working tree counts: a linked worktree that merely has the watch worktree's
-// name elsewhere is the owner's, and the watcher must never sync into it or remove it.
-async function isOwnWatchWorktree(
-    deps: PreflightDeps,
-    gitPath: string,
-    toplevel: string,
-    dirs: GitDirs,
-    prNumber: number
-): Promise<boolean> {
-    const main = await confirmedMainTree(deps, gitPath, toplevel, dirs.commonDir);
-    return main !== undefined && samePath(toplevel, watchWorktreePath(main, prNumber));
-}
-
-// The watch worktree next to the clone, created when missing, checked like an in-place clone and with the clone's
-// ignored paths linked into it. Started inside another linked worktree, it works there in place instead, so
-// worktrees do not multiply; worktree is then undefined.
-async function checkWorktree(
-    deps: PreflightDeps,
-    gitPath: string,
-    dir: string,
-    pr: PrRef,
-    info: PrInfo
-): Promise<Checked<{ checkout: Checkout; worktree: WatchWorktree | undefined }>> {
-    const clone = await checkClone(deps, gitPath, dir, pr, info);
-    if (!clone.ok) {
-        return clone;
-    }
-    const { toplevel } = clone.value;
-    const dirs = await gitDirsOf(deps, gitPath, toplevel);
-    if (dirs === undefined) {
-        return refuse(`cannot tell whether ${safeText(toplevel)} is a linked worktree`);
-    }
-    if (isLinked(dirs) && !(await isOwnWatchWorktree(deps, gitPath, toplevel, dirs, pr.number))) {
-        deps.log.info(`already in the worktree ${safeText(toplevel)}: --worktree works in place there`);
-        const inPlace = await checkHeadBranch(deps, gitPath, clone.value, pr, info);
-        return inPlace.ok ? { ok: true, value: { checkout: inPlace.value, worktree: undefined } } : inPlace;
-    }
-    const prepared = await prepareWatchWorktree(deps, {
-        gitPath,
-        sourceToplevel: clone.value.toplevel,
-        prNumber: pr.number,
-        remote: clone.value.remote,
-        branch: info.headRef,
-    });
-    if (!prepared.ok) {
-        return prepared;
-    }
-    const { worktree } = prepared;
-    if (prepared.created) {
-        deps.log.warn(
-            `created the watch worktree ${safeText(worktree.path)}: if Claude Code has not trusted it yet, run claude there once and accept the folder trust dialog`
-        );
-    }
-    const checkout = await checkCheckout(deps, gitPath, worktree.path, pr, info);
-    if (!checkout.ok) {
-        return checkout;
-    }
-    await syncIgnoredLinks(deps, gitPath, worktree.source, worktree.path);
-    return { ok: true, value: { checkout: checkout.value, worktree } };
-}
-
 function warnStopHooks(deps: PreflightDeps, toplevel: string): void {
     const labels = ownerStopHookSources(deps.env.HOME, toplevel);
     if (labels.length === 0) {
@@ -416,7 +353,7 @@ function warnStopHooks(deps: PreflightDeps, toplevel: string): void {
 }
 
 // Start-up checks in a fixed order, first failure wins. Nothing here changes anything on GitHub or in the owner's
-// working tree; in --worktree mode it creates or reuses the watch worktree and links ignored paths into it.
+// working tree. The watcher works in place in DIR, the main working tree or a linked worktree alike.
 export async function preflight(
     deps: PreflightDeps,
     options: CliOptions,
@@ -454,22 +391,11 @@ export async function preflight(
     if (!info.ok) {
         return info;
     }
-    let checkout: Checkout;
-    let worktree: WatchWorktree | undefined;
-    if (options.inPlace) {
-        const inPlace = await checkCheckout(deps, tools.value.git, dir, pr, info.value);
-        if (!inPlace.ok) {
-            return inPlace;
-        }
-        checkout = inPlace.value;
-    } else {
-        const prepared = await checkWorktree(deps, tools.value.git, dir, pr, info.value);
-        if (!prepared.ok) {
-            return prepared;
-        }
-        ({ checkout, worktree } = prepared.value);
+    const checkout = await checkCheckout(deps, tools.value.git, dir, pr, info.value);
+    if (!checkout.ok) {
+        return checkout;
     }
-    const { dirCanon, toplevel, remote } = checkout;
+    const { dirCanon, toplevel, remote } = checkout.value;
     const workerPath = normalizeCallerPath(callerPath, [toplevel]);
     if (workerPath !== callerPath) {
         const recheck = resolveTools(options, cwd, workerPath, nodePath, psPath);
@@ -501,7 +427,6 @@ export async function preflight(
             batchMax: options.batchMax,
             claudeArgs: options.claudeArgs,
             once: options.once,
-            ...(worktree === undefined ? {} : { worktree }),
         },
     };
 }

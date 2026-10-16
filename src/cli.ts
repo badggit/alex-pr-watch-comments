@@ -1,25 +1,16 @@
 import path from 'node:path';
 
 import { DEFAULT_BATCH_MAX, DEFAULT_INTERVAL, DEFAULT_KEEP_PANES, GITHUB_HOST, MAX_BATCH } from './constants.ts';
-import { parseNewWorktreeArgs, type NewWorktreeArgs } from './newWorktreeArgs.ts';
 import type { CliMode, CliOptions, PrRef } from './types.ts';
 import { HOST_PATTERN, isUintString, isValidName, safeText } from './validate.ts';
 
-export type ParseResult =
-    | { kind: 'ok'; options: CliOptions }
-    | { kind: 'newWorktree'; args: NewWorktreeArgs }
-    | { kind: 'help' }
-    | { kind: 'error'; message: string };
-
-type WorkingTreeMode = 'in-place' | 'worktree' | 'conflict';
+export type ParseResult = { kind: 'ok'; options: CliOptions } | { kind: 'help' } | { kind: 'error'; message: string };
 
 interface Draft {
     background: boolean;
     noAttach: boolean;
     list: boolean;
     once: boolean;
-    // 'conflict' is sticky: once both options were given, no later option can clear it.
-    workingTreeMode: WorkingTreeMode | undefined;
     stop: string | undefined;
     positionals: string[];
     dir: string;
@@ -35,13 +26,11 @@ const PR_URL = new RegExp(
     'iu'
 );
 const LINE_BREAK = /[\n\r]/u;
-const FLAG_OPTIONS: ReadonlySet<string> = new Set([
-    '--background',
-    '--no-attach',
-    '--list',
-    '--once',
-    '--in-place',
-    '--worktree',
+const FLAG_OPTIONS: ReadonlySet<string> = new Set(['--background', '--no-attach', '--list', '--once']);
+// Options of earlier versions fail with a hint instead of a bare unknown-option error.
+const REMOVED_OPTIONS: ReadonlyMap<string, string> = new Map([
+    ['--worktree', '--worktree was removed: create a worktree yourself and start the watcher inside it'],
+    ['--in-place', '--in-place was removed: the watcher always works in the folder it is started from'],
 ]);
 const VALUE_OPTIONS: ReadonlySet<string> = new Set([
     '--stop',
@@ -154,16 +143,6 @@ function applyValue(draft: Draft, name: string, value: string, cwd: string): str
     }
 }
 
-function nextWorkingTreeMode(
-    current: WorkingTreeMode | undefined,
-    requested: 'in-place' | 'worktree'
-): WorkingTreeMode {
-    if (current === undefined || current === requested) {
-        return requested;
-    }
-    return 'conflict';
-}
-
 function applyFlag(draft: Draft, name: string): void {
     switch (name) {
         case '--background': {
@@ -182,22 +161,11 @@ function applyFlag(draft: Draft, name: string): void {
             draft.once = true;
             break;
         }
-        case '--in-place': {
-            draft.workingTreeMode = nextWorkingTreeMode(draft.workingTreeMode, 'in-place');
-            break;
-        }
-        case '--worktree': {
-            draft.workingTreeMode = nextWorkingTreeMode(draft.workingTreeMode, 'worktree');
-            break;
-        }
     }
 }
 
 function findConflict(draft: Draft): string | undefined {
     const stop = draft.stop !== undefined;
-    if (draft.workingTreeMode === 'conflict') {
-        return '--in-place cannot be combined with --worktree';
-    }
     if (draft.list && stop) {
         return '--list cannot be combined with --stop';
     }
@@ -239,7 +207,6 @@ function toResult(draft: Draft, mode: CliMode, pr?: PrRef): ParseResult {
             keepPanes: draft.keepPanes,
             batchMax: draft.batchMax,
             once: draft.once,
-            inPlace: draft.workingTreeMode !== 'worktree',
             attach: !draft.noAttach,
         },
     };
@@ -270,22 +237,12 @@ function finish(draft: Draft): ParseResult {
     return toResult(draft, mode, pr);
 }
 
-// Only a leading new-worktree selects the subcommand; elsewhere the word stays a plain positional.
-function parseNewWorktree(rest: readonly string[]): ParseResult {
-    const parsed = parseNewWorktreeArgs(rest);
-    return parsed.kind === 'ok' ? { kind: 'newWorktree', args: parsed.args } : parsed;
-}
-
 export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
-    if (argv[0] === 'new-worktree') {
-        return parseNewWorktree(argv.slice(1));
-    }
     const draft: Draft = {
         background: false,
         noAttach: false,
         list: false,
         once: false,
-        workingTreeMode: undefined,
         stop: undefined,
         positionals: [],
         dir: cwd,
@@ -299,6 +256,10 @@ export function parseArgs(argv: readonly string[], cwd: string): ParseResult {
     for (let arg = queue.shift(); arg !== undefined; arg = queue.shift()) {
         if (arg === '--help') {
             return { kind: 'help' };
+        }
+        const removed = REMOVED_OPTIONS.get(arg);
+        if (removed !== undefined) {
+            return failure(removed);
         }
         if (VALUE_OPTIONS.has(arg)) {
             const value = queue.shift();
@@ -327,15 +288,10 @@ export function usageText(): string {
         '  alex-pr-watch-comments <PR URL> --background [options]  watch in a new detached tmux session',
         '  alex-pr-watch-comments --list                           list watchers and runs',
         '  alex-pr-watch-comments --stop <PR URL>                  stop the watcher for a PR (a running worker is kept)',
-        '  alex-pr-watch-comments new-worktree NAME [--branch BRANCH] [--base REF]',
-        '  alex-pr-watch-comments new-worktree --task SLUG [--branch BRANCH] [--base REF]',
-        '      create or reuse a worktree next to the main clone and print its path',
         '  alex-pr-watch-comments --help                           show this help',
         '',
         'Options:',
-        '  --dir <path>          your clone of the repository (default: current directory)',
-        '  --in-place            work in the clone itself (default; retained for compatibility)',
-        '  --worktree            work in a dedicated watch worktree next to the clone',
+        '  --dir <path>          your clone or worktree of the repository (default: current directory)',
         `  --interval <seconds>  how often to look for new rockets, 1 to ${MAX_INTERVAL} (default ${DEFAULT_INTERVAL})`,
         '  --claude <path>       claude executable (default: found on PATH at start)',
         '  --claude-arg <arg>    extra claude argument, repeatable, passed literally',

@@ -3,11 +3,10 @@ import type { Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { parseArgs, usageText } from './cli.ts';
+import { colorEnabled } from './colors.ts';
 import { GH_STRIP_VARS } from './constants.ts';
 import { runBackground, runList, runStop } from './control.ts';
 import { createLogger } from './log.ts';
-import type { NewWorktreeArgs } from './newWorktreeArgs.ts';
-import { runNewWorktree, type NewWorktreeIo } from './newWorktreeCommand.ts';
 import { createProcessRunner } from './proc.ts';
 import { resolveStateDir } from './stateStore.ts';
 import type { CliOptions, CommandRunner, Deps, Env, Logger } from './types.ts';
@@ -33,12 +32,13 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }
 }
 
-function stderrLogger(): Logger {
+function stderrLogger(env: Env): Logger {
     return createLogger(
         (line) => {
             process.stderr.write(`${line}\n`);
         },
-        () => new Date()
+        () => new Date(),
+        { color: colorEnabled(process.stderr, env) }
     );
 }
 
@@ -46,7 +46,7 @@ function buildDeps(env: Env, runner: CommandRunner): Deps {
     return {
         runner,
         env,
-        log: stderrLogger(),
+        log: stderrLogger(env),
         out: (text) => {
             process.stdout.write(text);
         },
@@ -73,26 +73,6 @@ async function runMode(options: CliOptions, env: Env, cwd: string): Promise<numb
         }
         case 'stop': {
             return await runStop(buildDeps(env, createProcessRunner(env)), options, resolveStateDir(env, cwd));
-        }
-    }
-}
-
-// Prints the outcome and returns the exit code: only a created or reused worktree path reaches stdout.
-async function runNewWorktreeMode(args: NewWorktreeArgs, env: Env, cwd: string): Promise<number> {
-    const io: NewWorktreeIo = { env, log: stderrLogger(), makeRunner: (childEnv) => createProcessRunner(childEnv) };
-    const outcome = await runNewWorktree(io, args, cwd);
-    switch (outcome.kind) {
-        case 'ok': {
-            await writeText(process.stdout, `${outcome.path}\n`);
-            return 0;
-        }
-        case 'refused': {
-            await writeText(process.stderr, `alex-pr-watch-comments: ${outcome.reason}\n`);
-            return 1;
-        }
-        case 'usage': {
-            await writeText(process.stderr, `alex-pr-watch-comments: ${outcome.message}\n\n${usageText()}`);
-            return 2;
         }
     }
 }
@@ -137,10 +117,6 @@ switch (parsed.kind) {
     }
     case 'ok': {
         process.exitCode = await exitCodeOf(() => runMode(parsed.options, callerEnv, callerCwd));
-        break;
-    }
-    case 'newWorktree': {
-        process.exitCode = await exitCodeOf(() => runNewWorktreeMode(parsed.args, callerEnv, callerCwd));
         break;
     }
 }

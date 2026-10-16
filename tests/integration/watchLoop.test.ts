@@ -34,6 +34,10 @@ const PR_KEY = 'o+r+12';
 const BRANCH = 'feature';
 const GH_FAIL: FakeResponse = { code: 1, stderr: 'HTTP 502: Bad Gateway' };
 const AUTH_FAIL: FakeResponse = { code: 1, stderr: 'HTTP 401: Bad credentials (https://api.github.com/graphql)' };
+const OFFLINE_FAIL: FakeResponse = {
+    code: 1,
+    stderr: 'error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com\n',
+};
 
 function readFixture(...parts: readonly string[]): unknown {
     const parsed: unknown = JSON.parse(fs.readFileSync(path.join(FIXTURES, ...parts), 'utf8'));
@@ -109,13 +113,9 @@ function respondPoll(setup: Setup, response: FakeResponse): void {
 }
 
 function startWatcher(setup: Setup, args: readonly string[], url = PR_URL, clone = setup.clone): ObservedProcess {
-    const watcher = setup.testEnv.spawnObserved(
-        process.execPath,
-        [DRIVER, url, '--in-place', '--dir', clone, ...args],
-        {
-            cwd: setup.testEnv.root,
-        }
-    );
+    const watcher = setup.testEnv.spawnObserved(process.execPath, [DRIVER, url, '--dir', clone, ...args], {
+        cwd: setup.testEnv.root,
+    });
     setup.watchers.push(watcher);
     return watcher;
 }
@@ -192,6 +192,37 @@ await describe('watch loop', async () => {
         assert.equal(pollCount(setup), 1);
         assert.equal(prLockExists(setup), false);
         assert.equal(statusOf(setup)?.state, 'fatal');
+    });
+
+    await test('a lost connection is reported once, checked quietly and reported once when it is back', async (t) => {
+        const setup = await makeSetup(t);
+        respondPoll(setup, OFFLINE_FAIL);
+        respondPoll(setup, { json: POLL_OPEN });
+        stubRespond(setup.testEnv.stubDir, 'gh', 'api_rate_limit', OFFLINE_FAIL);
+        stubRespond(setup.testEnv.stubDir, 'gh', 'api_rate_limit', OFFLINE_FAIL);
+        stubRespond(setup.testEnv.stubDir, 'gh', 'api_rate_limit', { json: {} });
+        const env = { ...setup.testEnv.env, PRWC_OFFLINE_CHECK: '1' };
+        const watcher = setup.testEnv.spawnObserved(
+            process.execPath,
+            [DRIVER, PR_URL, '--dir', setup.clone, '--interval', '300'],
+            { cwd: setup.testEnv.root, env }
+        );
+        setup.watchers.push(watcher);
+        assert.ok(await waitUntil(30_000, () => pollCount(setup) >= 2), 'the watcher never polled again');
+        await waitForPolling(setup);
+        signalQuietly(watcher.pid, 'SIGTERM');
+        const result = await exitWithin(watcher, 10_000);
+        assert.equal(result.code, 0, result.stderr);
+        const lines = result.stderr.split('\n');
+        assert.equal(lines.filter((line) => line.includes('lost the connection to GitHub')).length, 1, result.stderr);
+        assert.equal(
+            lines.filter((line) => line.includes('connection to GitHub is back after')).length,
+            1,
+            result.stderr
+        );
+        assert.ok(!result.stderr.includes('backing off'), result.stderr);
+        assert.equal(stubCallCount(setup.testEnv.stubDir, 'gh', 'api_rate_limit'), 3);
+        assert.equal(statusOf(setup)?.lastError, '');
     });
 
     await test('a second watcher for the same PR from another clone is refused', async (t) => {
