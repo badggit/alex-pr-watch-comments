@@ -1,7 +1,7 @@
 {
     "name": "alex-pr-watch-comments",
-    "version": "0.9.0",
-    "description": "Watch a GitHub pull request and turn rocket-approved inline review comments into commits made by Claude Code in tmux panes, and create git worktrees with copy-on-write dependencies for parallel work.",
+    "version": "0.10.0",
+    "description": "Watch a GitHub pull request and turn rocket-approved inline review comments into commits made by Claude Code in tmux panes.",
     "author": {
         "name": "badggit"
     },
