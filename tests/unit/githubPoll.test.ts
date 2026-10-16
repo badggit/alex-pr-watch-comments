@@ -395,6 +395,7 @@ await describe('pollPr thread overflow', async () => {
         assert.deepEqual(result, {
             kind: 'transient',
             message: 'connection reset',
+            offline: true,
             rate: { remaining: 4000, resetAt: RESET_AT },
         });
     });
@@ -454,7 +455,7 @@ await describe('pollPr failures', async () => {
             json: readFixture('pollPage1.json'),
         });
         const result = await pollPr({ runner: fake.runner }, GH, PR);
-        assert.deepEqual(result, { kind: 'transient', message: 'connection reset' });
+        assert.deepEqual(result, { kind: 'transient', message: 'connection reset', offline: true });
         assert.equal(fake.calls().length, 1);
     });
 

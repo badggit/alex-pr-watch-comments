@@ -5,8 +5,8 @@ import { DEFAULT_LAUNCH_WAIT, ENV_NAMES } from './constants.ts';
 import { sessionGh } from './gh.ts';
 import { fetchContext, react, type ReactOutcome } from './githubLookup.ts';
 import { runGuards } from './guards.ts';
-import { syncIgnoredLinks } from './ignoredLinks.ts';
 import { acquireWorktreeLock, releaseWorktreeLock, worktreeLockHolder } from './locks.ts';
+import { approverOf, batchLine, commentLine } from './logLines.ts';
 import { commentFiles } from './prompt.ts';
 import { markFailed, type FailTarget } from './reactions.ts';
 import { removeRun } from './runRemoval.ts';
@@ -25,7 +25,7 @@ import type {
     RunRecord,
     Session,
 } from './types.ts';
-import { inlineUntrusted, quoteUntrusted } from './untrustedText.ts';
+import { inlineUntrusted, quoteUntrusted, visibleText } from './untrustedText.ts';
 import { readEnvSeconds, safeText } from './validate.ts';
 import { writeWorkerKit } from './workerKit.ts';
 
@@ -134,6 +134,9 @@ function runComment(candidate: Candidate): RunComment | undefined {
         topDbId: poll.topDbId,
         rocketAt: entry.rocketAt,
         eyesAdded: false,
+        author: visibleText(entry.author),
+        path: visibleText(entry.path),
+        ...(entry.line === undefined ? {} : { line: entry.line }),
     };
 }
 
@@ -244,7 +247,13 @@ async function markInProgress(
 function failTargets(progress: Progress): FailTarget[] {
     return progress.comments
         .filter((comment) => progress.rocketless.has(comment.nodeId))
-        .map((comment) => ({ nodeId: comment.nodeId, dbId: comment.dbId, eyesOn: comment.eyesAdded }));
+        .map((comment) => ({
+            nodeId: comment.nodeId,
+            dbId: comment.dbId,
+            eyesOn: comment.eyesAdded,
+            url: comment.url,
+            author: comment.author,
+        }));
 }
 
 // True once the worktree lock no longer names the run: released now, or held by nobody or by another run.
@@ -356,12 +365,31 @@ async function failRun(
     return kept;
 }
 
+// The console summary of a launched batch: one line for the run, then one per comment with its author, place,
+// approver and link.
+function logBatch(deps: Deps, session: Session, record: RunRecord, entries: ReadonlyMap<string, LookupEntry>): void {
+    deps.log.info(batchLine(record.runId, record.comments.length));
+    for (const comment of record.comments) {
+        const entry = entries.get(comment.nodeId);
+        deps.log.info(commentLine(comment, entry === undefined ? undefined : approverOf(entry, session.viewer)));
+    }
+}
+
 // Step 8: go is claimed only after the record holds the pane; a launcher that timed out first has claimed cancel.
-// When the go claim cannot be made at all, cancel is claimed, so the launcher exits at once instead of waiting.
-async function confirmLaunch(deps: Deps, session: Session, record: RunRecord, hooks?: DispatchHooks) {
+// When the go claim cannot be made at all, cancel is claimed, so the launcher exits at once instead of waiting. The
+// batch summary is logged only once go is claimed.
+async function confirmLaunch(
+    deps: Deps,
+    session: Session,
+    record: RunRecord,
+    entries: ReadonlyMap<string, LookupEntry>,
+    hooks?: DispatchHooks
+) {
     try {
         hooks?.beforeGo?.(record.runId);
-        if (!claimLaunch(session.stateDir, record.runId, 'go')) {
+        if (claimLaunch(session.stateDir, record.runId, 'go')) {
+            logBatch(deps, session, record, entries);
+        } else {
             deps.log.warn(`launch cancelled for run ${record.runId}`);
             mergeRecord(session.stateDir, record.runId, { reason: 'launch-cancelled' });
         }
@@ -417,6 +445,7 @@ export async function dispatch(
     const runId = runIdFor(deps.nowSeconds(), first.entry.dbId);
     const progress = newProgress();
     let record: RunRecord;
+    const entries = entryMap(candidates.map((candidate) => candidate.entry));
     try {
         if (!acquireWorktreeLock(stateDir, wtKey, runId, process.pid, deps.log, deps.nowSeconds())) {
             return result('busy');
@@ -424,9 +453,6 @@ export async function dispatch(
         const comments = candidates.map((candidate) => runComment(candidate)).filter((item) => item !== undefined);
         if (comments.length !== candidates.length) {
             throw new Error('a comment has no rocket time');
-        }
-        if (session.worktree !== undefined) {
-            await syncIgnoredLinks(deps, session.tools.git, session.worktree.source, session.worktree.path);
         }
         const guard = await runGuards(deps, session);
         if (!guard.ok) {
@@ -450,7 +476,6 @@ export async function dispatch(
         if (!(await removeRockets(deps, session, record.comments, (nodeId) => viewerRocketed.has(nodeId), progress))) {
             return result('rocketRemovalFailed', runId);
         }
-        const entries = entryMap(candidates.map((candidate) => candidate.entry));
         const start = await startWorker(deps, session, record, entries, progress);
         if (!start.started) {
             return result('abandoned', start.keptRunId);
@@ -458,7 +483,7 @@ export async function dispatch(
     } catch (error) {
         return result('abandoned', await failRun(deps, session, { wtKey, runId }, error, progress));
     }
-    await confirmLaunch(deps, session, record, hooks);
+    await confirmLaunch(deps, session, record, entries, hooks);
     return result('dispatched', runId);
 }
 
@@ -530,6 +555,7 @@ export async function resumeDispatch(
     const progress = newProgress();
     let wtKey = session.worktreeKey;
     let record: RunRecord;
+    const byId = entryMap(entries);
     try {
         const read = readRecord(stateDir, runId);
         if (read.kind !== 'ok') {
@@ -542,7 +568,6 @@ export async function resumeDispatch(
             return refusedResume(deps, stateDir, runId, record);
         }
         wtKey = record.worktreeKey;
-        const byId = entryMap(entries);
         const left = record.comments.filter((comment) => byId.has(comment.nodeId));
         const gone = record.comments.filter((comment) => !byId.has(comment.nodeId));
         if (gone.length > 0) {
@@ -565,6 +590,6 @@ export async function resumeDispatch(
     } catch (error) {
         return { outcome: 'abandoned', runId: await failRun(deps, session, { wtKey, runId }, error, progress) };
     }
-    await confirmLaunch(deps, session, record);
+    await confirmLaunch(deps, session, record, byId);
     return { outcome: 'dispatched', runId };
 }

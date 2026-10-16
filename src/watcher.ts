@@ -1,4 +1,5 @@
 import { approvalFloors, lookupApproved } from './approval.ts';
+import { noteOffline, noteOnline, offlineCheckSeconds, probeGitHub, type ConnectivityContext } from './connectivity.ts';
 import { DEFAULT_RATE_RESERVE, DEFAULT_READY_WAIT, DEFAULT_RUN_CHECK, ENV_NAMES } from './constants.ts';
 import { dispatch, resumeDispatch, retryLockRelease, type DispatchResult } from './dispatch.ts';
 import { sessionGh } from './gh.ts';
@@ -6,6 +7,7 @@ import { react, type ReactOutcome } from './githubLookup.ts';
 import { pollPr } from './githubPoll.ts';
 import { launchReady, readLaunchResult, writeLaunchResult } from './launchChannel.ts';
 import { acquirePrLock, releasePrLock } from './locks.ts';
+import { toned } from './logParts.ts';
 import { nextDelay } from './pacing.ts';
 import { preflight } from './preflight.ts';
 import { processStart } from './proc.ts';
@@ -35,6 +37,7 @@ import type {
     GhFailure,
     LaunchResult,
     Logger,
+    LogPart,
     LookupEntry,
     LookupResult,
     PollResult,
@@ -46,7 +49,6 @@ import type {
 } from './types.ts';
 import { visibleText } from './untrustedText.ts';
 import { readEnvSeconds, safeText } from './validate.ts';
-import { removeWatchWorktree } from './watchWorktree.ts';
 
 type TickOutcome = 'ok' | 'transient' | 'fatal' | 'prClosed' | 'stopped';
 
@@ -59,10 +61,14 @@ type StatusFields = Pick<WatcherStatus, 'state' | 'reason' | 'hint'>;
 // confirmed, so its retry keeps the reason. waiting is the approved queue last seen while a run was retained, dropped
 // for good once the PR is closed. notice is the owner notice schedule of the retained run; recoveryProblem is what
 // reconcile found wrong with the adopted run, shown until that run is cleared. None of the three is ever stored.
+// offlineSince is set while GitHub cannot be reached (connectivity.ts); errorShown says the status holds the error
+// of a failed request, cleared by the next tick whose requests succeed.
 interface WatcherRuntime {
     inflightRunId: string | undefined;
     lastPollAt: number | undefined;
     failures: number;
+    offlineSince: number | undefined;
+    errorShown: boolean;
     rate: RateInfo;
     lastTickAt: number | undefined;
     lastTickMono: number | undefined;
@@ -134,6 +140,8 @@ export function createRuntime(launchToken: string, windowId: string): WatcherRun
         inflightRunId: undefined,
         lastPollAt: undefined,
         failures: 0,
+        offlineSince: undefined,
+        errorShown: false,
         rate: { remaining: undefined, resetAt: undefined },
         lastTickAt: undefined,
         lastTickMono: undefined,
@@ -297,7 +305,19 @@ function hostSuspended(rt: WatcherRuntime, wallNow: number): boolean {
     return wallNow - rt.lastTickAt - monoSeconds > SUSPEND_MARGIN_SECONDS;
 }
 
-// An abort makes the in-flight command fail, so the abort is checked first: nothing is counted or written then.
+function connectivityContext(deps: Deps, session: Session): ConnectivityContext {
+    return {
+        log: deps.log,
+        env: deps.env,
+        nowSeconds: deps.nowSeconds(),
+        setStatus: (patch) => {
+            setStatus(deps, session, patch);
+        },
+    };
+}
+
+// An abort makes the in-flight command fail, so the abort is checked first: nothing is counted or written then. An
+// offline failure is reported once (connectivity.ts) and never counted for the backoff.
 function failedFetch(
     deps: Deps,
     session: Session,
@@ -316,6 +336,11 @@ function failedFetch(
         rt.endMessage = message;
         return 'fatal';
     }
+    rt.errorShown = true;
+    if (failure.kind === 'transient' && failure.offline === true) {
+        noteOffline(connectivityContext(deps, session), rt, failure.message);
+        return 'transient';
+    }
     storeRate(rt, failure.rate);
     if (!suspended) {
         rt.failures += 1;
@@ -323,6 +348,33 @@ function failedFetch(
     deps.log.warn(`GitHub request failed, backing off: ${message}`);
     setStatus(deps, session, { state: 'backing_off', lastError: message });
     return 'transient';
+}
+
+// Every GitHub request of the tick succeeded: the backoff ends, and the error of an earlier failure leaves the status.
+function requestsSucceeded(deps: Deps, session: Session, rt: WatcherRuntime): void {
+    if (rt.failures > 0 || rt.errorShown) {
+        deps.log.info([toned('ok', 'GitHub requests work again'), '; watching resumed']);
+    }
+    rt.failures = 0;
+    if (rt.errorShown) {
+        rt.errorShown = false;
+        setStatus(deps, session, { lastError: '' });
+    }
+}
+
+// While offline, a tick only probes GitHub; once the probe gets through, the normal tick follows in the same call.
+// A stop kills the probe, and that failure says nothing about the network, so it never counts as being back online.
+async function stillOffline(deps: Deps, session: Session, rt: WatcherRuntime, stop: AbortSignal): Promise<boolean> {
+    if (rt.offlineSince === undefined) {
+        return false;
+    }
+    const answer = await probeGitHub(deps, sessionGh(session));
+    if (answer === 'offline' || stop.aborted) {
+        return true;
+    }
+    noteOnline(connectivityContext(deps, session), rt);
+    rt.errorShown = false;
+    return false;
 }
 
 function noteInflight(session: Session, runId: string): Inflight {
@@ -352,11 +404,17 @@ function reactDetail(outcome: Exclude<ReactOutcome, { kind: 'ok' }>): string {
 // instead: an older -1 is removed first, since adding a reaction the viewer already has keeps its old time.
 async function refuseEdited(deps: Deps, session: Session, entry: LookupEntry): Promise<void> {
     const gh = sessionGh(session);
-    const prefix = `comment ${entry.dbId} was edited after approval`;
+    const prefix: LogPart[] = [
+        `comment ${entry.dbId} by `,
+        toned('author', `@${visibleText(entry.author)}`),
+        ' was edited after approval (',
+        toned('link', visibleText(entry.url)),
+        ')',
+    ];
     if (entry.viewerRocketAt !== undefined) {
         const removed = await react(deps, gh, 'remove', entry.nodeId, 'ROCKET');
         if (removed.kind !== 'ok') {
-            deps.log.warn(`${prefix}; its rocket removal failed: ${reactDetail(removed)}`);
+            deps.log.warn([...prefix, `; its rocket removal failed: ${reactDetail(removed)}`]);
             return;
         }
     }
@@ -366,11 +424,11 @@ async function refuseEdited(deps: Deps, session: Session, entry: LookupEntry): P
         }
         const added = await react(deps, gh, 'add', entry.nodeId, 'THUMBS_DOWN');
         if (added.kind !== 'ok') {
-            deps.log.warn(`${prefix}; its THUMBS_DOWN add failed: ${reactDetail(added)}`);
+            deps.log.warn([...prefix, `; its THUMBS_DOWN add failed: ${reactDetail(added)}`]);
             return;
         }
     }
-    deps.log.info(`${prefix}; add the rocket again to approve the new text`);
+    deps.log.info([...prefix, '; add the rocket again to approve the new text']);
 }
 
 async function resumeInflight(
@@ -432,7 +490,7 @@ async function evaluateInflight(
     }
     const previous = readStatus(session.stateDir, session.pr.prKey);
     if (result.state === 'deferred' && previous?.reason !== reason) {
-        deps.log.info(`run ${safeText(runId)} deferred: ${reason}`);
+        deps.log.info([toned('run', `run ${safeText(runId)}`), ` deferred: ${reason}`]);
     }
     if (result.state === 'retained' && (await showRetained(deps, session, rt, runId))) {
         return { kind: 'kept' };
@@ -606,7 +664,7 @@ async function pollTick(
         lookup = looked.result;
         storeRate(rt, lookup.rate);
     }
-    rt.failures = 0;
+    requestsSucceeded(deps, session, rt);
     rt.lastPollAt = deps.nowSeconds();
     if (stop.aborted) {
         return 'stopped';
@@ -657,6 +715,13 @@ export async function watchTick(
     if (stop.aborted) {
         return 'stopped';
     }
+    const offline = await stillOffline(deps, session, rt, stop);
+    if (stop.aborted) {
+        return 'stopped';
+    }
+    if (offline) {
+        return 'transient';
+    }
     const ctx: TickContext = { stop, suspended: hostSuspended(rt, deps.nowSeconds()) };
     retryPendingLock(deps, session, rt);
     const inflight = rt.inflightRunId === undefined ? undefined : noteInflight(session, rt.inflightRunId);
@@ -677,7 +742,7 @@ export async function watchTick(
             if (rt.closedPrState === undefined && pollDue(deps, session, rt)) {
                 return await pollTick(deps, session, rt, { inflight, idleReason: '' }, ctx);
             }
-            rt.failures = 0;
+            requestsSucceeded(deps, session, rt);
             return 'ok';
         }
         case 'cleared': {
@@ -694,11 +759,7 @@ function resetLabel(resetAt: number | undefined): string {
     return resetAt === undefined ? 'unknown' : new Date(resetAt * 1000).toISOString();
 }
 
-// Runs only after an ok or transient tick, so throttled never overwrites fatal or exited; a throttled status keeps the
-// tick's reason and hint. While a run is in flight the next tick comes after PRWC_RUN_CHECK seconds (or --interval,
-// when that is shorter), so its end is seen soon without polling the PR more often.
-export function applyPacing(deps: Deps, session: Session, rt: WatcherRuntime): number {
-    const now = deps.nowSeconds();
+function onlineDelay(deps: Deps, session: Session, rt: WatcherRuntime, now: number): number {
     const reserve = readEnvSeconds(deps.env, ENV_NAMES.rateReserve, DEFAULT_RATE_RESERVE);
     const runCheck = readEnvSeconds(deps.env, ENV_NAMES.runCheck, DEFAULT_RUN_CHECK);
     const base = rt.inflightRunId === undefined ? session.interval : Math.min(session.interval, runCheck);
@@ -707,9 +768,20 @@ export function applyPacing(deps: Deps, session: Session, rt: WatcherRuntime): n
         deps.log.warn(`throttled until ${resetLabel(rt.rate.resetAt)}`);
         setStatus(deps, session, { state: 'throttled' });
     }
+    return step.delaySeconds;
+}
+
+// Runs only after an ok or transient tick, so throttled never overwrites fatal or exited; a throttled status keeps the
+// tick's reason and hint. While a run is in flight the next tick comes after PRWC_RUN_CHECK seconds (or --interval,
+// when that is shorter), so its end is seen soon without polling the PR more often. While GitHub cannot be reached
+// the next check comes after PRWC_OFFLINE_CHECK seconds, whatever the backoff or the rate budget says.
+export function applyPacing(deps: Deps, session: Session, rt: WatcherRuntime): number {
+    const now = deps.nowSeconds();
+    const delaySeconds =
+        rt.offlineSince === undefined ? onlineDelay(deps, session, rt, now) : offlineCheckSeconds(deps.env);
     rt.lastTickAt = now;
     rt.lastTickMono = rt.monotonicMs();
-    return step.delaySeconds;
+    return delaySeconds;
 }
 
 function launchTokenOf(env: Env): string {
@@ -771,7 +843,6 @@ async function watchLoop(deps: Deps, session: Session, rt: WatcherRuntime, stop:
             }
             case 'prClosed': {
                 publishLaunch(deps.log, stateDir, pr.prKey, rt, 'fatal', rt.endMessage);
-                await removeWatchWorktree(deps, session);
                 return 0;
             }
             case 'stopped': {
@@ -810,9 +881,8 @@ function releaseOwnLock(deps: Deps, session: Session): void {
 // Without these lines a watcher pane stays empty until the first event, which looks like a hung start.
 function announceStart(deps: Deps, session: Session): void {
     const { pr } = session;
-    const mode = session.worktree === undefined ? 'in place' : 'watch worktree';
-    deps.log.info(`watching ${pr.prUrl}`);
-    deps.log.info(`working tree: ${safeText(session.dirCanon)} (${mode})`);
+    deps.log.info(['watching ', toned('link', pr.prUrl)]);
+    deps.log.info(['working tree: ', toned('path', safeText(session.dirCanon))]);
     deps.log.info(
         `polling every ${session.interval} s; approve an inline review comment with a rocket reaction to hand it to Claude`
     );

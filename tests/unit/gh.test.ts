@@ -88,7 +88,7 @@ await describe('ghGraphql', async () => {
     await test('a non-zero exit never parses stdout', async () => {
         const fake = fakeRunner({ code: 1, stdout: '{"data":{"viewer":{"login":"me"}}}', stderr: 'connection reset' });
         const result = await ghGraphql({ runner: fake.runner }, GH, 'query X { a }', {});
-        assert.deepEqual(result, { kind: 'transient', message: 'connection reset' });
+        assert.deepEqual(result, { kind: 'transient', offline: true, message: 'connection reset' });
         assert.equal(getRecord(result, 'data'), undefined);
     });
 
@@ -127,6 +127,43 @@ await describe('classifyGhFailure', async () => {
                 "Could not resolve to a node with the global id of 'B_2'."
         );
         assert.deepEqual(gone.kind === 'gone' ? gone.ids : [], ['A_1', 'B_2']);
+    });
+
+    await test('network errors are transient and offline', () => {
+        const texts = [
+            'error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com',
+            'Post "https://api.github.com/graphql": dial tcp: lookup api.github.com: no such host',
+            'Get "https://ghe.example/api/v3/rate_limit": net/http: TLS handshake timeout',
+            'read tcp 10.0.0.2:5000->140.82.112.6:443: read: connection reset by peer',
+            'dial tcp 140.82.112.6:443: i/o timeout',
+            'connect: Network is unreachable',
+            'lookup api.github.com on 127.0.0.53:53: server misbehaving',
+            'Temporary failure in name resolution',
+            'net/http: request canceled (Client.Timeout exceeded while awaiting headers)',
+            'dial tcp 127.0.0.1:443: connect: connection refused',
+        ];
+        for (const text of texts) {
+            const failure = classifyGhFailure(text);
+            assert.ok(failure.kind === 'transient' && failure.offline === true, text);
+        }
+    });
+
+    await test('an offline text with an auth marker is offline, never auth', () => {
+        const failure = classifyGhFailure('error connecting to api.github.com\nTo authenticate, run: gh auth login');
+        assert.deepEqual(failure.kind === 'transient' ? failure.offline : undefined, true);
+    });
+
+    await test('an HTTP error is plain transient', () => {
+        assert.deepEqual(classifyGhFailure('HTTP 502: Bad Gateway'), {
+            kind: 'transient',
+            message: 'HTTP 502: Bad Gateway',
+        });
+    });
+
+    await test('a call cut off at its timeout is offline', async () => {
+        const fake = fakeRunner({ code: 143, stdout: '', stderr: '', timedOut: true });
+        const result = await ghGraphql({ runner: fake.runner }, GH, 'query X { a }', {});
+        assert.deepEqual(result, { kind: 'transient', offline: true, message: 'gh timed out' });
     });
 
     await test('trims and truncates the message', () => {

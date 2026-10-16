@@ -108,6 +108,7 @@ function superviseChild(
     const cleanups: (() => void)[] = [];
     let settled = false;
     let cancelled = false;
+    let timedOut = false;
     let killStepDone = false;
     let exitCode: number | undefined;
     let closeCode: number | undefined;
@@ -120,7 +121,7 @@ function superviseChild(
         for (const cleanup of cleanups) {
             cleanup();
         }
-        resolve(result);
+        resolve(timedOut ? { ...result, timedOut } : result);
     };
     const later = (ms: number, action: () => void): void => {
         const timer = setTimeout(action, ms);
@@ -176,7 +177,10 @@ function superviseChild(
         }
     });
 
-    later(timeoutMs, cancel);
+    later(timeoutMs, () => {
+        timedOut = !cancelled;
+        cancel();
+    });
     if (signal !== undefined) {
         const onAbort = (): void => {
             cancel();

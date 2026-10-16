@@ -1006,7 +1006,11 @@ await describe('dispatch: order of the steps', async () => {
             'PrwcAddReaction THUMBS_DOWN',
         ]);
         assert.ok(setup.deps.logLines.some((line) => line.includes('split exploded')));
-        assert.ok(setup.deps.logLines.some((line) => line.includes('comment 103 marked as failed')));
+        assert.ok(
+            setup.deps.logLines.includes(
+                'info comment by @carol marked -1 (not resolved): https://github.com/o/r/pull/12#discussion_r103'
+            )
+        );
         assert.ok(!fs.existsSync(lockDir(setup)));
         assert.deepEqual(listRunIds(setup.stateDir), []);
     });
@@ -1062,6 +1066,73 @@ await describe('dispatch: untrusted text in snapshot.md', async () => {
         assert.ok(quoted.every((line) => line.length === 0 || line.startsWith('>')));
         assert.ok(snapshot.includes(String.raw`\u001B]52;c;Zm9v\u0007`));
         assert.ok(snapshot.includes(String.raw`earlier comment by ali\u001B]52;c;Zm9v\u0007ce at`));
+        assert.deepEqual(rawControls(setup.deps.logLines.join('\n')), []);
+        const line = String.raw`info   @car\u001B]52;c;Zm9v\u0007ol on src/\u000B--- x.ts:7, approved by @reviewer: `;
+        assert.ok(
+            setup.deps.logLines.includes(`${line}https://github.com/o/r/pull/12#discussion_r103`),
+            setup.deps.logLines.join('\n')
+        );
+        const record = recordOf(setup, result.runId);
+        assert.equal(record.comments[0]?.author, String.raw`car\u001B]52;c;Zm9v\u0007ol`);
+    });
+});
+
+// A comment approved only by a collaborator, without a line: the newest counting rocket names the approver.
+function collaboratorCandidate(): Candidate {
+    const other = candidateFor(OTHER_APPROVED);
+    const entry: LookupEntry = {
+        ...other.entry,
+        rocketAt: ROCKET_AT + 5,
+        viewerRocketAt: undefined,
+        othersRocketAt: ROCKET_AT + 5,
+        rockets: [
+            { login: 'erin', at: ROCKET_AT - 5 },
+            { login: 'dave', at: ROCKET_AT + 5 },
+        ],
+        path: 'docs/readme.md',
+        line: undefined,
+    };
+    return { ...other, entry };
+}
+
+await describe('dispatch: console summary', async () => {
+    await test('a launched batch logs the run line and one line per comment', async (t) => {
+        const setup = await makeSetup(t);
+        const batch = [candidateFor(APPROVED), collaboratorCandidate()];
+        const result = await dispatch(setup.deps, setup.session, batch, POLL);
+        assert.equal(result.outcome, 'dispatched');
+        const runId = result.runId ?? '';
+        const start = setup.deps.logLines.indexOf(`info run ${runId}: Claude is fixing 2 comments`);
+        assert.ok(start !== -1, setup.deps.logLines.join('\n'));
+        assert.deepEqual(setup.deps.logLines.slice(start + 1, start + 3), [
+            'info   @carol on src/app.ts:7, approved by @reviewer: https://github.com/o/r/pull/12#discussion_r103',
+            'info   @carol on docs/readme.md, approved by @dave: https://github.com/o/r/pull/12#discussion_r901',
+        ]);
+        const record = recordOf(setup, runId);
+        assert.deepEqual(
+            record.comments.map((comment) => [comment.author, comment.path, comment.line]),
+            [
+                ['carol', 'src/app.ts', 7],
+                ['carol', 'docs/readme.md', undefined],
+            ]
+        );
+    });
+
+    await test('one comment reads in the singular', async (t) => {
+        const setup = await makeSetup(t);
+        const result = await runDispatch(setup);
+        assert.ok(setup.deps.logLines.includes(`info run ${result.runId ?? ''}: Claude is fixing 1 comment`));
+    });
+
+    await test('a cancelled launch logs no summary', async (t) => {
+        const setup = await makeSetup(t);
+        const result = await dispatch(setup.deps, setup.session, [candidateFor(APPROVED)], POLL, {
+            beforeGo: (runId) => {
+                assert.ok(claimLaunch(setup.stateDir, runId, 'cancel'));
+            },
+        });
+        assert.equal(result.outcome, 'dispatched');
+        assert.ok(!setup.deps.logLines.some((line) => line.includes('Claude is fixing')));
     });
 });
 

@@ -3,6 +3,8 @@ import path from 'node:path';
 
 import { DEFAULT_START_TIMEOUT, DEFAULT_STOP_QUIET, ENV_NAMES } from './constants.ts';
 import { releaseWorktreeLock, worktreeLockHolder } from './locks.ts';
+import { linkLine, runPart } from './logLines.ts';
+import { toned } from './logParts.ts';
 import { pidAlive, processStart } from './proc.ts';
 import { markFailed, type FailTarget } from './reactions.ts';
 import { removeRun } from './runRemoval.ts';
@@ -25,6 +27,7 @@ import type {
     EventKind,
     EventsSnapshot,
     LookupEntry,
+    LogPart,
     LookupResult,
     RunComment,
     RunDecision,
@@ -158,7 +161,7 @@ function logNewEvents(deps: Deps, stateDir: string, runId: string, events: Event
     for (const [offset, kind] of events.kinds.slice(cursor).entries()) {
         const index = cursor + offset;
         if (LOGGED_KINDS.has(kind) || (kind === 'tool' && index === firstTool)) {
-            deps.log.info(`run ${runId} event ${kind}`);
+            deps.log.info([toned('muted', `run ${runId} event ${kind}`)]);
         }
     }
     if (cursor !== events.count) {
@@ -180,7 +183,23 @@ export function failTarget(
     if ((outcome !== 'open' && outcome !== 'failed') || entry?.rocketAt !== undefined) {
         return;
     }
-    return { nodeId: comment.nodeId, dbId: comment.dbId, eyesOn: entry?.eyes ?? false };
+    return {
+        nodeId: comment.nodeId,
+        dbId: comment.dbId,
+        eyesOn: entry?.eyes ?? false,
+        url: comment.url,
+        author: comment.author ?? entry?.author,
+    };
+}
+
+// Pending failures are stored without the console fields; they come back from the run's comments.
+function storedTarget(target: FailTarget): RunFailureTarget {
+    return { nodeId: target.nodeId, dbId: target.dbId, eyesOn: target.eyesOn };
+}
+
+function labeledTarget(target: RunFailureTarget, comments: readonly RunComment[]): FailTarget {
+    const comment = comments.find((item) => item.nodeId === target.nodeId);
+    return { ...target, url: comment?.url, author: comment?.author };
 }
 
 function failTargets(states: readonly CommentState[]): FailTarget[] {
@@ -331,7 +350,7 @@ async function endExited(
     if (interrupted !== undefined) {
         return interrupted;
     }
-    deps.log.info(`run ${record.runId} exited: ${decision.reason}`);
+    deps.log.info([runPart(record.runId), ` exited: ${decision.reason}`]);
     return decision;
 }
 
@@ -346,9 +365,22 @@ export function isClearedResult(state: EvaluateState): boolean {
     return CLEARED_RESULTS.has(state);
 }
 
+function outcomePart(runId: string, outcome: RunOutcome): LogPart {
+    return toned(outcome === 'completed' ? 'ok' : 'bad', `run ${runId} ${outcome}`);
+}
+
+// Logged once, when the run settles: the outcome line, then the link of every comment of the batch.
+function logSettled(deps: Deps, record: RunRecord, outcome: RunOutcome, detail: string): void {
+    deps.log.info([outcomePart(record.runId, outcome), `: ${detail}`]);
+    for (const comment of record.comments) {
+        deps.log.info(linkLine(comment.url));
+    }
+}
+
 async function applyPendingFailures(ctx: RunContext, targets: readonly RunFailureTarget[]): Promise<boolean> {
     const { deps, session, record, stop } = ctx;
-    await markFailed(deps, session, targets, stop);
+    const labeled = targets.map((target) => labeledTarget(target, record.comments));
+    await markFailed(deps, session, labeled, stop);
     if (stop.aborted) {
         return false;
     }
@@ -387,7 +419,10 @@ async function retainRun(
         }
     }
     const settledFields = { state: 'retained', outcome: decision.state, reason: decision.reason } as const;
-    const patch = decision.state === 'failed' ? { ...settledFields, pendingFailures: [...targets] } : settledFields;
+    const patch =
+        decision.state === 'failed'
+            ? { ...settledFields, pendingFailures: targets.map((target) => storedTarget(target)) }
+            : settledFields;
     const frozen = mergeRecord(session.stateDir, record.runId, patch);
     if (frozen === undefined) {
         return deferred('record-unreadable');
@@ -403,10 +438,10 @@ async function retainRun(
         if (interrupted !== undefined) {
             return interrupted;
         }
-        deps.log.info(`run ${record.runId} ${decision.state}: owner already closed Claude`);
+        logSettled(deps, frozen, decision.state, 'owner already closed Claude');
         return decision;
     }
-    deps.log.info(`run ${record.runId} ${decision.state}: ${decision.reason}; waiting for owner to close Claude`);
+    logSettled(deps, frozen, decision.state, `${decision.reason}; waiting for owner to close Claude`);
     return { state: 'retained', reason: retainedReason(decision.state) };
 }
 
@@ -426,7 +461,7 @@ async function evaluateRetained(ctx: RunContext, outcome: RunOutcome): Promise<E
     if (interrupted !== undefined) {
         return interrupted;
     }
-    deps.log.info(`run ${record.runId} ${outcome}: owner closed Claude`);
+    deps.log.info([outcomePart(record.runId, outcome), ': owner closed Claude']);
     return { state: outcome, reason: record.reason };
 }
 
@@ -452,7 +487,7 @@ function finishAbandoned(deps: Deps, session: Session, record: RunRecord, stop: 
         return deferred('lock-release-failed');
     }
     removeRun(session.stateDir, record.runId, deps.log);
-    deps.log.info(`run ${record.runId} cleared: abandoned`);
+    deps.log.info([runPart(record.runId), ' cleared: abandoned']);
     return { state: 'exited', reason: 'abandoned' };
 }
 

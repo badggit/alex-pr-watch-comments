@@ -1,5 +1,6 @@
 import { sessionGh } from './gh.ts';
 import { react, type ReactOutcome } from './githubLookup.ts';
+import { markedFailedLine } from './logLines.ts';
 import type { Deps, Session } from './types.ts';
 import { safeText } from './validate.ts';
 
@@ -8,9 +9,12 @@ export interface ReactTarget {
     dbId: number;
 }
 
-// eyesOn: the viewer's EYES may still be on the comment, so a removal is tried first.
+// eyesOn: the viewer's EYES may still be on the comment, so a removal is tried first. url and author only name the
+// comment in the console line.
 export interface FailTarget extends ReactTarget {
     eyesOn: boolean;
+    url?: string;
+    author?: string;
 }
 
 // A call, so TypeScript does not narrow the flag across the awaits between two checks.
@@ -50,7 +54,7 @@ export async function markFailed(
         }
         const added = await react(deps, sessionGh(session), 'add', target.nodeId, 'THUMBS_DOWN');
         if (added.kind === 'ok') {
-            deps.log.info(`comment ${target.dbId} marked as failed`);
+            deps.log.info(markedFailedLine(target));
         } else {
             deps.log.warn(`could not add THUMBS_DOWN to comment ${target.dbId}: ${failureText(added)}`);
         }

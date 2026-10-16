@@ -168,6 +168,7 @@ await describe('createProcessRunner', async () => {
         const started = performance.now();
         const result = await runner.run({ file: '/bin/sleep', args: ['30'], signal: AbortSignal.timeout(200) });
         assert.equal(result.code, 143);
+        assert.equal(result.timedOut, undefined);
         assert.ok(performance.now() - started < 3000);
     });
 
@@ -286,6 +287,7 @@ await describe('createProcessRunner', async () => {
         const started = performance.now();
         const result = await runner.run({ file: '/bin/sleep', args: ['30'], timeoutMs: 500 });
         assert.equal(result.code, 143);
+        assert.equal(result.timedOut, true);
         assert.ok(performance.now() - started < 3000);
     });
 

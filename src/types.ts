@@ -11,22 +11,33 @@ export interface CommandRequest {
 }
 
 // code is the exit status, 128 plus the signal number when killed by a signal, 127 when the file could not be
-// spawned (then spawnError holds the error code text).
+// spawned (then spawnError holds the error code text). timedOut is set when the runner cancelled the command because
+// its timeout passed (not for an abort).
 export interface CommandResult {
     code: number;
     stdout: string;
     stderr: string;
     spawnError?: string;
+    timedOut?: boolean;
 }
 
 export interface CommandRunner {
     run(_request: CommandRequest): Promise<CommandResult>;
 }
 
+// How a part of a console line is highlighted when the console shows colors; the visible text never changes.
+export type LogTone = 'author' | 'link' | 'path' | 'run' | 'ok' | 'bad' | 'muted' | 'strong';
+
+export type LogPart = string | { text: string; tone: LogTone };
+
+// A plain string, or parts that a coloring logger may highlight. Only console lines take parts: status files,
+// tmux messages and stdout output always get plain strings.
+export type LogMessage = string | readonly LogPart[];
+
 export interface Logger {
-    info(_message: string): void;
-    warn(_message: string): void;
-    error(_message: string): void;
+    info(_message: LogMessage): void;
+    warn(_message: LogMessage): void;
+    error(_message: LogMessage): void;
 }
 
 // sleep resolves early (without throwing) when the signal aborts.
@@ -62,7 +73,6 @@ export interface CliOptions {
     keepPanes: number;
     batchMax: number;
     once: boolean;
-    inPlace: boolean;
     // Background start only: open a terminal tab attached to the watcher's session.
     attach: boolean;
 }
@@ -73,11 +83,12 @@ export interface RateInfo {
     resetAt: number | undefined;
 }
 
-// rate is set only by the multi-call fetchers: the rate of the last page that succeeded before the failure.
+// rate is set only by the multi-call fetchers: the rate of the last page that succeeded before the failure. offline
+// marks a transient failure that GitHub could not be reached at all (no network, DNS, a timed-out call).
 export type GhFailure =
     | { kind: 'auth'; message: string; rate?: RateInfo }
     | { kind: 'gone'; ids: string[]; message: string; rate?: RateInfo }
-    | { kind: 'transient'; message: string; rate?: RateInfo };
+    | { kind: 'transient'; message: string; rate?: RateInfo; offline?: boolean };
 
 export type GhResult = { kind: 'ok'; data: unknown } | GhFailure;
 
@@ -172,15 +183,6 @@ export interface TmuxContext {
 
 // ghEnv holds exactly two NAME=VALUE items in this order: GH_CONFIG_DIR=EFFECTIVE and GH_HOST=PR_HOST.
 // stateDir is the canonical state directory once initState accepted it.
-// The watcher's own linked worktree on the PR head branch. source is another working tree of the same repository:
-// the owner's clone, whose ignored paths are linked into the worktree; it equals path only when no other working
-// tree exists, and then nothing is linked.
-export interface WatchWorktree {
-    path: string;
-    source: string;
-}
-
-// worktree is undefined in --in-place mode, where the owner's clone is the working tree.
 export interface Session {
     pr: PrRef;
     viewer: string;
@@ -201,7 +203,6 @@ export interface Session {
     batchMax: number;
     claudeArgs: string[];
     once: boolean;
-    worktree?: WatchWorktree;
 }
 
 export type GuardResult = { ok: true; headSha: string } | { ok: false; reason: string; hint: string };
@@ -212,7 +213,8 @@ export type RunState = 'preparing' | 'running' | 'needs_attention' | 'retained' 
 export type RunOutcome = 'completed' | 'failed';
 
 // One approved comment of a run. rocketAt is its approval time, the baseline a +1 must be newer than to count
-// as done; eyesAdded says the watcher's EYES add succeeded.
+// as done; eyesAdded says the watcher's EYES add succeeded. author, path and line only feed console lines: author and
+// path are stored already escaped by visibleText, and records written before they existed lack them.
 export interface RunComment {
     nodeId: string;
     dbId: number;
@@ -221,6 +223,9 @@ export interface RunComment {
     topDbId: number;
     rocketAt: number;
     eyesAdded: boolean;
+    author?: string;
+    path?: string;
+    line?: number;
 }
 
 export interface RunFailureTarget {
@@ -275,6 +280,7 @@ export type WatcherState =
     | 'running'
     | 'needs_attention'
     | 'backing_off'
+    | 'offline'
     | 'throttled'
     | 'exited'
     | 'fatal';

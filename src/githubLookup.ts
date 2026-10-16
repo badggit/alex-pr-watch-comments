@@ -207,7 +207,7 @@ function decodeComment(
         url,
         author: getString(getRecord(node, 'author'), 'login') ?? GHOST_AUTHOR,
         path: filePath,
-        line: line !== undefined && Number.isSafeInteger(line) ? line : undefined,
+        line: line !== undefined && Number.isSafeInteger(line) && line > 0 ? line : undefined,
         body,
     };
 }

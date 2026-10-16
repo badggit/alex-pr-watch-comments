@@ -62,7 +62,7 @@ export function isSafeRunPath(value: string): boolean {
 }
 
 // A line break or another control character is unsafe to log and to write as one line.
-export function hasControlCharacter(value: string): boolean {
+function hasControlCharacter(value: string): boolean {
     for (const character of value) {
         const code = character.codePointAt(0) ?? 0;
         if (code < FIRST_PRINTABLE || code === DELETE) {

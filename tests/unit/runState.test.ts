@@ -507,6 +507,34 @@ await describe('evaluateRun decisions and effects', async () => {
         assert.equal(lockExists(fixture, SESSION_KEY), false);
         assert.equal(runExists(fixture), false);
         assert.equal(tmuxMessages(fixture).length, 0);
+        const settled = fixture.deps.logLines.indexOf(
+            `info run ${RUN_ID} completed: done; waiting for owner to close Claude`
+        );
+        assert.ok(settled !== -1, fixture.deps.logLines.join('\n'));
+        assert.equal(fixture.deps.logLines[settled + 1], `info   ${baseComment().url}`);
+        assert.equal(fixture.deps.logLines.filter((line) => line === `info   ${baseComment().url}`).length, 1);
+        assert.ok(fixture.deps.logLines.includes(`info run ${RUN_ID} completed: owner closed Claude`));
+    });
+
+    await test('a settled failed batch logs who wrote each unresolved comment and its link once', async (t) => {
+        const fixture = await newRunFixture(t);
+        const comments = [baseComment({ author: 'carol', path: 'src/app.ts', line: 7 })];
+        await seedRun(fixture, { events: SETTLED, patch: { comments } });
+        await startClaude(fixture, 'cooperative');
+        answerPaneTag(fixture);
+        fixture.fake.respond('gh', 'PrwcAddReaction', { json: { data: { addReaction: { reaction: {} } } } });
+        const url = baseComment().url;
+        await evaluate(fixture, lookupWith({ eyes: false }));
+        await evaluate(fixture, lookupWith({ eyes: false }));
+        assert.deepEqual(
+            fixture.deps.logLines.filter((line) => line.includes(url)),
+            [`info comment by @carol marked -1 (not resolved): ${url}`, `info   ${url}`]
+        );
+        assert.ok(
+            fixture.deps.logLines.includes(
+                `info run ${RUN_ID} failed: claude-took-failure-path; waiting for owner to close Claude`
+            )
+        );
     });
 
     await test('a reused claude pid is never signalled (C9)', async (t) => {

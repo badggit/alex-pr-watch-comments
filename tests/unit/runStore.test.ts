@@ -162,6 +162,37 @@ await describe('records', async () => {
         );
     });
 
+    await test('the console fields of a comment are optional, round-trip and reject bad values', async (t) => {
+        const fixture = await newFixture(t);
+        const dir = createRun(fixture.stateDir, RUN_A);
+        const sample = sampleRecord(RUN_A, PR_KEY);
+        const [comment] = sample.comments;
+        assert.ok(comment !== undefined);
+        writeRecord(fixture.stateDir, sample);
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record: sample });
+        const labeled: RunRecord = {
+            ...sample,
+            comments: [{ ...comment, author: 'carol', path: String.raw`src/a\u001B.ts`, line: 7 }],
+        };
+        writeRecord(fixture.stateDir, labeled);
+        assert.deepEqual(readRecord(fixture.stateDir, RUN_A), { kind: 'ok', record: labeled });
+        const bad: readonly Record<string, unknown>[] = [
+            { author: 7 },
+            { author: 'car\u001Bol' },
+            { path: 'src/\nx.ts' },
+            { line: 0 },
+            { line: 1.5 },
+            { line: '7' },
+        ];
+        for (const fields of bad) {
+            fs.writeFileSync(
+                path.join(dir, 'record.json'),
+                JSON.stringify({ ...sample, comments: [{ ...comment, ...fields }] })
+            );
+            assert.equal(readRecord(fixture.stateDir, RUN_A).kind, 'unreadable', JSON.stringify(fields));
+        }
+    });
+
     await test('pending failure targets round-trip only for failed comments of the same run', async (t) => {
         const fixture = await newFixture(t);
         const dir = createRun(fixture.stateDir, RUN_A);

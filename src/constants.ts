@@ -48,6 +48,12 @@ export const DEFAULT_READY_WAIT = 15;
 
 export const COMMAND_TIMEOUT_MS = 120_000;
 
+// The connectivity probe of an offline watcher must not wait the full command timeout on a dead network.
+export const PROBE_TIMEOUT_MS = 15_000;
+
+// How often an offline watcher checks whether GitHub can be reached again.
+export const DEFAULT_OFFLINE_CHECK = 30;
+
 export const KILL_GRACE_MS = 2000;
 
 export const PS_PATH = '/bin/ps';
@@ -80,6 +86,7 @@ export const ENV_NAMES = {
     stopWait: 'PRWC_STOP_WAIT',
     readyWait: 'PRWC_READY_WAIT',
     runCheck: 'PRWC_RUN_CHECK',
+    offlineCheck: 'PRWC_OFFLINE_CHECK',
 } as const;
 
 // How long a retained run waits before the owner is reminded again of approved comments or a closed PR.

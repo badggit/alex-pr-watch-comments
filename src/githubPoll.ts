@@ -266,10 +266,14 @@ async function fetchDecoded<T>(
 // A node vanishing mid-poll is transient for the poll. The failure keeps the rate of its own malformed response
 // when it had one, else the rate of the last successful call.
 function pollFailure(failure: GhFailure, previousRate: RateInfo | undefined): GhFailure {
-    const kind = failure.kind === 'auth' ? 'auth' : 'transient';
-    const { message } = failure;
     const rate = failure.rate ?? previousRate;
-    return rate === undefined ? { kind, message } : { kind, message, rate };
+    const base = rate === undefined ? { message: failure.message } : { message: failure.message, rate };
+    if (failure.kind === 'auth') {
+        return { kind: 'auth', ...base };
+    }
+    return failure.kind === 'transient' && failure.offline === true
+        ? { kind: 'transient', ...base, offline: true }
+        : { kind: 'transient', ...base };
 }
 
 function stuckFailure(operation: string, rate: RateInfo): GhFailure {
